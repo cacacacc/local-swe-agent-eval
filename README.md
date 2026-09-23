@@ -69,3 +69,19 @@ python -m scripts.run_mock \
 Each task receives an immutable directory under `runs/<instance_id>/`. A second
 run refuses to overwrite the first so an experimental trajectory cannot be
 silently lost.
+
+## Phase 3: prompt and experiment configuration
+
+Experiment behavior is defined by strict YAML files under `configs/`. Unknown
+keys, absolute paths, online formal solving, and missing task/prompt files are
+rejected before a run starts. Each validated config receives an order-independent
+SHA-256 fingerprint that is stored with run metadata.
+
+```bash
+python -m scripts.validate_config --config configs/dev.yaml
+python -m scripts.validate_config --config configs/evaluation.yaml
+```
+
+Both checked-in configurations intentionally have `configuration_frozen: false`.
+The evaluation config must be frozen only after development tasks establish the
+final model, prompt, timeout, and evaluation policy.

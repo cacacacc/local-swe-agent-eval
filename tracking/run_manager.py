@@ -146,6 +146,7 @@ class RunManager:
         agent: str,
         model: str,
         prompt: str,
+        configuration: Mapping[str, Any] | None = None,
     ) -> RunSession:
         safe_instance_id = _SAFE_PATH_COMPONENT.sub("_", task.instance_id)
         run_path = self.runs_root / safe_instance_id
@@ -171,9 +172,9 @@ class RunManager:
             "end_time": None,
             "runtime_seconds": None,
             "status": "running",
+            "configuration": dict(configuration) if configuration is not None else None,
         }
         session = RunSession(run_path, task, metadata, time.monotonic())
         session._write_json("metadata.json", metadata)
         session._write_text("prompt.txt", prompt)
         return session
-

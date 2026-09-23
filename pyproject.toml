@@ -7,7 +7,7 @@ name = "local-swe-agent-eval"
 version = "0.1.0"
 description = "A reproducible local-LLM agent evaluation pipeline for SWE-bench Verified."
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["PyYAML>=6.0"]
 
 [project.optional-dependencies]
 huggingface = ["datasets>=2.19"]
@@ -18,4 +18,4 @@ testpaths = ["tests"]
 addopts = "-ra --basetemp=.pytest-tmp"
 
 [tool.setuptools.packages.find]
-include = ["benchmark*"]
+include = ["agent*", "benchmark*", "experiment*", "scripts*", "tracking*"]

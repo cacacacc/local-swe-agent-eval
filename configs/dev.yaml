@@ -1,0 +1,35 @@
+schema_version: 1
+
+experiment:
+  name: local-qwen25-coder-7b-dev
+  phase: dev
+  random_seed: 2026
+  configuration_frozen: false
+
+dataset:
+  name: princeton-nlp/SWE-bench_Verified
+  split: test
+  tasks_file: experiments/dev_tasks.json
+
+model:
+  runtime: ollama
+  name: qwen2.5-coder:7b
+  context_length: 16384
+
+agent:
+  framework: claude-code
+  timeout_seconds: 5400
+  prompt_template: prompts/swe_agent_prompt.txt
+
+network:
+  environment_preparation: true
+  formal_solving: false
+
+evaluation:
+  max_workers: 1
+  cache_level: base
+
+storage:
+  repository_cache: repo-cache
+  workspaces: workspaces
+  runs: runs

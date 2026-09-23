@@ -51,3 +51,21 @@ print(checkout.path)
 Set `allow_network=False` during a formal offline run. Repository preparation
 will then fail rather than silently fetching missing data.
 
+## Phase 2: deterministic mock pipeline
+
+Phase 2 validates orchestration without an LLM. The mock runner creates one
+predictable repository change, records only observable events, collects a Git
+patch, and writes the complete run artifact set. It deliberately leaves
+`official_evaluation` unset because a successful agent process is not evidence
+that SWE-bench resolved the issue.
+
+```bash
+python -m scripts.run_mock \
+  --tasks tasks.jsonl \
+  --instance-id django__django-11099 \
+  --allow-network
+```
+
+Each task receives an immutable directory under `runs/<instance_id>/`. A second
+run refuses to overwrite the first so an experimental trajectory cannot be
+silently lost.

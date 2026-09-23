@@ -24,6 +24,7 @@ model:
 agent:
   framework: claude-code
   timeout_seconds: 5400
+  max_turns: 30
   prompt_template: prompts/swe_agent_prompt.txt
 
 # 只允许准备阶段联网；正式求解必须离线，避免检索现成答案。

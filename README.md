@@ -85,3 +85,46 @@ python -m scripts.validate_config --config configs/evaluation.yaml
 Both checked-in configurations intentionally have `configuration_frozen: false`.
 The evaluation config must be frozen only after development tasks establish the
 final model, prompt, timeout, and evaluation policy.
+
+## Phase 4: local Claude Code runner
+
+The real runner invokes Claude Code in non-interactive `stream-json` mode and
+routes model requests only to the loopback Ollama endpoint. It fixes the model,
+32K context assumption, 30-turn limit, and wall-clock timeout from the validated
+experiment config. User plugins, MCP servers, browser tools, cloud credentials,
+and session persistence are disabled for each run. Observable model messages and
+tool events are retained, while hidden thinking fields are removed.
+
+The proxy environment and disabled web tools provide an auditable layered egress
+restriction while preserving access to Ollama on localhost. They are not a
+kernel-level network namespace: this limitation must be disclosed in the final
+report rather than described as absolute network isolation.
+
+```bash
+python -m scripts.run_claude \
+  --config configs/dev.yaml \
+  --tasks prepared/verified_tasks.jsonl \
+  --instance-id django__django-11951 \
+  --run-id dev-001 \
+  --allow-network-preparation
+```
+
+The task snapshot must contain only `instance_id`, `repo`, `base_commit`, and
+`problem_statement`. Evaluation runs additionally refuse to start until the
+evaluation configuration is explicitly frozen.
+
+Create those snapshots during the online preparation phase:
+
+```bash
+python -m scripts.prepare_tasks \
+  --config configs/dev.yaml \
+  --output prepared/dev_tasks.jsonl
+python -m scripts.prepare_tasks \
+  --config configs/evaluation.yaml \
+  --output prepared/evaluation_tasks.jsonl
+```
+
+Each real run also records the project commit and dirty state, prompt SHA-256,
+Python/Claude/Docker versions, and the exact Ollama model digest. The normalized
+values receive a second runtime fingerprint independent of the YAML config
+fingerprint.

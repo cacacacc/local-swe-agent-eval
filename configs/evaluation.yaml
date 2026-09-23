@@ -24,6 +24,7 @@ model:
 agent:
   framework: claude-code
   timeout_seconds: 5400
+  max_turns: 30
   prompt_template: prompts/swe_agent_prompt.txt
 
 # 环境应提前准备完成；Agent 求解期间禁止访问外部网络。

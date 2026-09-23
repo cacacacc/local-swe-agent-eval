@@ -82,6 +82,8 @@ def test_mock_pipeline_writes_complete_non_evaluation_run(tmp_path) -> None:
         "run_status": "completed",
         "agent_exit_code": 0,
         "patch_generated": True,
+        "patch_line_count": 3,
+        "metrics": {},
         "official_evaluation": None,
     }
     assert "mock_agent_change.txt" in patch

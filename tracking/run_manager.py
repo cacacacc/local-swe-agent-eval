@@ -74,6 +74,7 @@ class RunSession:
         test_output: str,
         events: Sequence[Mapping[str, Any]],
         patch: str,
+        metrics: Mapping[str, Any] | None = None,
     ) -> None:
         """原子写入本次运行的最终产物，并将会话标记为完成。
 
@@ -86,7 +87,14 @@ class RunSession:
 
         end_time = _utc_now()
         runtime_seconds = round(time.monotonic() - self._started_monotonic, 6)
-        status = "completed" if exit_code == 0 else "failed"
+        # 124 沿用 GNU timeout 的约定，单独分类后才能准确计算 timeout rate。
+        status = "completed" if exit_code == 0 else "timeout" if exit_code == 124 else "failed"
+        patch_line_count = sum(
+            1
+            for line in patch.splitlines()
+            if (line.startswith("+") and not line.startswith("+++"))
+            or (line.startswith("-") and not line.startswith("---"))
+        )
 
         # 先写详细产物，再更新 metadata；这样异常时仍能保留尽可能多的证据。
         self._write_text("agent.log", agent_log)
@@ -103,6 +111,8 @@ class RunSession:
                 "run_status": status,
                 "agent_exit_code": exit_code,
                 "patch_generated": bool(patch.strip()),
+                "patch_line_count": patch_line_count,
+                "metrics": dict(metrics) if metrics is not None else {},
                 "official_evaluation": None,
             },
         )
@@ -113,6 +123,7 @@ class RunSession:
                 "runtime_seconds": runtime_seconds,
                 "status": status,
                 "event_count": len(events),
+                "metrics": dict(metrics) if metrics is not None else {},
             }
         )
         self._write_json("metadata.json", self._metadata)

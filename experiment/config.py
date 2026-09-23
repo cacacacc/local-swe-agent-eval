@@ -117,6 +117,7 @@ class AgentSettings:
 
     framework: str
     timeout_seconds: int
+    max_turns: int
     prompt_template: Path
 
 
@@ -245,7 +246,7 @@ class ExperimentConfig:
         _exact_keys(
             agent_raw,
             "agent",
-            {"framework", "timeout_seconds", "prompt_template"},
+            {"framework", "timeout_seconds", "max_turns", "prompt_template"},
         )
         framework = _string(agent_raw["framework"], "agent.framework")
         if framework != "claude-code":
@@ -255,6 +256,11 @@ class ExperimentConfig:
             timeout_seconds=_integer(
                 agent_raw["timeout_seconds"],
                 "agent.timeout_seconds",
+                minimum=1,
+            ),
+            max_turns=_integer(
+                agent_raw["max_turns"],
+                "agent.max_turns",
                 minimum=1,
             ),
             prompt_template=_relative_path(
@@ -386,6 +392,7 @@ class ExperimentConfig:
             "context_length": self.model.context_length,
             "agent_framework": self.agent.framework,
             "timeout_seconds": self.agent.timeout_seconds,
+            "max_turns": self.agent.max_turns,
             "network_during_solving": self.network.formal_solving,
             "evaluation_max_workers": self.evaluation.max_workers,
             "evaluation_cache_level": self.evaluation.cache_level,

@@ -1,4 +1,8 @@
-"""Safe, agent-facing representation of a SWE-bench task."""
+"""定义暴露给求解 Agent 的安全版 SWE-bench 任务对象。
+
+原始 SWE-bench 记录还可能包含参考补丁、隐藏测试补丁等评测专用字段。
+本模块通过显式白名单只保留求解所需的四个字段，从数据结构层面降低答案泄漏风险。
+"""
 
 from __future__ import annotations
 
@@ -8,22 +12,21 @@ from typing import Any, Mapping
 
 
 class TaskValidationError(ValueError):
-    """Raised when a dataset record cannot identify a reproducible task."""
+    """当数据记录无法唯一、可复现地描述一道任务时抛出。"""
 
 
-_REPOSITORY_PATTERN = re.compile(
-    r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
-)
+# 仓库必须采用 GitHub 的 ``owner/name`` 形式，避免任意 URL 或路径注入。
+_REPOSITORY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+# Git 支持使用短 SHA；7 到 40 位覆盖常用短 SHA 和完整 SHA-1。
 _COMMIT_PATTERN = re.compile(r"^[0-9a-fA-F]{7,40}$")
 
 
 @dataclass(frozen=True, slots=True)
 class SWEbenchTask:
-    """The minimum SWE-bench information exposed to a solving agent.
+    """允许传入求解 Agent 的最小任务表示。
 
-    Evaluation-only fields such as ``patch`` and ``test_patch`` are deliberately
-    absent. Keeping this type small makes accidental solution leakage easier to
-    detect in code review and tests.
+    ``patch``、``test_patch`` 等评测字段被刻意排除。保持数据类型足够小，
+    可以让代码审查和自动测试更容易发现意外的数据泄漏。
     """
 
     instance_id: str
@@ -32,6 +35,9 @@ class SWEbenchTask:
     problem_statement: str
 
     def __post_init__(self) -> None:
+        """在不可变 dataclass 创建后立即验证所有关键标识。"""
+
+        # 先统一检查类型和空字符串，避免后续正则匹配产生含糊错误。
         values = {
             "instance_id": self.instance_id,
             "repo": self.repo,
@@ -55,7 +61,10 @@ class SWEbenchTask:
 
     @classmethod
     def from_record(cls, record: Mapping[str, Any]) -> "SWEbenchTask":
-        """Validate a raw dataset record and copy only approved fields."""
+        """验证原始数据集记录，并且只复制白名单中的字段。
+
+        即使 ``record`` 中含有 reference patch，本方法也不会将其保存到对象中。
+        """
 
         required = (
             "instance_id",
@@ -69,10 +78,11 @@ class SWEbenchTask:
                 f"missing required field(s): {', '.join(missing)}"
             )
 
+        # 显式投影到 required 字段是防泄漏边界，不能改成 ``cls(**record)``。
         return cls(**{field: record[field] for field in required})
 
     def to_agent_payload(self) -> dict[str, str]:
-        """Return the complete and only payload permitted in agent context."""
+        """返回允许进入 Agent 上下文的完整且唯一的数据载荷。"""
 
         return {
             "instance_id": self.instance_id,
@@ -80,4 +90,3 @@ class SWEbenchTask:
             "base_commit": self.base_commit,
             "problem_statement": self.problem_statement,
         }
-

@@ -1,2 +1,1 @@
-"""Command-line entry points for local experiments."""
-
+"""本地实验命令行入口包。"""

@@ -1,34 +1,42 @@
+# 配置格式版本；解析器只接受当前明确支持的版本。
 schema_version: 1
 
+# 正式评测前必须在 Dev Set 定稿后把 configuration_frozen 改为 true。
 experiment:
   name: local-qwen25-coder-7b-evaluation
   phase: evaluation
   random_seed: 2026
   configuration_frozen: false
 
+# 正式题目清单必须预先固定，不能根据运行结果临时更换失败题目。
 dataset:
   name: princeton-nlp/SWE-bench_Verified
   split: test
   tasks_file: experiments/evaluation_tasks.json
 
+# 模型参数必须与最终报告一致；任何变更都会产生新的 fingerprint。
 model:
   runtime: ollama
   name: qwen2.5-coder:7b
   context_length: 16384
 
+# 每道题使用相同 Agent、超时和 Prompt，以控制任务间实验变量。
 agent:
   framework: claude-code
   timeout_seconds: 5400
   prompt_template: prompts/swe_agent_prompt.txt
 
+# 环境应提前准备完成；Agent 求解期间禁止访问外部网络。
 network:
   environment_preparation: true
   formal_solving: false
 
+# 并发和缓存设置会影响硬件负载，因此属于需要冻结的实验配置。
 evaluation:
   max_workers: 1
   cache_level: base
 
+# 产物与缓存使用项目相对路径，保证配置可在另一台机器复现。
 storage:
   repository_cache: repo-cache
   workspaces: workspaces

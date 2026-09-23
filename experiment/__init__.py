@@ -1,4 +1,4 @@
-"""Validated experiment configuration."""
+"""对外导出经过严格校验的实验配置类型。"""
 
 from .config import (
     AgentSettings,

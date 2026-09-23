@@ -1,34 +1,42 @@
+# 配置格式版本；解析器只接受当前明确支持的版本。
 schema_version: 1
 
+# Dev Set 用于连通性检查和调参，完成前不得将配置标记为 frozen。
 experiment:
   name: local-qwen25-coder-7b-dev
   phase: dev
   random_seed: 2026
   configuration_frozen: false
 
+# tasks_file 只保存开发题目 ID；不得包含 reference patch 或隐藏测试内容。
 dataset:
   name: princeton-nlp/SWE-bench_Verified
   split: test
   tasks_file: experiments/dev_tasks.json
 
+# Ollama 在本机运行开源模型；context_length 是单次请求的上下文上限。
 model:
   runtime: ollama
   name: qwen2.5-coder:7b
   context_length: 16384
 
+# timeout_seconds 是每道题完整 Agent 运行的墙钟时间上限。
 agent:
   framework: claude-code
   timeout_seconds: 5400
   prompt_template: prompts/swe_agent_prompt.txt
 
+# 只允许准备阶段联网；正式求解必须离线，避免检索现成答案。
 network:
   environment_preparation: true
   formal_solving: false
 
+# 单 worker 优先保证本地开发稳定；cache_level 控制 Docker 镜像复用范围。
 evaluation:
   max_workers: 1
   cache_level: base
 
+# 所有路径均相对于项目根目录，便于在轻薄本和 4070 主机之间迁移。
 storage:
   repository_cache: repo-cache
   workspaces: workspaces

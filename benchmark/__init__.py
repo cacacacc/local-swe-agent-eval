@@ -1,4 +1,4 @@
-"""SWE-bench task loading and repository preparation."""
+"""对外导出 SWE-bench 任务加载与仓库准备接口。"""
 
 from .repo_manager import PreparedRepository, RepositoryError, RepositoryManager
 from .swebench_loader import DatasetFormatError, SWEbenchLoader
@@ -13,4 +13,3 @@ __all__ = [
     "SWEbenchTask",
     "TaskValidationError",
 ]
-

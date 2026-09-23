@@ -1,4 +1,8 @@
-"""Run one deterministic mock task through the Phase 2 artifact pipeline."""
+"""通过 Phase 2 产物流水线运行一道确定性的 Mock 任务。
+
+该 CLI 用于在不启动真实 LLM 的情况下端到端验证：任务加载、仓库准备、
+Mock 修改、Git patch 收集以及运行产物持久化。
+"""
 
 from __future__ import annotations
 
@@ -13,6 +17,7 @@ from benchmark.task import SWEbenchTask
 from tracking.run_manager import RunManager
 
 
+# 固定文本让每次 Mock 运行具有相同输入，便于比较产物。
 MOCK_PROMPT = """Phase 2 mock run.
 Create one deterministic marker file and emit only observable actions.
 Do not access the network.
@@ -24,7 +29,7 @@ def run_mock_task(
     repository: Path | str,
     runs_root: Path | str,
 ) -> Path:
-    """Execute the mock runner and return its completed artifact directory."""
+    """执行 Mock Agent，并返回已经完成写入的产物目录。"""
 
     session = RunManager(runs_root).start(
         task,
@@ -37,6 +42,7 @@ def run_mock_task(
         result = MockAgentRunner().run(task, repository)
         patch = session.collect_patch(repository)
     except Exception as error:
+        # Agent 失败时仍尽量收集部分 patch，避免丢失可用于诊断的现场。
         try:
             partial_patch = session.collect_patch(repository)
         except Exception as patch_error:
@@ -76,6 +82,8 @@ def run_mock_task(
 
 
 def _load_tasks(path: Path) -> SWEbenchLoader:
+    """根据文件扩展名选择 JSON 或 JSONL 加载器。"""
+
     if path.suffix.lower() == ".jsonl":
         return SWEbenchLoader.from_jsonl(path)
     if path.suffix.lower() == ".json":
@@ -84,6 +92,8 @@ def _load_tasks(path: Path) -> SWEbenchLoader:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """声明命令行接口；路径默认值与实验配置的目录布局一致。"""
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tasks", type=Path, required=True)
     parser.add_argument("--instance-id", required=True)
@@ -99,6 +109,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    """解析参数、准备仓库、运行 Mock 流水线并打印产物路径。"""
+
     arguments = build_parser().parse_args()
     task = _load_tasks(arguments.tasks).get(arguments.instance_id)
     prepared = RepositoryManager(

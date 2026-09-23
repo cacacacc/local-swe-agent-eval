@@ -1,4 +1,8 @@
-"""A deterministic agent substitute for testing the experiment pipeline."""
+"""用于验证实验流水线的确定性 Mock Agent。
+
+Phase 2 尚未接入真实 LLM 时，使用该实现验证文件修改、事件记录、补丁收集和
+失败处理是否正确。它不模拟模型能力，也不能作为正式 SWE-bench 实验结果。
+"""
 
 from __future__ import annotations
 
@@ -11,16 +15,18 @@ from benchmark.task import SWEbenchTask
 
 
 class MockAgentError(RuntimeError):
-    """Raised when a mock run cannot safely create its deterministic change."""
+    """当 Mock Agent 无法安全地产生预定修改时抛出。"""
 
 
 def _utc_now() -> str:
+    """返回带 UTC 时区信息的 ISO 8601 时间，便于跨机器比较日志。"""
+
     return datetime.now(timezone.utc).isoformat()
 
 
 @dataclass(frozen=True, slots=True)
 class ObservableEvent:
-    """One externally observable action, never hidden model reasoning."""
+    """一条外部可观察行为，不包含模型隐藏推理或 chain-of-thought。"""
 
     sequence: int
     timestamp: str
@@ -28,6 +34,8 @@ class ObservableEvent:
     details: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
+        """转换成可直接写入 trajectory JSON 的普通字典。"""
+
         return {
             "sequence": self.sequence,
             "timestamp": self.timestamp,
@@ -38,7 +46,7 @@ class ObservableEvent:
 
 @dataclass(frozen=True, slots=True)
 class MockAgentResult:
-    """Outputs with the same broad shape expected from a real agent runner."""
+    """Mock 执行结果，其整体结构与未来真实 Agent runner 保持一致。"""
 
     exit_code: int
     agent_log: str
@@ -47,9 +55,11 @@ class MockAgentResult:
 
 
 class MockAgentRunner:
-    """Create one predictable untracked file in a prepared task repository."""
+    """在已准备的仓库中创建一个内容可预测的未跟踪文件。"""
 
     def __init__(self, output_name: str = "mock_agent_change.txt") -> None:
+        """验证输出只能是仓库根目录下的单个相对文件名。"""
+
         output_path = Path(output_name)
         if output_path.is_absolute() or len(output_path.parts) != 1:
             raise ValueError("output_name must be a single relative file name")
@@ -58,11 +68,14 @@ class MockAgentRunner:
         self.output_name = output_name
 
     def run(self, task: SWEbenchTask, repository: Path | str) -> MockAgentResult:
+        """执行一次确定性修改，并返回日志、伪测试输出和事件序列。"""
+
         repository_path = Path(repository).resolve()
         if not repository_path.is_dir():
             raise MockAgentError(f"repository does not exist: {repository_path}")
 
         output_path = repository_path / self.output_name
+        # 不覆盖已有文件，既保护用户数据，也使重复运行问题能够被及时发现。
         if output_path.exists():
             raise MockAgentError(
                 f"mock output already exists; refusing to overwrite: {output_path}"
@@ -75,6 +88,7 @@ class MockAgentRunner:
         )
         output_path.write_text(content, encoding="utf-8")
 
+        # trajectory 只记录“写文件/跑测试/退出”等可验证行为。
         events = (
             ObservableEvent(
                 sequence=1,
@@ -108,4 +122,3 @@ class MockAgentRunner:
             test_output="mock-test: passed\n",
             events=events,
         )
-

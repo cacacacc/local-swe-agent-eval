@@ -1,4 +1,8 @@
-"""Create immutable run directories and persist observable experiment data."""
+"""创建不可静默覆盖的运行目录，并持久化可观察实验数据。
+
+每次运行会保存 metadata、prompt、agent 日志、trajectory、Git patch、测试输出
+和结果摘要。这里记录的是可验证行为，不记录或推测模型隐藏思维过程。
+"""
 
 from __future__ import annotations
 
@@ -14,18 +18,21 @@ from benchmark.task import SWEbenchTask
 
 
 class RunArtifactError(RuntimeError):
-    """Raised when run artifacts cannot be created without data loss."""
+    """当运行产物无法在不丢失数据的前提下创建时抛出。"""
 
 
+# instance ID 来自外部数据集，必须先转换为安全的单层目录名。
 _SAFE_PATH_COMPONENT = re.compile(r"[^A-Za-z0-9_.-]+")
 
 
 def _utc_now() -> str:
+    """生成带时区的 UTC 时间戳，避免不同机器本地时区造成歧义。"""
+
     return datetime.now(timezone.utc).isoformat()
 
 
 class RunSession:
-    """A single task run whose directory cannot be silently reused."""
+    """单道任务的一次运行会话；完成后不可再次 finalize。"""
 
     def __init__(
         self,
@@ -34,6 +41,8 @@ class RunSession:
         metadata: dict[str, Any],
         started_monotonic: float,
     ) -> None:
+        """保存运行上下文；单调时钟专用于准确计算耗时。"""
+
         self.path = path
         self.task = task
         self._metadata = metadata
@@ -41,7 +50,11 @@ class RunSession:
         self._finished = False
 
     def collect_patch(self, repository: Path | str) -> str:
-        """Collect tracked and untracked changes as a binary-safe Git diff."""
+        """收集 tracked 与 untracked 修改，返回支持二进制文件的 Git diff。
+
+        ``git diff`` 默认不会包含未跟踪文件，因此先用 ``--intent-to-add``
+        将它们标记为“计划加入”，但不会真正创建 commit。
+        """
 
         repository_path = Path(repository).resolve()
         self._run_git(repository_path, "add", "--intent-to-add", "--all")
@@ -62,6 +75,12 @@ class RunSession:
         events: Sequence[Mapping[str, Any]],
         patch: str,
     ) -> None:
+        """原子写入本次运行的最终产物，并将会话标记为完成。
+
+        ``exit_code == 0`` 只表示 Agent 进程正常结束，不等价于 SWE-bench issue
+        已解决；官方评测结果因此保持为 ``None``，等待 harness 后续填写。
+        """
+
         if self._finished:
             raise RunArtifactError(f"run has already been finalized: {self.path}")
 
@@ -69,6 +88,7 @@ class RunSession:
         runtime_seconds = round(time.monotonic() - self._started_monotonic, 6)
         status = "completed" if exit_code == 0 else "failed"
 
+        # 先写详细产物，再更新 metadata；这样异常时仍能保留尽可能多的证据。
         self._write_text("agent.log", agent_log)
         self._write_text("test_output.log", test_output)
         self._write_text("patch.diff", patch)
@@ -99,12 +119,16 @@ class RunSession:
         self._finished = True
 
     def _write_text(self, name: str, content: str) -> None:
+        """先写同目录临时文件，再 replace，避免留下半写入文件。"""
+
         destination = self.path / name
         temporary = self.path / f".{name}.tmp"
         temporary.write_text(content, encoding="utf-8")
         temporary.replace(destination)
 
     def _write_json(self, name: str, content: Mapping[str, Any]) -> None:
+        """以稳定键顺序和 UTF-8 格式保存便于审计的 JSON。"""
+
         serialized = json.dumps(
             content,
             ensure_ascii=False,
@@ -115,6 +139,8 @@ class RunSession:
 
     @staticmethod
     def _run_git(repository: Path, *arguments: str) -> str:
+        """运行补丁收集所需的 Git 命令，并保留失败细节。"""
+
         result = subprocess.run(
             ["git", "-C", str(repository), *arguments],
             capture_output=True,
@@ -133,9 +159,11 @@ class RunSession:
 
 
 class RunManager:
-    """Start a run and establish its metadata before the agent executes."""
+    """在 Agent 执行前创建运行目录并写入初始 metadata。"""
 
     def __init__(self, runs_root: Path | str) -> None:
+        """保存解析后的运行根目录，避免后续受当前工作目录变化影响。"""
+
         self.runs_root = Path(runs_root).resolve()
 
     def start(
@@ -148,6 +176,12 @@ class RunManager:
         prompt: str,
         configuration: Mapping[str, Any] | None = None,
     ) -> RunSession:
+        """启动新会话并立即持久化 prompt 与初始元数据。
+
+        目录使用 ``exist_ok=False``：相同 instance ID 的旧结果不会被新运行
+        静默覆盖。若要重复实验，调用方必须提供新的运行根目录或 run ID。
+        """
+
         safe_instance_id = _SAFE_PATH_COMPONENT.sub("_", task.instance_id)
         run_path = self.runs_root / safe_instance_id
         try:
@@ -160,6 +194,7 @@ class RunManager:
             raise RunArtifactError(f"cannot create run directory {run_path}: {error}") from error
 
         start_time = _utc_now()
+        # 在 Agent 启动前就落盘，进程崩溃时仍能知道任务和启动配置。
         metadata = {
             "schema_version": 1,
             "instance_id": task.instance_id,

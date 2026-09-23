@@ -1,3 +1,5 @@
+"""端到端验证 Mock Agent 的产物集合、覆盖保护和失败留痕。"""
+
 import json
 from pathlib import Path
 import subprocess
@@ -11,6 +13,8 @@ from tracking.run_manager import RunArtifactError
 
 
 def run_git(path: Path, *arguments: str) -> str:
+    """测试辅助函数：在临时仓库运行 Git 并返回去除首尾空白的输出。"""
+
     result = subprocess.run(
         ["git", "-C", str(path), *arguments],
         capture_output=True,
@@ -21,6 +25,8 @@ def run_git(path: Path, *arguments: str) -> str:
 
 
 def make_repository(tmp_path: Path) -> tuple[Path, str]:
+    """创建带一个基线 commit 的最小临时 Git 仓库。"""
+
     repository = tmp_path / "repository"
     repository.mkdir()
     run_git(repository, "init")
@@ -33,6 +39,8 @@ def make_repository(tmp_path: Path) -> tuple[Path, str]:
 
 
 def make_task(commit: str) -> SWEbenchTask:
+    """创建与临时仓库基线 commit 对应的 Mock 任务。"""
+
     return SWEbenchTask(
         instance_id="example__project-456",
         repo="example/project",
@@ -42,6 +50,8 @@ def make_task(commit: str) -> SWEbenchTask:
 
 
 def test_mock_pipeline_writes_complete_non_evaluation_run(tmp_path) -> None:
+    """成功运行必须产生完整产物，但不能伪造官方评测结果。"""
+
     repository, commit = make_repository(tmp_path)
     task = make_task(commit)
 
@@ -66,6 +76,7 @@ def test_mock_pipeline_writes_complete_non_evaluation_run(tmp_path) -> None:
     assert metadata["status"] == "completed"
     assert metadata["model"] == "mock-no-llm"
     assert metadata["event_count"] == 3
+    # Agent 正常退出只代表流水线完成，official_evaluation 仍应为空。
     assert result == {
         "schema_version": 1,
         "run_status": "completed",
@@ -80,11 +91,14 @@ def test_mock_pipeline_writes_complete_non_evaluation_run(tmp_path) -> None:
         "test_run",
         "agent_exit",
     ]
+    # trajectory 只能保存可观察事件，不能记录隐藏推理文本。
     assert "reasoning" not in json.dumps(trajectory).lower()
     assert "chain_of_thought" not in json.dumps(trajectory).lower()
 
 
 def test_mock_pipeline_refuses_to_overwrite_prior_run(tmp_path) -> None:
+    """重复 run 不能覆盖第一次运行留下的证据。"""
+
     repository, commit = make_repository(tmp_path)
     task = make_task(commit)
     runs_root = tmp_path / "runs"
@@ -95,6 +109,8 @@ def test_mock_pipeline_refuses_to_overwrite_prior_run(tmp_path) -> None:
 
 
 def test_mock_pipeline_records_agent_failure(tmp_path) -> None:
+    """Agent 失败时仍需落盘 metadata、result 和错误事件。"""
+
     repository, commit = make_repository(tmp_path)
     task = make_task(commit)
     (repository / "mock_agent_change.txt").write_text(

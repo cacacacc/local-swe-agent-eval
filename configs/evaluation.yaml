@@ -5,7 +5,7 @@ schema_version: 1
 experiment:
   name: local-qwen25-coder-7b-evaluation
   phase: evaluation
-  random_seed: 2026
+  random_seed: 42
   configuration_frozen: false
 
 # 正式题目清单必须预先固定，不能根据运行结果临时更换失败题目。
@@ -18,7 +18,7 @@ dataset:
 model:
   runtime: ollama
   name: qwen2.5-coder:7b
-  context_length: 16384
+  context_length: 32768
 
 # 每道题使用相同 Agent、超时和 Prompt，以控制任务间实验变量。
 agent:
@@ -33,8 +33,8 @@ network:
 
 # 并发和缓存设置会影响硬件负载，因此属于需要冻结的实验配置。
 evaluation:
-  max_workers: 1
-  cache_level: base
+  max_workers: 2
+  cache_level: env
 
 # 产物与缓存使用项目相对路径，保证配置可在另一台机器复现。
 storage:

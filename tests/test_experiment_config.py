@@ -40,7 +40,10 @@ def test_repository_configs_are_valid_and_not_prematurely_frozen(name, phase) ->
     assert config.experiment.configuration_frozen is False
     assert config.model.name == "qwen2.5-coder:7b"
     assert config.network.formal_solving is False
-    assert config.evaluation.max_workers == 1
+    # Dev 阶段保持单 worker 便于排错；正式评测使用两个 worker，以利用 CPU 且避免 20GB WSL 内存发生过度争用。
+    expected_workers = 1 if phase == "dev" else 2
+    assert config.evaluation.max_workers == expected_workers
+    assert config.evaluation.cache_level == "env"
     assert len(config.fingerprint) == 64
     assert config.prompt_template_path.is_file()
     assert config.tasks_path.is_file()

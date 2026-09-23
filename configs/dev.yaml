@@ -5,7 +5,7 @@ schema_version: 1
 experiment:
   name: local-qwen25-coder-7b-dev
   phase: dev
-  random_seed: 2026
+  random_seed: 42
   configuration_frozen: false
 
 # tasks_file 只保存开发题目 ID；不得包含 reference patch 或隐藏测试内容。
@@ -18,7 +18,7 @@ dataset:
 model:
   runtime: ollama
   name: qwen2.5-coder:7b
-  context_length: 16384
+  context_length: 32768
 
 # timeout_seconds 是每道题完整 Agent 运行的墙钟时间上限。
 agent:
@@ -34,7 +34,7 @@ network:
 # 单 worker 优先保证本地开发稳定；cache_level 控制 Docker 镜像复用范围。
 evaluation:
   max_workers: 1
-  cache_level: base
+  cache_level: env
 
 # 所有路径均相对于项目根目录，便于在轻薄本和 4070 主机之间迁移。
 storage:

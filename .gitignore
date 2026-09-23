@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pytest-tmp/
+.ruff_cache/
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+
+# Experiment artifacts and checked-out benchmark repositories are local-only.
+runs/
+workspaces/
+repo-cache/

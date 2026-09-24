@@ -139,3 +139,17 @@ python -m scripts.import_evaluation \
   --report ~/src/SWE-bench/logs/evaluation/dev-official/results.json \
   --harness-run-id dev-official
 ```
+
+For subsequent tasks, the complete solve/evaluate/import sequence is available
+as one command. Every task still requires a new `run-id`; the script refuses to
+overwrite prior workspaces, runs, predictions, or official decisions:
+
+```bash
+python -m scripts.run_and_evaluate \
+  --config configs/dev.yaml \
+  --tasks prepared/dev_tasks.jsonl \
+  --instance-id sphinx-doc__sphinx-7440 \
+  --run-id dev-qwen35-005-20260924 \
+  --swebench-root ~/src/SWE-bench \
+  --allow-network-preparation
+```

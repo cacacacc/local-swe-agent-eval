@@ -89,6 +89,34 @@ class VisibleTestSandbox:
             f"pull it during environment preparation: docker pull {remote}"
         )
 
+    def ensure_image(self, instance_id: str, *, allow_pull: bool) -> str:
+        """复用本地镜像，或仅在明确的环境准备阶段自动拉取官方镜像。
+
+        ``allow_pull`` 必须由命令行的 ``--allow-network-preparation`` 传入；Agent
+        求解过程中只调用 ``resolve_image``，因此无法借此绕过离线实验边界。
+        """
+
+        try:
+            return self.resolve_image(instance_id)
+        except TestSandboxError:
+            if not allow_pull:
+                raise
+
+        _, remote = image_candidates(instance_id)
+        completed = subprocess.run(
+            [self.docker_executable, "pull", remote],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if completed.returncode != 0:
+            detail = completed.stderr.strip() or completed.stdout.strip() or "no output"
+            raise TestSandboxError(f"cannot pull SWE-bench image {remote}: {detail}")
+        # pull 成功后再次 inspect，避免把 Docker 的零退出码直接当作镜像可用证据。
+        return self.resolve_image(instance_id)
+
     def image_digest(self, image: str) -> str:
         """读取本地 immutable image ID，供运行 metadata 固定实际测试环境。"""
 

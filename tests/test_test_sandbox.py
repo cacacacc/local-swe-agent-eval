@@ -53,6 +53,61 @@ def test_image_digest_requires_nonempty_immutable_id(
     assert sandbox.image_digest("swebench/example:latest") == "sha256:abc123"
 
 
+def test_ensure_image_pulls_only_when_preparation_allows_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """缺失镜像只能在显式允许联网的准备阶段拉取，并在拉取后重新 inspect。"""
+
+    pulled = False
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        nonlocal pulled
+        command = [str(item) for item in command]
+        calls.append(command)
+        if command[:3] == ["docker", "image", "inspect"]:
+            is_remote = command[-1].startswith("swebench/")
+            return subprocess.CompletedProcess(
+                command,
+                0 if pulled and is_remote else 1,
+                stdout="",
+                stderr="",
+            )
+        if command[:2] == ["docker", "pull"]:
+            pulled = True
+            return subprocess.CompletedProcess(command, 0, stdout="pulled\n", stderr="")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr("agent.test_sandbox.subprocess.run", fake_run)
+    sandbox = VisibleTestSandbox(timeout_seconds=30, max_output_chars=12000)
+
+    image = sandbox.ensure_image("owner__repo-7", allow_pull=True)
+
+    assert image == "swebench/sweb.eval.x86_64.owner_1776_repo-7:latest"
+    assert sum(command[:2] == ["docker", "pull"] for command in calls) == 1
+
+
+def test_ensure_image_refuses_pull_during_offline_solving(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """未授权准备网络时，缺失镜像必须立即失败且不得执行 docker pull。"""
+
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        command = [str(item) for item in command]
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+
+    monkeypatch.setattr("agent.test_sandbox.subprocess.run", fake_run)
+    sandbox = VisibleTestSandbox(timeout_seconds=30, max_output_chars=12000)
+
+    with pytest.raises(SandboxError, match="not cached"):
+        sandbox.ensure_image("owner__repo-7", allow_pull=False)
+
+    assert not any(command[:2] == ["docker", "pull"] for command in calls)
+
+
 def test_sandbox_applies_only_current_patch_and_disables_network(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

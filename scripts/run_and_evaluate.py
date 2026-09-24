@@ -13,7 +13,7 @@ from benchmark.repo_manager import RepositoryManager
 from benchmark.swebench_loader import SWEbenchLoader
 from benchmark.task import SWEbenchTask
 from experiment.config import ExperimentConfig
-from scripts.run_claude import run_claude_task
+from scripts.run_claude import prepare_visible_test_image, run_claude_task
 from tracking.console import ConsoleReporter
 from tracking.evaluation_result import import_official_evaluation
 
@@ -175,6 +175,12 @@ def run_pipeline(arguments: argparse.Namespace) -> Path:
         f"run={arguments.run_id}  instance={task.instance_id}  model={config.model.name}",
     )
     reporter.stage(1, 4, "准备仓库并运行本地 Agent")
+    with reporter.activity("检查并按需下载 SWE-bench 测试镜像"):
+        prepare_visible_test_image(
+            task,
+            config,
+            allow_network_preparation=arguments.allow_network_preparation,
+        )
     manager = RepositoryManager(
         config.project_root / config.storage.repository_cache,
         config.project_root / config.storage.workspaces / arguments.run_id,

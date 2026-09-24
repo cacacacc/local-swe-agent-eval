@@ -20,7 +20,7 @@ from scripts.run_and_evaluate import (
     run_harness,
     write_prediction,
 )
-from scripts.run_claude import run_claude_task
+from scripts.run_claude import prepare_visible_test_image, run_claude_task
 from tracking.console import ConsoleReporter
 from tracking.evaluation_result import import_official_evaluation
 
@@ -138,6 +138,25 @@ def run_batch(arguments: argparse.Namespace) -> Path:
         raise AutomatedRunError("--harness-run-id contains unsafe characters")
 
     batch_path = config.project_root / config.storage.runs / "batches" / arguments.batch_id
+    if batch_path.exists():
+        raise AutomatedRunError(
+            f"batch directory already exists; refusing to overwrite: {batch_path}"
+        )
+
+    reporter = ConsoleReporter()
+    reporter.banner(
+        "Local SWE-bench 十题正式实验",
+        f"batch={arguments.batch_id}  tasks={len(tasks)}  model={config.model.name}",
+    )
+    # 在创建 batch 产物和运行第一个 Agent 之前一次性准备全部镜像。这样缺失镜像
+    # 只会导致环境准备失败，不会留下“前四题完成、第五码住”的半截实验。
+    with reporter.activity("预检并按需下载全部 SWE-bench 测试镜像"):
+        for task in tasks:
+            prepare_visible_test_image(
+                task,
+                config,
+                allow_network_preparation=arguments.allow_network_preparation,
+            )
     try:
         batch_path.mkdir(parents=True, exist_ok=False)
     except FileExistsError as error:
@@ -145,11 +164,6 @@ def run_batch(arguments: argparse.Namespace) -> Path:
             f"batch directory already exists; refusing to overwrite: {batch_path}"
         ) from error
 
-    reporter = ConsoleReporter()
-    reporter.banner(
-        "Local SWE-bench 十题正式实验",
-        f"batch={arguments.batch_id}  tasks={len(tasks)}  model={config.model.name}",
-    )
     manifest: dict[str, Any] = {
         "schema_version": 1,
         "batch_id": arguments.batch_id,

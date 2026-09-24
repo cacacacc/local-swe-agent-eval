@@ -113,6 +113,26 @@ def _visible_test_command(task: SWEbenchTask, config: ExperimentConfig) -> str |
     )
 
 
+def prepare_visible_test_image(
+    task: SWEbenchTask,
+    config: ExperimentConfig,
+    *,
+    allow_network_preparation: bool,
+) -> str | None:
+    """在 Agent 启动前准备测试镜像；求解阶段不得调用此下载入口。"""
+
+    if not config.agent.visible_test_sandbox:
+        return None
+    sandbox = VisibleTestSandbox(
+        timeout_seconds=config.agent.visible_test_timeout_seconds,
+        max_output_chars=config.agent.max_tool_output_chars,
+    )
+    return sandbox.ensure_image(
+        task.instance_id,
+        allow_pull=allow_network_preparation,
+    )
+
+
 def _load_tasks(path: Path) -> SWEbenchLoader:
     """按扩展名加载经过字段白名单约束的任务快照。"""
 
@@ -311,6 +331,11 @@ def main() -> int:
     prepared = manager.prepare(
         task,
         allow_network=arguments.allow_network_preparation,
+    )
+    prepare_visible_test_image(
+        task,
+        config,
+        allow_network_preparation=arguments.allow_network_preparation,
     )
     run_path = run_claude_task(
         task,

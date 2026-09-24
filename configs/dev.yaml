@@ -3,7 +3,7 @@ schema_version: 1
 
 # Dev Set 用于连通性检查和调参，完成前不得将配置标记为 frozen。
 experiment:
-  name: local-qwen25-coder-7b-dev
+  name: local-qwen35-9b-dev
   phase: dev
   random_seed: 42
   configuration_frozen: false
@@ -14,10 +14,11 @@ dataset:
   split: test
   tasks_file: experiments/dev_tasks.json
 
-# Ollama 在本机运行开源模型；context_length 是单次请求的上下文上限。
+# Ollama 在本机运行开源模型；Dev 验证已确认该模型能通过 Claude Code 产生结构化 tool_use。
+# context_length 固定为 32768，避免 Ollama 的运行时默认值变化破坏实验可复现性。
 model:
   runtime: ollama
-  name: qwen2.5-coder:7b
+  name: qwen3.5:9b
   context_length: 32768
 
 # timeout_seconds 是每道题完整 Agent 运行的墙钟时间上限。

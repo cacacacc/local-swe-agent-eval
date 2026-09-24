@@ -3,7 +3,7 @@ schema_version: 1
 
 # 正式评测前必须在 Dev Set 定稿后把 configuration_frozen 改为 true。
 experiment:
-  name: local-qwen25-coder-7b-evaluation
+  name: local-qwen35-9b-evaluation
   phase: evaluation
   random_seed: 42
   configuration_frozen: false
@@ -14,10 +14,11 @@ dataset:
   split: test
   tasks_file: experiments/evaluation_tasks.json
 
-# 模型参数必须与最终报告一致；任何变更都会产生新的 fingerprint。
+# 模型参数必须与 Dev 阶段验证通过的本地模型及最终报告一致；任何变更都会产生新的 fingerprint。
+# 这里仍保持未冻结状态，只有完成三道 Dev 题并确认协议后才能置为 true。
 model:
   runtime: ollama
-  name: qwen2.5-coder:7b
+  name: qwen3.5:9b
   context_length: 32768
 
 # 每道题使用相同 Agent、超时和 Prompt，以控制任务间实验变量。

@@ -38,7 +38,8 @@ def test_repository_configs_are_valid_and_not_prematurely_frozen(name, phase) ->
 
     assert config.experiment.phase == phase
     assert config.experiment.configuration_frozen is False
-    assert config.model.name == "qwen2.5-coder:7b"
+    # 防止配置意外退回无法产生结构化 tool_use 的旧模型。
+    assert config.model.name == "qwen3.5:9b"
     assert config.agent.max_turns == 30
     assert config.network.formal_solving is False
     # Dev 阶段保持单 worker 便于排错；正式评测使用两个 worker，以利用 CPU 且避免 20GB WSL 内存发生过度争用。

@@ -20,7 +20,7 @@ def test_finalize_classifies_timeout_and_counts_changed_lines(tmp_path: Path) ->
         task,
         phase="dev",
         agent="claude-code",
-        model="qwen2.5-coder:7b",
+        model="qwen3.5:9b",
         prompt="prompt\n",
     )
     session.finalize(

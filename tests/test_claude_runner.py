@@ -11,7 +11,7 @@ def make_runner() -> ClaudeCodeRunner:
     """构造与正式实验关键上限一致、但不会实际启动进程的 runner。"""
 
     return ClaudeCodeRunner(
-        model="qwen2.5-coder:7b",
+        model="qwen3.5:9b",
         timeout_seconds=5400,
         max_turns=30,
         context_length=32768,
@@ -25,7 +25,7 @@ def test_command_fixes_model_turn_limit_and_noninteractive_isolation() -> None:
 
     assert command[0] == "claude"
     assert command[command.index("--print") + 1] == "Solve the task"
-    assert command[command.index("--model") + 1] == "qwen2.5-coder:7b"
+    assert command[command.index("--model") + 1] == "qwen3.5:9b"
     assert command[command.index("--max-turns") + 1] == "30"
     assert "--bare" in command
     assert "--no-session-persistence" in command
@@ -62,7 +62,7 @@ def test_runner_rejects_remote_model_endpoint() -> None:
 
     with pytest.raises(ClaudeCodeError, match="local HTTP"):
         ClaudeCodeRunner(
-            model="qwen2.5-coder:7b",
+            model="qwen3.5:9b",
             timeout_seconds=10,
             max_turns=1,
             context_length=4096,

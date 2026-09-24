@@ -95,9 +95,10 @@ experiment config. User plugins, MCP servers, browser tools, cloud credentials,
 and session persistence are disabled for each run. Observable model messages and
 tool events are retained, while hidden thinking fields are removed.
 
-The proxy environment and disabled web tools provide an auditable layered egress
-restriction while preserving access to Ollama on localhost. They are not a
-kernel-level network namespace: this limitation must be disclosed in the final
+The HTTPS proxy environment and disabled web tools provide an auditable layered
+egress restriction while preserving HTTP access to Ollama on localhost. They do
+not block a program that deliberately opens a direct socket and are not a
+kernel-level network namespace. This limitation must be disclosed in the final
 report rather than described as absolute network isolation.
 
 ```bash

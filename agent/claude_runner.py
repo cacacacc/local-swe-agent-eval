@@ -135,6 +135,10 @@ class ClaudeCodeRunner:
             "AWS_ACCESS_KEY_ID",
             "AWS_SECRET_ACCESS_KEY",
             "GOOGLE_APPLICATION_CREDENTIALS",
+            "HTTP_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "all_proxy",
         ):
             environment.pop(name, None)
         environment.update(
@@ -146,14 +150,11 @@ class ClaudeCodeRunner:
                 "CLAUDE_CODE_MAX_CONTEXT_TOKENS": str(self.context_length),
                 "CLAUDE_CODE_MAX_TURNS": str(self.max_turns),
                 "MCP_CONNECTION_NONBLOCKING": "true",
-                # 代理黑洞覆盖遵守标准代理变量的 CLI；NO_PROXY 只豁免 Ollama。
-                # 这是一层可审计限制，不冒充 Linux namespace/防火墙级隔离。
-                "HTTP_PROXY": "http://127.0.0.1:9",
+                # Claude Code 2.1.280 不可靠地遵循 HTTP NO_PROXY；为保证本机
+                # Ollama 可达，只拦截通常承载 GitHub/PyPI 等访问的 HTTPS。
+                # Web 工具和云凭据另行禁用，但这仍不冒充内核防火墙级隔离。
                 "HTTPS_PROXY": "http://127.0.0.1:9",
-                "ALL_PROXY": "http://127.0.0.1:9",
-                "http_proxy": "http://127.0.0.1:9",
                 "https_proxy": "http://127.0.0.1:9",
-                "all_proxy": "http://127.0.0.1:9",
                 "NO_PROXY": "localhost,127.0.0.1,::1",
                 "no_proxy": "localhost,127.0.0.1,::1",
             }

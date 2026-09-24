@@ -42,6 +42,8 @@ def test_environment_removes_cloud_credentials_and_keeps_only_local_endpoint() -
             "PATH": "/usr/bin",
             "ANTHROPIC_API_KEY": "must-not-leak",
             "AWS_SECRET_ACCESS_KEY": "must-not-leak",
+            "HTTP_PROXY": "http://inherited.invalid:8080",
+            "ALL_PROXY": "socks5://inherited.invalid:1080",
         }
     )
 
@@ -49,6 +51,8 @@ def test_environment_removes_cloud_credentials_and_keeps_only_local_endpoint() -
     assert "AWS_SECRET_ACCESS_KEY" not in environment
     assert environment["ANTHROPIC_AUTH_TOKEN"] == "ollama"
     assert environment["ANTHROPIC_BASE_URL"] == "http://localhost:11434"
+    assert "HTTP_PROXY" not in environment
+    assert "ALL_PROXY" not in environment
     assert environment["HTTPS_PROXY"] == "http://127.0.0.1:9"
     assert environment["NO_PROXY"] == "localhost,127.0.0.1,::1"
 

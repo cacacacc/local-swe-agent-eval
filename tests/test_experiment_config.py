@@ -6,7 +6,12 @@ from pathlib import Path
 import pytest
 import yaml
 
-from agent.prompt_builder import PromptBuilder, PromptTemplateError
+from agent.prompt_builder import (
+    PromptBuilder,
+    PromptTemplateError,
+    build_implementation_phase_prompt,
+    build_verification_phase_prompt,
+)
 from benchmark.task import SWEbenchTask
 from experiment.config import ConfigurationError, ExperimentConfig
 from tracking.run_manager import RunManager
@@ -91,6 +96,55 @@ def test_evaluation_config_is_frozen_for_formal_batch() -> None:
     config = ExperimentConfig.load(PROJECT_ROOT / "configs" / "evaluation.yaml")
 
     config.require_frozen()
+
+
+def test_dev_v2_reserves_an_independent_verification_session() -> None:
+    """新架构必须保留验证 turns 和上下文护栏，同时不得修改正式基线配置。"""
+
+    config = ExperimentConfig.load(PROJECT_ROOT / "configs" / "dev_v2.yaml")
+
+    assert config.experiment.phase == "dev"
+    assert config.experiment.configuration_frozen is False
+    assert config.agent.max_turns == 40
+    assert config.agent.verification_turns == 10
+    assert config.agent.max_file_read_lines == 200
+    assert config.agent.max_tool_output_chars == 12000
+    assert config.agent.visible_test_sandbox is True
+    assert config.agent.visible_test_timeout_seconds == 900
+    baseline = ExperimentConfig.load(PROJECT_ROOT / "configs" / "evaluation.yaml")
+    assert baseline.agent.max_turns == 30
+    assert baseline.agent.verification_turns == 0
+    assert baseline.agent.visible_test_sandbox is False
+
+
+def test_phase_prompts_reanchor_task_and_enforce_delivery_boundaries() -> None:
+    """两个独立会话都必须携带原任务，且分别强调交付补丁和验证修复。"""
+
+    base = "instance_id: example__repo-1\nProblem: preserve semantics\n"
+    implementation = build_implementation_phase_prompt(
+        base,
+        implementation_turns=30,
+        verification_turns=10,
+        max_file_read_lines=200,
+        max_tool_output_chars=12000,
+        visible_test_command="python sandbox.py --",
+    )
+    verification = build_verification_phase_prompt(
+        base,
+        verification_turns=10,
+        max_file_read_lines=200,
+        max_tool_output_chars=12000,
+        visible_test_command="python sandbox.py --",
+    )
+
+    assert base.strip() in implementation
+    assert "non-empty candidate patch" in implementation
+    assert "at most 200 source lines" in implementation
+    assert "python sandbox.py --" in implementation
+    assert base.strip() in verification
+    assert "Inspect the existing git diff first" in verification
+    assert "hidden SWE-bench tests" in verification
+    assert "network-disabled visible-test" in verification
 
 
 def test_dev_config_cannot_be_used_as_formal_evaluation() -> None:

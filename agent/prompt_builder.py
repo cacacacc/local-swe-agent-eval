@@ -60,3 +60,79 @@ class PromptBuilder:
         # ``to_agent_payload`` 是唯一的数据入口，因此评测专用字段无法被替换进模板。
         rendered = self._template.substitute(task.to_agent_payload())
         return f"{rendered.rstrip()}\n"
+
+
+def build_implementation_phase_prompt(
+    base_prompt: str,
+    *,
+    implementation_turns: int,
+    verification_turns: int,
+    max_file_read_lines: int,
+    max_tool_output_chars: int,
+    visible_test_command: str | None = None,
+) -> str:
+    """为第一阶段追加明确的补丁交付点和上下文预算护栏。
+
+    Claude Code 暂不提供可靠的逐次 Read/Bash 输出硬上限，因此这里把限制写成
+    可审计的阶段协议；运行器仍通过独立第二会话硬性保留验证 turns，避免探索阶段
+    把全部预算消耗完。
+    """
+
+    sandbox_instruction = ""
+    if visible_test_command:
+        sandbox_instruction = (
+            "- Do not run project tests with the host Python environment. Use this "
+            "network-disabled visible-test prefix and append the test argv after `--`:\n"
+            f"  {visible_test_command}\n"
+        )
+    return (
+        f"{base_prompt.rstrip()}\n\n"
+        "Current phase: implementation\n"
+        f"- You have at most {implementation_turns} turns in this phase.\n"
+        "- Produce a non-empty candidate patch before this phase ends.\n"
+        "- Start with rg or another targeted search; do not dump whole large files.\n"
+        f"- Read at most {max_file_read_lines} source lines in one tool call.\n"
+        f"- Keep each command output below about {max_tool_output_chars} characters.\n"
+        "- Before assuming how an internal API works, find an existing repository usage.\n"
+        "- Write down a minimal reproduction or focused test command before editing.\n"
+        f"{sandbox_instruction}"
+        f"- A fresh verification session owns the final {verification_turns} turns, so "
+        "leave the working tree with your best concrete patch even if local dependencies "
+        "prevent tests from running.\n"
+    )
+
+
+def build_verification_phase_prompt(
+    base_prompt: str,
+    *,
+    verification_turns: int,
+    max_file_read_lines: int,
+    max_tool_output_chars: int,
+    visible_test_command: str | None = None,
+) -> str:
+    """构造独立验证会话 Prompt，并重新注入任务目标以防上下文丢失。"""
+
+    sandbox_instruction = ""
+    if visible_test_command:
+        sandbox_instruction = (
+            "- Run repository tests only through this network-disabled visible-test prefix; "
+            "append the test argv after `--`:\n"
+            f"  {visible_test_command}\n"
+        )
+    return (
+        f"{base_prompt.rstrip()}\n\n"
+        "Current phase: verification and repair\n"
+        f"- You have at most {verification_turns} turns. Do not restart broad exploration.\n"
+        "- Inspect the existing git diff first. If it is empty, create the smallest "
+        "reasonable patch immediately.\n"
+        "- Re-run the issue's minimal reproduction or the narrowest available test.\n"
+        f"{sandbox_instruction}"
+        "- Treat the actual traceback or assertion as authoritative and repair the patch.\n"
+        "- Search for an existing API usage before accepting unfamiliar calling syntax.\n"
+        f"- Read at most {max_file_read_lines} source lines in one tool call.\n"
+        f"- Keep each command output below about {max_tool_output_chars} characters; "
+        "show only the first relevant failure and a short tail.\n"
+        "- Finish only after checking git diff. A generic response or empty diff is a failure.\n"
+        "- Do not inspect or run hidden SWE-bench tests; use only repository-visible tests "
+        "and reproductions derived from the problem statement.\n"
+    )

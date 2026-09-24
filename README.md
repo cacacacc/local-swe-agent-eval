@@ -175,3 +175,48 @@ python -m scripts.run_batch \
 The batch stores its frozen task order, per-task run paths, merged predictions,
 harness log, and `resolved_count / resolved_rate` under
 `runs/batches/<batch-id>/`.
+
+## Phase 5: bounded two-session agent architecture
+
+The completed ten-task evaluation remains the immutable baseline represented by
+`configs/evaluation.yaml`. Architecture experiments use `configs/dev_v2.yaml`
+and must not replace the baseline result.
+
+Dev v2 gives the same local model a 40-turn hard limit split across two fresh
+Claude Code sessions:
+
+1. The implementation session receives 30 turns to reproduce, locate, and leave
+   a concrete candidate patch in the worktree.
+2. The verification session receives 10 reserved turns, re-reads the full task,
+   inspects the existing diff, runs a focused visible test, and repairs the
+   first observed failure.
+
+Starting a new session prevents implementation history and failed automatic
+compaction from consuming the verification context. The v2 prompt also limits
+individual source reads to 200 lines and command output to roughly 12,000
+characters. Source-read size is currently an auditable prompt constraint; the
+visible-test wrapper enforces its output limit in code.
+
+Project tests run through the cached official instance image rather than the
+orchestration repository's Python environment. The wrapper applies only the
+current Git patch to the image's `/testbed`, starts Docker with `--network none`,
+limits CPU, memory, processes, time, and output, and removes the one-shot
+container afterward. It never applies the SWE-bench hidden `test_patch` or runs
+the official evaluation script during solving. Required images must be pulled
+during environment preparation; the wrapper never pulls implicitly.
+
+An empty diff can no longer be reported as a completed agent run. The runner
+records a `patch_validation` event, per-phase metrics, test-attempt evidence,
+and Claude Code's structured terminal reason.
+
+Validate and run the new Dev architecture with a new run ID:
+
+```bash
+python -m scripts.validate_config --config configs/dev_v2.yaml
+python -m scripts.run_and_evaluate \
+  --config configs/dev_v2.yaml \
+  --tasks prepared/dev_tasks.jsonl \
+  --instance-id django__django-11951 \
+  --run-id dev-v2-django-11951-001 \
+  --swebench-root ~/src/SWE-bench
+```

@@ -4,7 +4,12 @@ import json
 
 import pytest
 
-from agent.claude_runner import ClaudeCodeError, ClaudeCodeRunner
+from agent.claude_runner import (
+    ClaudeCodeError,
+    ClaudeCodeResult,
+    ClaudeCodeRunner,
+    combine_phase_results,
+)
 
 
 def make_runner() -> ClaudeCodeRunner:
@@ -143,3 +148,77 @@ def test_summary_counts_turns_tools_and_final_usage_without_double_counting() ->
         "timed_out": False,
         "token_usage": {"input_tokens": 120, "output_tokens": 30},
     }
+
+
+def test_summary_preserves_observable_terminal_reason() -> None:
+    """终止原因必须进入结构化指标，避免分析时依赖截断后的日志文本。"""
+
+    metrics = ClaudeCodeRunner._summarize(
+        [
+            {
+                "event_type": "result",
+                "details": {
+                    "terminal_reason": "max_turns",
+                    "subtype": "error_max_turns",
+                    "num_turns": 30,
+                    "usage": {"input_tokens": 10},
+                },
+            }
+        ],
+        timed_out=False,
+    )
+
+    assert metrics["terminal_reason"] == "max_turns"
+    assert metrics["result_subtype"] == "error_max_turns"
+    assert metrics["model_turns"] == 30
+
+
+def test_combine_phase_results_uses_verification_exit_and_sums_metrics() -> None:
+    """实现阶段耗尽后，独立验证阶段仍可修复，并保留两个阶段的审计指标。"""
+
+    implementation = ClaudeCodeResult(
+        exit_code=1,
+        agent_log="implementation log\n",
+        test_output="",
+        events=({"sequence": 1, "event_type": "result", "details": {}},),
+        timed_out=False,
+        metrics={
+            "agent_turns": 30,
+            "tool_calls": 12,
+            "timed_out": False,
+            "token_usage": {"input_tokens": 100, "output_tokens": 20},
+            "terminal_reason": "max_turns",
+        },
+    )
+    verification = ClaudeCodeResult(
+        exit_code=0,
+        agent_log="verification log\n",
+        test_output="$ pytest\n1 passed\n",
+        events=({"sequence": 1, "event_type": "result", "details": {}},),
+        timed_out=False,
+        metrics={
+            "agent_turns": 5,
+            "tool_calls": 3,
+            "timed_out": False,
+            "token_usage": {"input_tokens": 40, "output_tokens": 10},
+        },
+    )
+
+    combined = combine_phase_results(
+        (("implementation", implementation), ("verification", verification))
+    )
+
+    assert combined.exit_code == 0
+    assert combined.metrics["agent_turns"] == 35
+    assert combined.metrics["tool_calls"] == 15
+    assert combined.metrics["token_usage"] == {
+        "input_tokens": 140,
+        "output_tokens": 30,
+    }
+    assert combined.metrics["phases"]["implementation"]["terminal_reason"] == "max_turns"
+    assert [event["phase"] for event in combined.events] == [
+        "implementation",
+        "implementation",
+        "verification",
+        "verification",
+    ]

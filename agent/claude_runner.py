@@ -34,6 +34,74 @@ class ClaudeCodeResult:
     metrics: dict[str, Any]
 
 
+def combine_phase_results(
+    phases: Sequence[tuple[str, ClaudeCodeResult]],
+) -> ClaudeCodeResult:
+    """合并多个独立 Claude 会话，同时保留逐阶段终止原因与用量。
+
+    最后一个验证会话决定总体 exit code；实现阶段因 turn 预算结束并不应让一个
+    后续已成功修复的运行仍被标记为失败。任何阶段的墙钟超时仍单独记录在 metrics，
+    便于分析预算是否合理。
+    """
+
+    if not phases:
+        raise ValueError("at least one Claude Code phase is required")
+
+    events: list[dict[str, Any]] = []
+    agent_logs: list[str] = []
+    test_outputs: list[str] = []
+    phase_metrics: dict[str, dict[str, Any]] = {}
+    aggregate_usage: dict[str, int] = {}
+    total_turns = 0
+    total_tool_calls = 0
+
+    for phase_name, result in phases:
+        events.append(
+            {
+                "sequence": len(events) + 1,
+                "timestamp": _utc_now(),
+                "event_type": "phase_start",
+                "phase": phase_name,
+                "details": {"phase": phase_name},
+            }
+        )
+        for event in result.events:
+            copied = dict(event)
+            copied["sequence"] = len(events) + 1
+            copied["phase"] = phase_name
+            events.append(copied)
+
+        agent_logs.append(f"===== phase: {phase_name} =====\n{result.agent_log}")
+        if result.test_output:
+            test_outputs.append(
+                f"===== phase: {phase_name} =====\n{result.test_output}"
+            )
+        phase_metrics[phase_name] = dict(result.metrics)
+        total_turns += int(result.metrics.get("agent_turns", 0))
+        total_tool_calls += int(result.metrics.get("tool_calls", 0))
+        usage = result.metrics.get("token_usage", {})
+        if isinstance(usage, Mapping):
+            for key, value in usage.items():
+                if isinstance(value, int) and not isinstance(value, bool):
+                    aggregate_usage[str(key)] = aggregate_usage.get(str(key), 0) + value
+
+    metrics: dict[str, Any] = {
+        "agent_turns": total_turns,
+        "tool_calls": total_tool_calls,
+        "timed_out": any(result.timed_out for _, result in phases),
+        "token_usage": aggregate_usage,
+        "phases": phase_metrics,
+    }
+    return ClaudeCodeResult(
+        exit_code=phases[-1][1].exit_code,
+        agent_log="\n".join(agent_logs),
+        test_output="\n".join(test_outputs),
+        events=tuple(events),
+        timed_out=bool(metrics["timed_out"]),
+        metrics=metrics,
+    )
+
+
 def _utc_now() -> str:
     """返回带时区的 UTC 时间，供轨迹事件统一使用。"""
 
@@ -234,6 +302,7 @@ class ClaudeCodeRunner:
         turns = 0
         tool_calls = 0
         usage: dict[str, int] = {}
+        terminal: dict[str, Any] = {}
         for event in events:
             event_type = event.get("event_type")
             details = event.get("details")
@@ -260,12 +329,24 @@ class ClaudeCodeRunner:
                         for key, value in raw_usage.items()
                         if isinstance(value, int) and not isinstance(value, bool)
                     }
-        return {
+                # 直接保存 Claude Code 给出的可观察终止分类，避免事后只能从
+                # agent.log 文本猜测 max_turns、blocking_limit 等根因。
+                for source_key, destination_key in (
+                    ("terminal_reason", "terminal_reason"),
+                    ("subtype", "result_subtype"),
+                    ("num_turns", "model_turns"),
+                ):
+                    value = details.get(source_key)
+                    if isinstance(value, (str, int)) and not isinstance(value, bool):
+                        terminal[destination_key] = value
+        summary = {
             "agent_turns": turns,
             "tool_calls": tool_calls,
             "timed_out": timed_out,
             "token_usage": usage,
         }
+        summary.update(terminal)
+        return summary
 
     @staticmethod
     def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
@@ -378,7 +459,14 @@ class ClaudeCodeRunner:
                 command = tool_input.get("command") if isinstance(tool_input, Mapping) else None
                 if isinstance(command, str) and any(
                     marker in command.lower()
-                    for marker in ("pytest", "unittest", "tox", "npm test", " test")
+                    for marker in (
+                        "pytest",
+                        "unittest",
+                        "tox",
+                        "npm test",
+                        " test",
+                        "run_visible_tests",
+                    )
                 ):
                     tool_id = block.get("id")
                     if isinstance(tool_id, str):

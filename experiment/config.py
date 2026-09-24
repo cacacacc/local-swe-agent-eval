@@ -48,6 +48,30 @@ def _exact_keys(
         raise ConfigurationError(f"invalid keys in {location} ({'; '.join(messages)})")
 
 
+def _required_and_optional_keys(
+    value: Mapping[str, Any],
+    location: str,
+    *,
+    required: set[str],
+    optional: set[str],
+) -> None:
+    """校验必填键与可选键，同时继续拒绝任何未知配置。
+
+    该辅助函数只用于向后兼容已经冻结的 v1 实验配置。新增的 Agent 架构参数
+    可以仅出现在后续 Dev 配置中，但拼写错误仍然必须立即失败，不能静默回退。
+    """
+
+    missing = required - set(value)
+    unknown = set(value) - required - optional
+    messages: list[str] = []
+    if missing:
+        messages.append(f"missing: {', '.join(sorted(missing))}")
+    if unknown:
+        messages.append(f"unknown: {', '.join(sorted(unknown))}")
+    if messages:
+        raise ConfigurationError(f"invalid keys in {location} ({'; '.join(messages)})")
+
+
 def _string(value: Any, location: str) -> str:
     """读取非空字符串，并移除首尾空白。"""
 
@@ -114,12 +138,17 @@ class ModelSettings:
 
 @dataclass(frozen=True, slots=True)
 class AgentSettings:
-    """Agent 框架、单题超时和固定 Prompt 模板。"""
+    """Agent 框架、单题预算、上下文护栏和固定 Prompt 模板。"""
 
     framework: str
     timeout_seconds: int
     max_turns: int
     prompt_template: Path
+    verification_turns: int
+    max_file_read_lines: int
+    max_tool_output_chars: int
+    visible_test_sandbox: bool
+    visible_test_timeout_seconds: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,10 +288,22 @@ class ExperimentConfig:
 
         # 固定 Agent 框架和 prompt 文件，确保跨任务只改变 issue 内容。
         agent_raw = _mapping(raw["agent"], "agent")
-        _exact_keys(
+        _required_and_optional_keys(
             agent_raw,
             "agent",
-            {"framework", "timeout_seconds", "max_turns", "prompt_template"},
+            required={
+                "framework",
+                "timeout_seconds",
+                "max_turns",
+                "prompt_template",
+            },
+            optional={
+                "verification_turns",
+                "max_file_read_lines",
+                "max_tool_output_chars",
+                "visible_test_sandbox",
+                "visible_test_timeout_seconds",
+            },
         )
         framework = _string(agent_raw["framework"], "agent.framework")
         if framework != "claude-code":
@@ -283,7 +324,48 @@ class ExperimentConfig:
                 agent_raw["prompt_template"],
                 "agent.prompt_template",
             ),
+            # 旧的冻结配置没有这些字段，默认值保持原来的单会话行为；只有新的
+            # Dev v2 配置显式启用双阶段运行和工具输出护栏。
+            verification_turns=_integer(
+                agent_raw.get("verification_turns", 0),
+                "agent.verification_turns",
+                minimum=0,
+            ),
+            max_file_read_lines=_integer(
+                agent_raw.get("max_file_read_lines", 0),
+                "agent.max_file_read_lines",
+                minimum=0,
+            ),
+            max_tool_output_chars=_integer(
+                agent_raw.get("max_tool_output_chars", 0),
+                "agent.max_tool_output_chars",
+                minimum=0,
+            ),
+            visible_test_sandbox=_boolean(
+                agent_raw.get("visible_test_sandbox", False),
+                "agent.visible_test_sandbox",
+            ),
+            visible_test_timeout_seconds=_integer(
+                agent_raw.get("visible_test_timeout_seconds", 0),
+                "agent.visible_test_timeout_seconds",
+                minimum=0,
+            ),
         )
+        if agent.verification_turns >= agent.max_turns:
+            raise ConfigurationError(
+                "agent.verification_turns must be smaller than agent.max_turns"
+            )
+        if agent.verification_turns and (
+            agent.max_file_read_lines <= 0 or agent.max_tool_output_chars <= 0
+        ):
+            raise ConfigurationError(
+                "phased agent requires positive max_file_read_lines and "
+                "max_tool_output_chars"
+            )
+        if agent.visible_test_sandbox and agent.visible_test_timeout_seconds <= 0:
+            raise ConfigurationError(
+                "visible test sandbox requires positive visible_test_timeout_seconds"
+            )
 
         # 环境准备可以联网下载依赖；正式求解必须离线以降低答案泄漏风险。
         network_raw = _mapping(raw["network"], "network")
@@ -410,6 +492,14 @@ class ExperimentConfig:
             "agent_framework": self.agent.framework,
             "timeout_seconds": self.agent.timeout_seconds,
             "max_turns": self.agent.max_turns,
+            "verification_turns": self.agent.verification_turns,
+            "implementation_turns": (
+                self.agent.max_turns - self.agent.verification_turns
+            ),
+            "max_file_read_lines": self.agent.max_file_read_lines,
+            "max_tool_output_chars": self.agent.max_tool_output_chars,
+            "visible_test_sandbox": self.agent.visible_test_sandbox,
+            "visible_test_timeout_seconds": self.agent.visible_test_timeout_seconds,
             "network_during_solving": self.network.formal_solving,
             "evaluation_max_workers": self.evaluation.max_workers,
             "evaluation_cache_level": self.evaluation.cache_level,

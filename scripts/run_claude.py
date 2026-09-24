@@ -7,12 +7,24 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 import re
+import shlex
+import sys
 
-from agent.claude_runner import ClaudeCodeRunner
-from agent.prompt_builder import PromptBuilder
+from agent.claude_runner import (
+    ClaudeCodeResult,
+    ClaudeCodeRunner,
+    combine_phase_results,
+)
+from agent.prompt_builder import (
+    PromptBuilder,
+    build_implementation_phase_prompt,
+    build_verification_phase_prompt,
+)
+from agent.test_sandbox import VisibleTestSandbox
 from benchmark.repo_manager import RepositoryManager
 from benchmark.swebench_loader import SWEbenchLoader
 from benchmark.task import SWEbenchTask
@@ -22,6 +34,81 @@ from tracking.run_manager import RunManager
 
 
 _SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def _runner(
+    config: ExperimentConfig,
+    *,
+    turns: int,
+    timeout_seconds: int,
+    base_url: str,
+) -> ClaudeCodeRunner:
+    """按阶段预算构造隔离的 Claude Code 进程。"""
+
+    return ClaudeCodeRunner(
+        model=config.model.name,
+        timeout_seconds=timeout_seconds,
+        max_turns=turns,
+        context_length=config.model.context_length,
+        max_output_tokens=config.model.max_output_tokens,
+        base_url=base_url,
+    )
+
+
+def _apply_patch_gate(result: ClaudeCodeResult, patch: str) -> ClaudeCodeResult:
+    """把空补丁从“正常完成”改为明确失败，并记录测试证据是否存在。
+
+    该门禁不把“运行过测试”当作成功，因为部分仓库在宿主环境没有依赖；真正的
+    resolved 状态仍只由官方 harness 决定。它只消除模型通用回复造成的假完成。
+    """
+
+    patch_generated = bool(patch.strip())
+    metrics = dict(result.metrics)
+    metrics["patch_gate"] = {
+        "patch_generated": patch_generated,
+        "test_attempted": bool(result.test_output.strip()),
+    }
+    events = list(result.events)
+    events.append(
+        {
+            "sequence": len(events) + 1,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "event_type": "patch_validation",
+            "details": metrics["patch_gate"],
+        }
+    )
+    exit_code = result.exit_code
+    if not patch_generated and exit_code == 0:
+        # 2 表示运行器的交付物门禁失败，区别于 Claude CLI 自身的退出码 1。
+        exit_code = 2
+    return replace(result, exit_code=exit_code, events=tuple(events), metrics=metrics)
+
+
+def _visible_test_command(task: SWEbenchTask, config: ExperimentConfig) -> str | None:
+    """生成写入 Prompt 的固定沙箱前缀；正式基线默认不启用。"""
+
+    if not config.agent.visible_test_sandbox:
+        return None
+    script = config.project_root / "scripts" / "run_visible_tests.py"
+    if not script.is_file():
+        raise FileNotFoundError(f"visible test runner does not exist: {script}")
+    return shlex.join(
+        [
+            sys.executable,
+            str(script),
+            "--repository",
+            ".",
+            "--instance-id",
+            task.instance_id,
+            "--base-commit",
+            task.base_commit,
+            "--timeout",
+            str(config.agent.visible_test_timeout_seconds),
+            "--max-output-chars",
+            str(config.agent.max_tool_output_chars),
+            "--",
+        ]
+    )
 
 
 def _load_tasks(path: Path) -> SWEbenchLoader:
@@ -53,6 +140,19 @@ def run_claude_task(
     ).collect()
     configuration = config.to_metadata()
     configuration["runtime"] = runtime_fingerprint
+    if config.agent.visible_test_sandbox:
+        # 在创建 Agent 进程前完成只读镜像预检；缺失镜像必须回到允许联网的环境
+        # 准备阶段处理，不能让模型在正式求解期间尝试 docker pull。
+        test_sandbox = VisibleTestSandbox(
+            timeout_seconds=config.agent.visible_test_timeout_seconds,
+            max_output_chars=config.agent.max_tool_output_chars,
+        )
+        visible_test_image = test_sandbox.resolve_image(task.instance_id)
+        configuration["visible_test_runtime"] = {
+            "image": visible_test_image,
+            "image_id": test_sandbox.image_digest(visible_test_image),
+            "network": "none",
+        }
     session = RunManager(runs_root).start(
         task,
         phase=config.experiment.phase,
@@ -61,18 +161,70 @@ def run_claude_task(
         prompt=prompt,
         configuration=configuration,
     )
-    runner = ClaudeCodeRunner(
-        model=config.model.name,
-        timeout_seconds=config.agent.timeout_seconds,
-        max_turns=config.agent.max_turns,
-        context_length=config.model.context_length,
-        max_output_tokens=config.model.max_output_tokens,
-        base_url=base_url,
-    )
-
     try:
-        result = runner.run(repository, prompt)
+        if config.agent.verification_turns:
+            implementation_turns = (
+                config.agent.max_turns - config.agent.verification_turns
+            )
+            # 墙钟时间按 turns 同比例硬切分，确保实现阶段即使卡住，也不能侵占
+            # 独立验证会话的修复时间。
+            implementation_timeout = max(
+                1,
+                config.agent.timeout_seconds
+                * implementation_turns
+                // config.agent.max_turns,
+            )
+            verification_timeout = max(
+                1,
+                config.agent.timeout_seconds - implementation_timeout,
+            )
+            visible_test_command = _visible_test_command(task, config)
+            implementation_prompt = build_implementation_phase_prompt(
+                prompt,
+                implementation_turns=implementation_turns,
+                verification_turns=config.agent.verification_turns,
+                max_file_read_lines=config.agent.max_file_read_lines,
+                max_tool_output_chars=config.agent.max_tool_output_chars,
+                visible_test_command=visible_test_command,
+            )
+            verification_prompt = build_verification_phase_prompt(
+                prompt,
+                verification_turns=config.agent.verification_turns,
+                max_file_read_lines=config.agent.max_file_read_lines,
+                max_tool_output_chars=config.agent.max_tool_output_chars,
+                visible_test_command=visible_test_command,
+            )
+            implementation_result = _runner(
+                config,
+                turns=implementation_turns,
+                timeout_seconds=implementation_timeout,
+                base_url=base_url,
+            ).run(repository, implementation_prompt)
+            # 第二会话从干净上下文开始，但直接看到第一阶段留在 worktree 的 diff；
+            # 任务正文会被重新注入，因此不依赖易失败的 auto-compact 摘要。
+            verification_result = _runner(
+                config,
+                turns=config.agent.verification_turns,
+                timeout_seconds=verification_timeout,
+                base_url=base_url,
+            ).run(repository, verification_prompt)
+            result = combine_phase_results(
+                (
+                    ("implementation", implementation_result),
+                    ("verification", verification_result),
+                )
+            )
+        else:
+            # 已冻结的正式基线配置继续走原来的单会话路径，保证历史 fingerprint
+            # 对应的实验协议不被后续架构开发悄悄改写。
+            result = _runner(
+                config,
+                turns=config.agent.max_turns,
+                timeout_seconds=config.agent.timeout_seconds,
+                base_url=base_url,
+            ).run(repository, prompt)
         patch = session.collect_patch(repository)
+        result = _apply_patch_gate(result, patch)
     except Exception as error:
         # 无论 Agent 还是 patch 收集失败，都要终结 metadata 的 running 状态，
         # 否则后续分析无法区分“仍在运行”和“基础设施异常退出”。

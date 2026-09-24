@@ -50,10 +50,12 @@ class RunSession:
         self._finished = False
 
     def collect_patch(self, repository: Path | str) -> str:
-        """收集 tracked 与 untracked 修改，返回支持二进制文件的 Git diff。
+        """收集相对任务基线的 committed、tracked 与 untracked 修改。
 
         ``git diff`` 默认不会包含未跟踪文件，因此先用 ``--intent-to-add``
-        将它们标记为“计划加入”，但不会真正创建 commit。
+        将它们标记为“计划加入”，但不会真正创建 commit。diff 必须显式以任务的
+        ``base_commit`` 为左侧基线；Agent 可能自行 commit，若只比较 working tree
+        会把已经提交的有效修复误判为空 patch。
         """
 
         repository_path = Path(repository).resolve()
@@ -63,6 +65,7 @@ class RunSession:
             "diff",
             "--binary",
             "--no-ext-diff",
+            self.task.base_commit,
             "--",
         )
 

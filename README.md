@@ -153,3 +153,25 @@ python -m scripts.run_and_evaluate \
   --swebench-root ~/src/SWE-bench \
   --allow-network-preparation
 ```
+
+Both automation commands show phase panels, task progress bars, elapsed-time
+heartbeats in an interactive terminal, the live SWE-bench harness stream, and a
+final aligned result table.
+
+After Dev is complete and `configs/evaluation.yaml` has been reviewed and frozen,
+run all ten fixed evaluation tasks with one command. Agent inference remains
+serial to protect GPU memory; the ten predictions are then evaluated together
+with the configured two Docker workers:
+
+```bash
+python -m scripts.run_batch \
+  --config configs/evaluation.yaml \
+  --tasks prepared/evaluation_tasks.jsonl \
+  --batch-id evaluation-qwen35-20260924 \
+  --swebench-root ~/src/SWE-bench \
+  --allow-network-preparation
+```
+
+The batch stores its frozen task order, per-task run paths, merged predictions,
+harness log, and `resolved_count / resolved_rate` under
+`runs/batches/<batch-id>/`.

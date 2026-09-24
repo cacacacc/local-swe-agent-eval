@@ -9,6 +9,7 @@ from benchmark.task import SWEbenchTask
 from scripts.run_and_evaluate import (
     AutomatedRunError,
     build_harness_command,
+    prediction_record,
     write_prediction,
 )
 
@@ -49,6 +50,21 @@ def test_write_prediction_rejects_empty_patch(tmp_path: Path) -> None:
         write_prediction(tmp_path, make_task(), "qwen3.5:9b")
 
 
+def test_batch_prediction_can_preserve_empty_patch(tmp_path: Path) -> None:
+    """正式批量评测必须提交空 patch，才能由 harness 计入 empty-patch rate。"""
+
+    (tmp_path / "patch.diff").write_text("", encoding="utf-8")
+
+    prediction = prediction_record(
+        tmp_path,
+        make_task(),
+        "qwen3.5:9b",
+        allow_empty=True,
+    )
+
+    assert prediction["model_patch"] == ""
+
+
 def test_harness_command_fixes_dataset_instance_resources_and_run_id() -> None:
     """harness 命令必须包含固定数据集、单题过滤、资源限制和唯一 run ID。"""
 
@@ -56,7 +72,7 @@ def test_harness_command_fixes_dataset_instance_resources_and_run_id() -> None:
         Path("/opt/swebench"),
         dataset="verified",
         prediction_path=Path("/tmp/prediction.jsonl"),
-        instance_id="owner__repo-7",
+        instance_ids=("owner__repo-7",),
         workers=2,
         timeout_seconds=1800,
         harness_run_id="evaluation-007",
@@ -68,12 +84,12 @@ def test_harness_command_fixes_dataset_instance_resources_and_run_id() -> None:
         "verified",
         "--predictions",
         "/tmp/prediction.jsonl",
-        "--instance",
-        "owner__repo-7",
         "--workers",
         "2",
         "--timeout",
         "1800",
         "--run-id",
         "evaluation-007",
+        "--instance",
+        "owner__repo-7",
     ]

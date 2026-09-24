@@ -1,12 +1,12 @@
 # 配置格式版本；解析器只接受当前明确支持的版本。
 schema_version: 1
 
-# 正式评测前必须在 Dev Set 定稿后把 configuration_frozen 改为 true。
+# 三道 Dev 题已完成并由官方 harness 判定 resolved；正式十题使用此冻结配置。
 experiment:
   name: local-qwen35-9b-evaluation
   phase: evaluation
   random_seed: 42
-  configuration_frozen: false
+  configuration_frozen: true
 
 # 正式题目清单必须预先固定，不能根据运行结果临时更换失败题目。
 dataset:
@@ -15,7 +15,7 @@ dataset:
   tasks_file: experiments/evaluation_tasks.json
 
 # 模型参数必须与 Dev 阶段验证通过的本地模型及最终报告一致；任何变更都会产生新的 fingerprint。
-# 这里仍保持未冻结状态，只有完成三道 Dev 题并确认协议后才能置为 true。
+# 三道 Dev 题完成后已冻结；正式运行期间不得再修改此模型参数组。
 # 8K 输出上限为工具结果和后续轮次保留至少 24K context，防止 auto-compact 抖动。
 model:
   runtime: ollama

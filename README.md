@@ -82,9 +82,9 @@ python -m scripts.validate_config --config configs/dev.yaml
 python -m scripts.validate_config --config configs/evaluation.yaml
 ```
 
-Both checked-in configurations intentionally have `configuration_frozen: false`.
-The evaluation config must be frozen only after development tasks establish the
-final model, prompt, timeout, and evaluation policy.
+The Dev configuration intentionally keeps `configuration_frozen: false`. The
+Evaluation configuration is frozen only after all three development tasks have
+established the final model, prompt, timeout, context, and evaluation policy.
 
 ## Phase 4: local Claude Code runner
 

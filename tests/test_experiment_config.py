@@ -28,16 +28,18 @@ def make_task() -> SWEbenchTask:
 
 
 @pytest.mark.parametrize(
-    ("name", "phase"),
-    [("dev.yaml", "dev"), ("evaluation.yaml", "evaluation")],
+    ("name", "phase", "expected_frozen"),
+    [("dev.yaml", "dev", False), ("evaluation.yaml", "evaluation", True)],
 )
-def test_repository_configs_are_valid_and_not_prematurely_frozen(name, phase) -> None:
-    """仓库自带配置必须有效，但 Dev 完成前不能提前冻结。"""
+def test_repository_configs_have_expected_freeze_state(
+    name, phase, expected_frozen
+) -> None:
+    """Dev 配置保持可调，而正式 Evaluation 配置必须在开发完成后冻结。"""
 
     config = ExperimentConfig.load(PROJECT_ROOT / "configs" / name)
 
     assert config.experiment.phase == phase
-    assert config.experiment.configuration_frozen is False
+    assert config.experiment.configuration_frozen is expected_frozen
     # 防止配置意外退回无法产生结构化 tool_use 的旧模型。
     assert config.model.name == "qwen3.5:9b"
     assert config.model.max_output_tokens == 8192
@@ -83,10 +85,18 @@ def test_config_rejects_network_during_formal_solving(tmp_path) -> None:
         destination.unlink(missing_ok=True)
 
 
-def test_evaluation_config_cannot_be_used_as_frozen_yet() -> None:
-    """未显式冻结的 evaluation 配置不能启动正式评测。"""
+def test_evaluation_config_is_frozen_for_formal_batch() -> None:
+    """完成 Dev 后，仓库中的 evaluation 配置必须允许正式十题脚本启动。"""
 
     config = ExperimentConfig.load(PROJECT_ROOT / "configs" / "evaluation.yaml")
+
+    config.require_frozen()
+
+
+def test_dev_config_cannot_be_used_as_formal_evaluation() -> None:
+    """可继续调参的 Dev 配置仍不得绕过正式评测冻结边界。"""
+
+    config = ExperimentConfig.load(PROJECT_ROOT / "configs" / "dev.yaml")
 
     with pytest.raises(ConfigurationError, match="not frozen"):
         config.require_frozen()

@@ -54,6 +54,8 @@ def combine_phase_results(
     aggregate_usage: dict[str, int] = {}
     total_turns = 0
     total_tool_calls = 0
+    total_visible_test_calls = 0
+    total_host_test_calls = 0
 
     for phase_name, result in phases:
         events.append(
@@ -79,6 +81,8 @@ def combine_phase_results(
         phase_metrics[phase_name] = dict(result.metrics)
         total_turns += int(result.metrics.get("agent_turns", 0))
         total_tool_calls += int(result.metrics.get("tool_calls", 0))
+        total_visible_test_calls += int(result.metrics.get("visible_test_calls", 0))
+        total_host_test_calls += int(result.metrics.get("host_test_calls", 0))
         usage = result.metrics.get("token_usage", {})
         if isinstance(usage, Mapping):
             for key, value in usage.items():
@@ -88,6 +92,8 @@ def combine_phase_results(
     metrics: dict[str, Any] = {
         "agent_turns": total_turns,
         "tool_calls": total_tool_calls,
+        "visible_test_calls": total_visible_test_calls,
+        "host_test_calls": total_host_test_calls,
         "timed_out": any(result.timed_out for _, result in phases),
         "token_usage": aggregate_usage,
         "phases": phase_metrics,
@@ -301,6 +307,8 @@ class ClaudeCodeRunner:
 
         turns = 0
         tool_calls = 0
+        visible_test_calls = 0
+        host_test_calls = 0
         usage: dict[str, int] = {}
         terminal: dict[str, Any] = {}
         for event in events:
@@ -314,11 +322,37 @@ class ClaudeCodeRunner:
             if isinstance(message, Mapping):
                 content = message.get("content")
                 if isinstance(content, Sequence) and not isinstance(content, (str, bytes)):
-                    tool_calls += sum(
-                        1
-                        for block in content
-                        if isinstance(block, Mapping) and block.get("type") == "tool_use"
-                    )
+                    for block in content:
+                        if not isinstance(block, Mapping) or block.get("type") != "tool_use":
+                            continue
+                        tool_calls += 1
+                        if block.get("name") != "Bash":
+                            continue
+                        tool_input = block.get("input")
+                        command = (
+                            tool_input.get("command")
+                            if isinstance(tool_input, Mapping)
+                            else None
+                        )
+                        if not isinstance(command, str):
+                            continue
+                        lowered = command.lower()
+                        if "run_visible_tests" in lowered:
+                            visible_test_calls += 1
+                        elif any(
+                            marker in lowered
+                            for marker in (
+                                "pytest",
+                                "unittest",
+                                "tox",
+                                "npm test",
+                                " test",
+                                "sphinx-build",
+                            )
+                        ):
+                            # 宿主测试与 Docker 沙箱测试必须分开计数；Dev 轨迹表明
+                            # 小模型可能忽略 Prompt，错误调用调度仓库的 Python。
+                            host_test_calls += 1
             # Claude Code 的最终 result 事件提供权威用量；只读取该事件，避免把
             # 每条 message 的增量 usage 与最终累计值重复相加。
             if event_type == "result":
@@ -342,6 +376,8 @@ class ClaudeCodeRunner:
         summary = {
             "agent_turns": turns,
             "tool_calls": tool_calls,
+            "visible_test_calls": visible_test_calls,
+            "host_test_calls": host_test_calls,
             "timed_out": timed_out,
             "token_usage": usage,
         }

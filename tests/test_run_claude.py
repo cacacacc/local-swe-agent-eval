@@ -33,6 +33,8 @@ def test_patch_gate_rejects_generic_success_with_empty_diff() -> None:
     assert validated.metrics["patch_gate"] == {
         "patch_generated": False,
         "test_attempted": False,
+        "visible_test_attempted": False,
+        "host_test_attempted": False,
     }
     assert validated.events[-1]["event_type"] == "patch_validation"
 
@@ -49,6 +51,8 @@ def test_patch_gate_records_test_evidence_without_overriding_cli_failure() -> No
     assert validated.metrics["patch_gate"] == {
         "patch_generated": True,
         "test_attempted": True,
+        "visible_test_attempted": False,
+        "host_test_attempted": False,
     }
 
 

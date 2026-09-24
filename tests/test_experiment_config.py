@@ -117,6 +117,21 @@ def test_dev_v2_reserves_an_independent_verification_session() -> None:
     assert baseline.agent.visible_test_sandbox is False
 
 
+def test_evaluation_v2_is_frozen_as_a_separate_ablation() -> None:
+    """架构 v2 十题配置必须冻结，但不得覆盖原正式基线的实验身份。"""
+
+    baseline = ExperimentConfig.load(PROJECT_ROOT / "configs" / "evaluation.yaml")
+    ablation = ExperimentConfig.load(PROJECT_ROOT / "configs" / "evaluation_v2.yaml")
+
+    ablation.require_frozen()
+    assert ablation.experiment.phase == "evaluation"
+    assert ablation.experiment.name.endswith("evaluation-v2")
+    assert ablation.fingerprint != baseline.fingerprint
+    assert ablation.agent.max_turns == 40
+    assert ablation.agent.verification_turns == 10
+    assert ablation.agent.visible_test_sandbox is True
+
+
 def test_phase_prompts_reanchor_task_and_enforce_delivery_boundaries() -> None:
     """两个独立会话都必须携带原任务，且分别强调交付补丁和验证修复。"""
 

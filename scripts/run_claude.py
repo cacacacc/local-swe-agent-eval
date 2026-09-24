@@ -67,6 +67,8 @@ def _apply_patch_gate(result: ClaudeCodeResult, patch: str) -> ClaudeCodeResult:
     metrics["patch_gate"] = {
         "patch_generated": patch_generated,
         "test_attempted": bool(result.test_output.strip()),
+        "visible_test_attempted": int(metrics.get("visible_test_calls", 0)) > 0,
+        "host_test_attempted": int(metrics.get("host_test_calls", 0)) > 0,
     }
     events = list(result.events)
     events.append(

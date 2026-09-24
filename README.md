@@ -220,3 +220,9 @@ python -m scripts.run_and_evaluate \
   --run-id dev-v2-django-11951-001 \
   --swebench-root ~/src/SWE-bench
 ```
+
+After all three Dev v2 tasks have run, `configs/evaluation_v2.yaml` freezes the
+same architecture for a ten-task ablation. Its results are reported separately
+and never replace the original `configs/evaluation.yaml` baseline. Metrics split
+`visible_test_calls` from `host_test_calls`, because prompt compliance alone is
+not a reliable sandbox boundary for a small local model.

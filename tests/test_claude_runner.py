@@ -145,6 +145,8 @@ def test_summary_counts_turns_tools_and_final_usage_without_double_counting() ->
     assert metrics == {
         "agent_turns": 1,
         "tool_calls": 1,
+        "visible_test_calls": 0,
+        "host_test_calls": 0,
         "timed_out": False,
         "token_usage": {"input_tokens": 120, "output_tokens": 30},
     }
@@ -211,6 +213,8 @@ def test_combine_phase_results_uses_verification_exit_and_sums_metrics() -> None
     assert combined.exit_code == 0
     assert combined.metrics["agent_turns"] == 35
     assert combined.metrics["tool_calls"] == 15
+    assert combined.metrics["visible_test_calls"] == 0
+    assert combined.metrics["host_test_calls"] == 0
     assert combined.metrics["token_usage"] == {
         "input_tokens": 140,
         "output_tokens": 30,
@@ -222,3 +226,34 @@ def test_combine_phase_results_uses_verification_exit_and_sums_metrics() -> None
         "verification",
         "verification",
     ]
+
+
+def test_summary_separates_visible_sandbox_from_host_tests() -> None:
+    """测试遵循率必须区分沙箱调用与错误的宿主 pytest 调用。"""
+
+    events = []
+    for command in (
+        "python scripts/run_visible_tests.py -- python -m pytest tests/test_one.py",
+        "/host/venv/bin/python -m pytest tests/test_two.py",
+    ):
+        events.append(
+            {
+                "event_type": "assistant",
+                "details": {
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "name": "Bash",
+                                "input": {"command": command},
+                            }
+                        ]
+                    }
+                },
+            }
+        )
+
+    metrics = ClaudeCodeRunner._summarize(events, timed_out=False)
+
+    assert metrics["visible_test_calls"] == 1
+    assert metrics["host_test_calls"] == 1

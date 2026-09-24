@@ -1,0 +1,46 @@
+# 架构 ablation 配置：与原 evaluation.yaml 的正式基线分开保存和报告。
+schema_version: 1
+
+# 三道 Dev v2 已全部运行，官方结果为 2 resolved / 1 unresolved；此处冻结的是
+# 调度架构而不是成功率保证。十题结果不得替换原始 20% 正式结果。
+experiment:
+  name: local-qwen35-9b-evaluation-v2
+  phase: evaluation
+  random_seed: 42
+  configuration_frozen: true
+
+dataset:
+  name: princeton-nlp/SWE-bench_Verified
+  split: test
+  tasks_file: experiments/evaluation_tasks.json
+
+# 保持模型不变，使差异主要来自 30+10 双会话和可见测试沙箱。
+model:
+  runtime: ollama
+  name: qwen3.5:9b
+  context_length: 32768
+  max_output_tokens: 8192
+
+agent:
+  framework: claude-code
+  timeout_seconds: 5400
+  max_turns: 40
+  verification_turns: 10
+  max_file_read_lines: 200
+  max_tool_output_chars: 12000
+  visible_test_sandbox: true
+  visible_test_timeout_seconds: 900
+  prompt_template: prompts/swe_agent_prompt_v2.txt
+
+network:
+  environment_preparation: true
+  formal_solving: false
+
+evaluation:
+  max_workers: 2
+  cache_level: env
+
+storage:
+  repository_cache: repo-cache
+  workspaces: workspaces
+  runs: runs

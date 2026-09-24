@@ -24,12 +24,14 @@ def test_command_fixes_model_turn_limit_and_noninteractive_isolation() -> None:
     command = make_runner().command("Solve the task")
 
     assert command[0] == "claude"
+    assert command[command.index("--print") + 1] == "Solve the task"
     assert command[command.index("--model") + 1] == "qwen2.5-coder:7b"
     assert command[command.index("--max-turns") + 1] == "30"
     assert "--bare" in command
     assert "--no-session-persistence" in command
     assert "WebFetch" in command and "WebSearch" in command
-    assert command[-1] == "Solve the task"
+    # Prompt 必须位于可变长的工具列表之前，防止被 CLI 当成规则吞掉。
+    assert command.index("Solve the task") < command.index("--disallowed-tools")
 
 
 def test_environment_removes_cloud_credentials_and_keeps_only_local_endpoint() -> None:

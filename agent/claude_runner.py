@@ -104,6 +104,9 @@ class ClaudeCodeRunner:
         return [
             self.executable,
             "--print",
+            # prompt 紧跟固定元数参数，不能放在可变长的 --disallowed-tools
+            # 参数之后，否则 CLI 解析器可能把题目文本误当成另一个工具规则。
+            prompt,
             "--bare",
             "--verbose",
             "--output-format",
@@ -120,7 +123,6 @@ class ClaudeCodeRunner:
             "--disallowed-tools",
             "WebFetch",
             "WebSearch",
-            prompt,
         ]
 
     def environment(self, source: Mapping[str, str] | None = None) -> dict[str, str]:

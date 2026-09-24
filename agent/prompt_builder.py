@@ -90,6 +90,7 @@ def build_implementation_phase_prompt(
         "Current phase: implementation\n"
         f"- You have at most {implementation_turns} turns in this phase.\n"
         "- Produce a non-empty candidate patch before this phase ends.\n"
+        "- Do not create a Git commit; leave the candidate change in the working tree.\n"
         "- Start with rg or another targeted search; do not dump whole large files.\n"
         f"- Read at most {max_file_read_lines} source lines in one tool call.\n"
         f"- Keep each command output below about {max_tool_output_chars} characters.\n"
@@ -109,6 +110,7 @@ def build_verification_phase_prompt(
     max_file_read_lines: int,
     max_tool_output_chars: int,
     visible_test_command: str | None = None,
+    candidate_patch: str = "",
 ) -> str:
     """构造独立验证会话 Prompt，并重新注入任务目标以防上下文丢失。"""
 
@@ -119,20 +121,31 @@ def build_verification_phase_prompt(
             "append the test argv after `--`:\n"
             f"  {visible_test_command}\n"
         )
+    patch_block = (
+        "Candidate patch collected relative to the task base commit\n"
+        "<candidate_patch>\n"
+        f"{candidate_patch.rstrip()}\n"
+        "</candidate_patch>\n"
+    )
     return (
         f"{base_prompt.rstrip()}\n\n"
         "Current phase: verification and repair\n"
         f"- You have at most {verification_turns} turns. Do not restart broad exploration.\n"
-        "- Inspect the existing git diff first. If it is empty, create the smallest "
-        "reasonable patch immediately.\n"
-        "- Re-run the issue's minimal reproduction or the narrowest available test.\n"
+        f"{patch_block}"
+        "- The patch above is authoritative even if plain `git diff` is empty because an "
+        "earlier agent may have committed it. Do not inspect Git history.\n"
+        "- Do not create another Git commit.\n"
+        "- If the candidate patch is non-empty, your first tool action must run the "
+        "issue's minimal reproduction or narrowest available test through the "
+        "visible-test sandbox. If it is empty, make a minimal patch first and test it next.\n"
         f"{sandbox_instruction}"
         "- Treat the actual traceback or assertion as authoritative and repair the patch.\n"
         "- Search for an existing API usage before accepting unfamiliar calling syntax.\n"
         f"- Read at most {max_file_read_lines} source lines in one tool call.\n"
         f"- Keep each command output below about {max_tool_output_chars} characters; "
         "show only the first relevant failure and a short tail.\n"
-        "- Finish only after checking git diff. A generic response or empty diff is a failure.\n"
+        "- Finish only after checking the diff relative to the task base commit. A generic "
+        "response or empty patch is a failure.\n"
         "- Do not inspect or run hidden SWE-bench tests; use only repository-visible tests "
         "and reproductions derived from the problem statement.\n"
     )

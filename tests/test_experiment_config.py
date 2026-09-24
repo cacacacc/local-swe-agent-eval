@@ -135,6 +135,7 @@ def test_phase_prompts_reanchor_task_and_enforce_delivery_boundaries() -> None:
         max_file_read_lines=200,
         max_tool_output_chars=12000,
         visible_test_command="python sandbox.py --",
+        candidate_patch="diff --git a/a.py b/a.py\n-old\n+new\n",
     )
 
     assert base.strip() in implementation
@@ -142,7 +143,9 @@ def test_phase_prompts_reanchor_task_and_enforce_delivery_boundaries() -> None:
     assert "at most 200 source lines" in implementation
     assert "python sandbox.py --" in implementation
     assert base.strip() in verification
-    assert "Inspect the existing git diff first" in verification
+    assert "Candidate patch collected relative" in verification
+    assert "diff --git a/a.py b/a.py" in verification
+    assert "first tool action must run" in verification
     assert "hidden SWE-bench tests" in verification
     assert "network-disabled visible-test" in verification
 

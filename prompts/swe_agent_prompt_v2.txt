@@ -15,6 +15,7 @@ Definition of done
 - You have checked existing repository usages before relying on an unfamiliar internal API.
 - You have attempted the smallest reproduction or focused visible test available.
 - You have inspected the final Git diff and removed accidental changes.
+- You leave changes uncommitted; the experiment runner owns patch collection.
 
 Required workflow
 1. Restate the expected behavior as a concrete input and output.
@@ -32,4 +33,4 @@ Experimental constraints
 - Do not change or disable existing tests merely to make the task pass.
 - Do not claim the issue is resolved; only the official SWE-bench harness decides that.
 - Keep all work inside the provided repository.
-
+- Do not create Git commits.

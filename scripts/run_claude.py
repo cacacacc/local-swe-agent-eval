@@ -24,7 +24,7 @@ from agent.prompt_builder import (
     build_implementation_phase_prompt,
     build_verification_phase_prompt,
 )
-from agent.test_sandbox import VisibleTestSandbox
+from agent.test_sandbox import VisibleTestSandbox, truncate_output
 from benchmark.repo_manager import RepositoryManager
 from benchmark.swebench_loader import SWEbenchLoader
 from benchmark.task import SWEbenchTask
@@ -187,19 +187,28 @@ def run_claude_task(
                 max_tool_output_chars=config.agent.max_tool_output_chars,
                 visible_test_command=visible_test_command,
             )
-            verification_prompt = build_verification_phase_prompt(
-                prompt,
-                verification_turns=config.agent.verification_turns,
-                max_file_read_lines=config.agent.max_file_read_lines,
-                max_tool_output_chars=config.agent.max_tool_output_chars,
-                visible_test_command=visible_test_command,
-            )
             implementation_result = _runner(
                 config,
                 turns=implementation_turns,
                 timeout_seconds=implementation_timeout,
                 base_url=base_url,
             ).run(repository, implementation_prompt)
+            # 直接把相对 base commit 的实际 patch 交给新会话。不能依赖普通
+            # ``git diff``，因为模型可能无视 Prompt 自行 commit，导致验证阶段误判
+            # 为没有修改并浪费 turns 搜索 Git 历史。
+            candidate_patch = session.collect_patch(repository)
+            candidate_patch_for_prompt = truncate_output(
+                candidate_patch,
+                config.agent.max_tool_output_chars,
+            )
+            verification_prompt = build_verification_phase_prompt(
+                prompt,
+                verification_turns=config.agent.verification_turns,
+                max_file_read_lines=config.agent.max_file_read_lines,
+                max_tool_output_chars=config.agent.max_tool_output_chars,
+                visible_test_command=visible_test_command,
+                candidate_patch=candidate_patch_for_prompt,
+            )
             # 第二会话从干净上下文开始，但直接看到第一阶段留在 worktree 的 diff；
             # 任务正文会被重新注入，因此不依赖易失败的 auto-compact 摘要。
             verification_result = _runner(

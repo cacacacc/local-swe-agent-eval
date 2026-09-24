@@ -66,6 +66,7 @@ def run_claude_task(
         timeout_seconds=config.agent.timeout_seconds,
         max_turns=config.agent.max_turns,
         context_length=config.model.context_length,
+        max_output_tokens=config.model.max_output_tokens,
         base_url=base_url,
     )
 

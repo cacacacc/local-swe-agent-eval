@@ -74,13 +74,23 @@ class ClaudeCodeRunner:
         timeout_seconds: int,
         max_turns: int,
         context_length: int,
+        max_output_tokens: int,
         base_url: str = "http://localhost:11434",
         executable: str = "claude",
     ) -> None:
         """验证实验上限和 Ollama endpoint，拒绝把请求发往远程主机。"""
 
-        if timeout_seconds <= 0 or max_turns <= 0 or context_length <= 0:
-            raise ValueError("timeout, max_turns and context_length must be positive")
+        if (
+            timeout_seconds <= 0
+            or max_turns <= 0
+            or context_length <= 0
+            or max_output_tokens <= 0
+        ):
+            raise ValueError(
+                "timeout, max_turns, context_length and max_output_tokens must be positive"
+            )
+        if max_output_tokens >= context_length:
+            raise ValueError("max_output_tokens must be smaller than context_length")
         parsed_url = urlparse(base_url)
         if parsed_url.scheme != "http" or parsed_url.hostname not in {
             "localhost",
@@ -95,6 +105,7 @@ class ClaudeCodeRunner:
         self.timeout_seconds = timeout_seconds
         self.max_turns = max_turns
         self.context_length = context_length
+        self.max_output_tokens = max_output_tokens
         self.base_url = base_url.rstrip("/")
         self.executable = executable
 
@@ -148,6 +159,9 @@ class ClaudeCodeRunner:
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
                 "DISABLE_LOGIN_COMMAND": "1",
                 "CLAUDE_CODE_MAX_CONTEXT_TOKENS": str(self.context_length),
+                # 未收录于 Claude Code model catalog 的本地模型可能被默认赋予接近整个
+                # context 的输出预算；显式限制后才能给 Prompt 和工具结果保留稳定空间。
+                "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(self.max_output_tokens),
                 "CLAUDE_CODE_MAX_TURNS": str(self.max_turns),
                 "MCP_CONNECTION_NONBLOCKING": "true",
                 # Claude Code 2.1.280 不可靠地遵循 HTTP NO_PROXY；为保证本机

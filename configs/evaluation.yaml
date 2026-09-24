@@ -16,10 +16,12 @@ dataset:
 
 # 模型参数必须与 Dev 阶段验证通过的本地模型及最终报告一致；任何变更都会产生新的 fingerprint。
 # 这里仍保持未冻结状态，只有完成三道 Dev 题并确认协议后才能置为 true。
+# 8K 输出上限为工具结果和后续轮次保留至少 24K context，防止 auto-compact 抖动。
 model:
   runtime: ollama
   name: qwen3.5:9b
   context_length: 32768
+  max_output_tokens: 8192
 
 # 每道题使用相同 Agent、超时和 Prompt，以控制任务间实验变量。
 agent:

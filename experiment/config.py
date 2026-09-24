@@ -104,11 +104,12 @@ class DatasetSettings:
 
 @dataclass(frozen=True, slots=True)
 class ModelSettings:
-    """本地模型运行时、模型标签和上下文窗口长度。"""
+    """本地模型运行时、模型标签、上下文窗口和单次输出上限。"""
 
     runtime: str
     name: str
     context_length: int
+    max_output_tokens: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,7 +228,11 @@ class ExperimentConfig:
 
         # 当前研究问题限定为 Ollama 本地推理，不接受云端 provider。
         model_raw = _mapping(raw["model"], "model")
-        _exact_keys(model_raw, "model", {"runtime", "name", "context_length"})
+        _exact_keys(
+            model_raw,
+            "model",
+            {"runtime", "name", "context_length", "max_output_tokens"},
+        )
         runtime = _string(model_raw["runtime"], "model.runtime")
         if runtime != "ollama":
             raise ConfigurationError("model.runtime must be 'ollama'")
@@ -239,7 +244,18 @@ class ExperimentConfig:
                 "model.context_length",
                 minimum=4096,
             ),
+            max_output_tokens=_integer(
+                model_raw["max_output_tokens"],
+                "model.max_output_tokens",
+                minimum=1,
+            ),
         )
+        # 输出预算必须显著小于总窗口，否则工具结果会挤占输入空间并导致 auto-compact
+        # 在少数轮次内反复触发，Claude Code 会以 rapid_refill_breaker 终止运行。
+        if model.max_output_tokens >= model.context_length:
+            raise ConfigurationError(
+                "model.max_output_tokens must be smaller than model.context_length"
+            )
 
         # 固定 Agent 框架和 prompt 文件，确保跨任务只改变 issue 内容。
         agent_raw = _mapping(raw["agent"], "agent")
@@ -390,6 +406,7 @@ class ExperimentConfig:
             "model_runtime": self.model.runtime,
             "model_name": self.model.name,
             "context_length": self.model.context_length,
+            "max_output_tokens": self.model.max_output_tokens,
             "agent_framework": self.agent.framework,
             "timeout_seconds": self.agent.timeout_seconds,
             "max_turns": self.agent.max_turns,

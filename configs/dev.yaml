@@ -15,11 +15,13 @@ dataset:
   tasks_file: experiments/dev_tasks.json
 
 # Ollama 在本机运行开源模型；Dev 验证已确认该模型能通过 Claude Code 产生结构化 tool_use。
-# context_length 固定为 32768，避免 Ollama 的运行时默认值变化破坏实验可复现性。
+# context_length 固定为 32768；max_output_tokens 预留 24K 输入空间，避免未知模型默认
+# 使用 32K 输出预算后反复触发 Claude Code auto-compact。
 model:
   runtime: ollama
   name: qwen3.5:9b
   context_length: 32768
+  max_output_tokens: 8192
 
 # timeout_seconds 是每道题完整 Agent 运行的墙钟时间上限。
 agent:

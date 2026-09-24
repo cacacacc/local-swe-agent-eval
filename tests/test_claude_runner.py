@@ -15,6 +15,7 @@ def make_runner() -> ClaudeCodeRunner:
         timeout_seconds=5400,
         max_turns=30,
         context_length=32768,
+        max_output_tokens=8192,
     )
 
 
@@ -51,6 +52,8 @@ def test_environment_removes_cloud_credentials_and_keeps_only_local_endpoint() -
     assert "AWS_SECRET_ACCESS_KEY" not in environment
     assert environment["ANTHROPIC_AUTH_TOKEN"] == "ollama"
     assert environment["ANTHROPIC_BASE_URL"] == "http://localhost:11434"
+    assert environment["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "32768"
+    assert environment["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "8192"
     assert "HTTP_PROXY" not in environment
     assert "ALL_PROXY" not in environment
     assert environment["HTTPS_PROXY"] == "http://127.0.0.1:9"
@@ -66,6 +69,7 @@ def test_runner_rejects_remote_model_endpoint() -> None:
             timeout_seconds=10,
             max_turns=1,
             context_length=4096,
+            max_output_tokens=1024,
             base_url="https://api.anthropic.com",
         )
 

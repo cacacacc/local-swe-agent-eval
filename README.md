@@ -90,7 +90,7 @@ final model, prompt, timeout, and evaluation policy.
 
 The real runner invokes Claude Code in non-interactive `stream-json` mode and
 routes model requests only to the loopback Ollama endpoint. It fixes the model,
-32K context assumption, 30-turn limit, and wall-clock timeout from the validated
+32K context assumption, 8K per-response output limit, 30-turn limit, and wall-clock timeout from the validated
 experiment config. User plugins, MCP servers, browser tools, cloud credentials,
 and session persistence are disabled for each run. Observable model messages and
 tool events are retained, while hidden thinking fields are removed.

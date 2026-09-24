@@ -129,3 +129,13 @@ Each real run also records the project commit and dirty state, prompt SHA-256,
 Python/Claude/Docker versions, and the exact Ollama model digest. The normalized
 values receive a second runtime fingerprint independent of the YAML config
 fingerprint.
+
+After the official harness finishes, import its immutable decision into the run
+artifact instead of treating the agent's own success message as evidence:
+
+```bash
+python -m scripts.import_evaluation \
+  --run-path runs/dev-qwen35-003/django__django-11951 \
+  --report ~/src/SWE-bench/logs/evaluation/dev-official/results.json \
+  --harness-run-id dev-official
+```

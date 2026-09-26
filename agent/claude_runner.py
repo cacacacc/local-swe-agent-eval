@@ -58,6 +58,11 @@ def combine_phase_results(
     total_host_test_calls = 0
     total_agent_test_commands = 0
     total_implementation_baseline_tests = 0
+    total_implementation_baseline_attempts = 0
+    total_implementation_baseline_executions = 0
+    total_implementation_baseline_before_edit_executions = 0
+    total_implementation_baseline_passed = 0
+    implementation_baseline_valid = False
     total_visible_test_requests = 0
     total_visible_test_missing = 0
     total_visible_test_rejected = 0
@@ -95,6 +100,23 @@ def combine_phase_results(
         )
         total_implementation_baseline_tests += int(
             result.metrics.get("implementation_baseline_test_calls", 0)
+        )
+        total_implementation_baseline_attempts += int(
+            result.metrics.get("implementation_baseline_test_attempts", 0)
+        )
+        total_implementation_baseline_executions += int(
+            result.metrics.get("implementation_baseline_test_executions", 0)
+        )
+        total_implementation_baseline_before_edit_executions += int(
+            result.metrics.get(
+                "implementation_baseline_test_before_edit_executions", 0
+            )
+        )
+        total_implementation_baseline_passed += int(
+            result.metrics.get("implementation_baseline_test_passed", 0)
+        )
+        implementation_baseline_valid = implementation_baseline_valid or bool(
+            result.metrics.get("implementation_baseline_test_valid", False)
         )
         total_visible_test_requests += int(
             result.metrics.get("visible_test_requests", 0)
@@ -134,6 +156,17 @@ def combine_phase_results(
         "visible_test_timed_out": total_visible_test_timed_out,
         "agent_test_command_calls": total_agent_test_commands,
         "implementation_baseline_test_calls": total_implementation_baseline_tests,
+        "implementation_baseline_test_attempts": (
+            total_implementation_baseline_attempts
+        ),
+        "implementation_baseline_test_executions": (
+            total_implementation_baseline_executions
+        ),
+        "implementation_baseline_test_before_edit_executions": (
+            total_implementation_baseline_before_edit_executions
+        ),
+        "implementation_baseline_test_passed": total_implementation_baseline_passed,
+        "implementation_baseline_test_valid": implementation_baseline_valid,
         "host_test_calls": total_host_test_calls,
         "timed_out": any(result.timed_out for _, result in phases),
         "token_usage": aggregate_usage,
@@ -207,6 +240,7 @@ def _looks_like_test_command(command: str) -> bool:
         return False
     return any(
         token.endswith("run_visible_tests.py")
+        or Path(token).name == "visible-test"
         or token.endswith("runtests.py")
         or token.rstrip("/").endswith("bin/test")
         for token in tokens
@@ -232,7 +266,11 @@ def _uses_visible_test_helper(command: str) -> bool:
         "tail",
     }:
         return False
-    return any(token.endswith("run_visible_tests.py") for token in tokens)
+    return any(
+        token.endswith("run_visible_tests.py")
+        or Path(token).name == "visible-test"
+        for token in tokens
+    )
 
 
 class ClaudeCodeRunner:
@@ -249,8 +287,9 @@ class ClaudeCodeRunner:
         base_url: str = "http://localhost:11434",
         executable: str = "claude",
         allow_bash: bool = True,
+        tool_path: Path | None = None,
     ) -> None:
-        """验证实验上限和 Ollama endpoint，拒绝把请求发往远程主机。"""
+        """验证实验上限、Ollama endpoint 和可选任务工具目录。"""
 
         if (
             timeout_seconds <= 0
@@ -281,6 +320,7 @@ class ClaudeCodeRunner:
         self.base_url = base_url.rstrip("/")
         self.executable = executable
         self.allow_bash = allow_bash
+        self.tool_path = tool_path.resolve() if tool_path is not None else None
 
     def command(self, prompt: str) -> list[str]:
         """构造无 shell 插值的固定命令，避免题目文本被解释为命令。"""
@@ -350,6 +390,15 @@ class ClaudeCodeRunner:
                 "no_proxy": "localhost,127.0.0.1,::1",
             }
         )
+        if self.tool_path is not None:
+            # 仅给当前 Claude 子进程增加该题的工具目录，不修改用户 shell，也不会
+            # 让其他并发任务解析到错误 instance 的同名 ``visible-test``。
+            existing_path = environment.get("PATH", "")
+            environment["PATH"] = (
+                str(self.tool_path)
+                if not existing_path
+                else f"{self.tool_path}{os.pathsep}{existing_path}"
+            )
         return environment
 
     def run(self, repository: Path | str, prompt: str) -> ClaudeCodeResult:

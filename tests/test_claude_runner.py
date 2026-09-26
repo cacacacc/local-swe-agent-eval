@@ -65,6 +65,27 @@ def test_environment_removes_cloud_credentials_and_keeps_only_local_endpoint() -
     assert environment["NO_PROXY"] == "localhost,127.0.0.1,::1"
 
 
+def test_environment_prepends_only_the_task_specific_tool_directory(
+    tmp_path,
+) -> None:
+    """短命令目录应只进入当前 Agent 环境，并保留原有 PATH。"""
+
+    tool_path = tmp_path / "task-tools"
+    tool_path.mkdir()
+    runner = ClaudeCodeRunner(
+        model="qwen3.5:9b",
+        timeout_seconds=60,
+        max_turns=2,
+        context_length=4096,
+        max_output_tokens=1024,
+        tool_path=tool_path,
+    )
+
+    environment = runner.environment({"PATH": "/usr/bin"})
+
+    assert environment["PATH"] == f"{tool_path}:/usr/bin"
+
+
 def test_runner_rejects_remote_model_endpoint() -> None:
     """配置错误时必须在启动 Agent 前拒绝远程模型服务。"""
 
@@ -243,7 +264,7 @@ def test_summary_separates_authorized_helper_from_host_test() -> None:
 
     events = []
     for command in (
-        "python scripts/run_visible_tests.py -- python -m pytest tests/test_one.py",
+        "/tmp/task-run/visible-test python -m pytest tests/test_one.py",
         "/host/venv/bin/python -m pytest tests/test_two.py",
     ):
         events.append(

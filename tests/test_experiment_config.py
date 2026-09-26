@@ -198,7 +198,8 @@ def test_phase_prompts_reanchor_task_and_enforce_delivery_boundaries() -> None:
     assert "non-empty candidate patch" in implementation
     assert "at most 200 source lines" in implementation
     assert "run exactly one focused baseline test" in implementation
-    assert "python run_visible_tests.py -- <test argv>" in implementation
+    assert "python run_visible_tests.py -- python -m pytest" in implementation
+    assert "do not pass a bare `.py` test path" in implementation
     assert "Treat its real output together with the issue statement" in implementation
     assert ".agent-test-plan.json" in implementation
     assert "parent scheduler owns all later test execution" in implementation

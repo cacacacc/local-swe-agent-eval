@@ -151,7 +151,7 @@ def test_evaluation_v2_is_frozen_as_a_separate_ablation() -> None:
     assert ablation.agent.visible_test_sandbox is True
 
 
-@pytest.mark.parametrize("task_count", [15, 20])
+@pytest.mark.parametrize("task_count", [15, 20, 30])
 def test_extended_evaluation_v2_configs_are_frozen_and_sized(task_count: int) -> None:
     """扩展评测必须冻结，并让配置名称、任务清单和声明规模保持一致。"""
 
@@ -176,7 +176,6 @@ def test_phase_prompts_reanchor_task_and_enforce_delivery_boundaries() -> None:
         verification_turns=10,
         max_file_read_lines=200,
         max_tool_output_chars=12000,
-        baseline_test_command="python run_visible_tests.py --",
     )
     planning = build_test_planning_phase_prompt(
         base,
@@ -197,12 +196,8 @@ def test_phase_prompts_reanchor_task_and_enforce_delivery_boundaries() -> None:
     assert base.strip() in implementation
     assert "non-empty candidate patch" in implementation
     assert "at most 200 source lines" in implementation
-    assert "run exactly one focused baseline test" in implementation
-    assert "python run_visible_tests.py -- python -m pytest" in implementation
-    assert "do not pass a bare `.py` test path" in implementation
-    assert "Treat its real output together with the issue statement" in implementation
     assert ".agent-test-plan.json" in implementation
-    assert "parent scheduler owns all later test execution" in implementation
+    assert "parent scheduler owns test execution" in implementation
     assert "target_argv" in planning and "regression_argv" in planning
     assert "Your only deliverable" in planning
     assert "Bash is disabled" in planning

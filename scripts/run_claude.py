@@ -9,11 +9,8 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-import json
 from pathlib import Path
 import re
-import shlex
-import sys
 from typing import Any
 
 from agent.claude_runner import (
@@ -70,131 +67,6 @@ _SOURCE_SUFFIXES = {
 }
 
 
-@dataclass(frozen=True, slots=True)
-class BaselineTestLauncher:
-    """一条任务专属短命令及其独立审计文件。
-
-    launcher 位于运行产物目录而非待修复仓库中，因此不会污染候选 patch，也不会
-    被 Docker 沙箱误当成待应用的代码变化。instance、commit 和资源上限全部在
-    创建时绑定，模型只负责提供正常的测试 argv。
-    """
-
-    command: str
-    path: Path
-    audit_path: Path
-
-
-def _create_baseline_test_launcher(
-    run_path: Path,
-    *,
-    repository: Path,
-    task: SWEbenchTask,
-    base_commit: str,
-    config: ExperimentConfig,
-) -> BaselineTestLauncher:
-    """创建可直接执行的 ``visible-test``，隐藏易抄错的长参数。"""
-
-    launcher_path = run_path / "visible-test"
-    audit_path = run_path / "baseline-test-audit.json"
-    bound_command = shlex.join(
-        (
-            sys.executable,
-            str(config.project_root / "scripts" / "run_visible_tests.py"),
-            "--repository",
-            str(repository.resolve()),
-            "--instance-id",
-            task.instance_id,
-            "--base-commit",
-            base_commit,
-            "--timeout",
-            str(config.agent.visible_test_timeout_seconds),
-            "--max-output-chars",
-            str(config.agent.max_tool_output_chars),
-            "--audit-path",
-            str(audit_path),
-            "--",
-        )
-    )
-    # 使用极小的 POSIX shell 转发器，``"$@"`` 保证 pytest node id 等参数不会
-    # 被二次拆词；其目录只加入本题进程 PATH，避免并发任务互相串用 launcher。
-    launcher_path.write_text(
-        "#!/bin/sh\n"
-        "if [ \"$#\" -eq 0 ]; then\n"
-        "  echo 'usage: visible-test <test executable> [args ...]' >&2\n"
-        "  exit 2\n"
-        "fi\n"
-        f"exec {bound_command} \"$@\"\n",
-        encoding="utf-8",
-    )
-    launcher_path.chmod(0o700)
-    return BaselineTestLauncher(
-        command=launcher_path.name,
-        path=launcher_path,
-        audit_path=audit_path,
-    )
-
-
-def _attach_baseline_test_evidence(
-    result: ClaudeCodeResult,
-    audit_path: Path,
-) -> ClaudeCodeResult:
-    """把 helper 的落盘事实加入 Implementation 指标与轨迹。
-
-    非零测试退出码仍表示测试真实启动；它常常正是 bug 的基线复现。有效前置测试
-    只要求恰好调用一次、Docker 命令已启动且调用前仓库未发生变化。
-    """
-
-    attempts: list[dict[str, Any]] = []
-    if audit_path.is_file():
-        try:
-            payload = json.loads(audit_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            payload = None
-        if isinstance(payload, dict) and isinstance(payload.get("attempts"), list):
-            attempts = [item for item in payload["attempts"] if isinstance(item, dict)]
-
-    executions = sum(item.get("command_started") is True for item in attempts)
-    before_edit_executions = sum(
-        item.get("command_started") is True
-        and item.get("repository_changed_before_test") is False
-        for item in attempts
-    )
-    passed = sum(
-        item.get("command_started") is True and item.get("exit_code") == 0
-        for item in attempts
-    )
-    valid = len(attempts) == 1 and before_edit_executions == 1
-    metrics = dict(result.metrics)
-    metrics.update(
-        {
-            "implementation_baseline_test_attempts": len(attempts),
-            "implementation_baseline_test_executions": executions,
-            "implementation_baseline_test_before_edit_executions": (
-                before_edit_executions
-            ),
-            "implementation_baseline_test_passed": passed,
-            "implementation_baseline_test_valid": valid,
-        }
-    )
-    events = list(result.events)
-    events.append(
-        {
-            "sequence": len(events) + 1,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "event_type": "implementation_baseline_test_evidence",
-            "details": {
-                "attempts": attempts,
-                "attempt_count": len(attempts),
-                "execution_count": executions,
-                "before_edit_execution_count": before_edit_executions,
-                "passed_count": passed,
-                "valid": valid,
-            },
-        }
-    )
-    return replace(result, events=tuple(events), metrics=metrics)
-
-
 def _runner(
     config: ExperimentConfig,
     *,
@@ -202,9 +74,8 @@ def _runner(
     timeout_seconds: int,
     base_url: str,
     allow_bash: bool = True,
-    tool_path: Path | None = None,
 ) -> ClaudeCodeRunner:
-    """按阶段预算构造 Claude Code，并可注入该题专属工具目录。"""
+    """按阶段预算构造 Claude Code；验证阶段可在 CLI 层禁用 Bash。"""
 
     return ClaudeCodeRunner(
         model=config.model.name,
@@ -214,7 +85,6 @@ def _runner(
         max_output_tokens=config.model.max_output_tokens,
         base_url=base_url,
         allow_bash=allow_bash,
-        tool_path=tool_path,
     )
 
 
@@ -230,26 +100,12 @@ def _apply_patch_gate(result: ClaudeCodeResult, patch: str) -> ClaudeCodeResult:
     metrics = dict(result.metrics)
     visible_executions = int(metrics.get("visible_test_executions", 0))
     host_attempts = int(metrics.get("host_test_calls", 0))
-    implementation_baseline_attempts = int(
-        metrics.get("implementation_baseline_test_attempts", 0)
-    )
-    implementation_baseline_executions = int(
-        metrics.get("implementation_baseline_test_executions", 0)
-    )
-    implementation_baseline_valid = bool(
-        metrics.get("implementation_baseline_test_valid", False)
-    )
     metrics["patch_gate"] = {
         "patch_generated": patch_generated,
         "existing_source_modified": existing_source_modified,
         # 宿主测试没有使用 SWE-bench instance 环境，永远不能满足测试门禁。
-        "test_attempted": visible_executions > 0 or implementation_baseline_valid,
+        "test_attempted": visible_executions > 0,
         "visible_test_attempted": visible_executions > 0,
-        "implementation_baseline_test_attempted": implementation_baseline_attempts > 0,
-        "implementation_baseline_test_executed": (
-            implementation_baseline_executions > 0
-        ),
-        "implementation_baseline_test_valid": implementation_baseline_valid,
         "host_test_attempted": host_attempts > 0,
         "host_test_valid": False,
     }
@@ -611,32 +467,19 @@ def run_claude_task(
                 - implementation_timeout
                 - planning_timeout,
             )
-            baseline_launcher = _create_baseline_test_launcher(
-                session.path,
-                repository=repository,
-                task=task,
-                base_commit=patch_base_commit,
-                config=config,
-            )
             implementation_prompt = build_implementation_phase_prompt(
                 prompt,
                 implementation_turns=implementation_turns,
                 verification_turns=config.agent.verification_turns,
                 max_file_read_lines=config.agent.max_file_read_lines,
                 max_tool_output_chars=config.agent.max_tool_output_chars,
-                baseline_test_command=baseline_launcher.command,
             )
             implementation_result = _runner(
                 config,
                 turns=implementation_turns,
                 timeout_seconds=implementation_timeout,
                 base_url=base_url,
-                tool_path=baseline_launcher.path.parent,
             ).run(repository, implementation_prompt)
-            implementation_result = _attach_baseline_test_evidence(
-                implementation_result,
-                baseline_launcher.audit_path,
-            )
             phases: list[tuple[str, ClaudeCodeResult]] = [
                 ("implementation", implementation_result)
             ]

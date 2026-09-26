@@ -5,6 +5,7 @@
 # 用法：
 #   ./scripts/run_evaluation_v2_seed42.sh 15
 #   ./scripts/run_evaluation_v2_seed42.sh 20
+#   ./scripts/run_evaluation_v2_seed42.sh 30
 #
 # 入口直接使用项目的 .venv Python，因此调用者无需提前激活虚拟环境。
 # 正式运行前会检查本机依赖，确保 Docker、Ollama 或 SWE-bench 问题不会在
@@ -20,9 +21,9 @@ set -Eeuo pipefail
 # 只接受仓库中已经冻结并验证的题集规模，防止拼写错误指向不存在的配置。
 TASK_COUNT="${1:-20}"
 case "${TASK_COUNT}" in
-    15|20) ;;
+    15|20|30) ;;
     *)
-        printf '用法：%s {15|20}\n' "$0" >&2
+        printf '用法：%s {15|20|30}\n' "$0" >&2
         exit 2
         ;;
 esac

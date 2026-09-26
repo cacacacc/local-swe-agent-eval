@@ -65,27 +65,6 @@ def test_environment_removes_cloud_credentials_and_keeps_only_local_endpoint() -
     assert environment["NO_PROXY"] == "localhost,127.0.0.1,::1"
 
 
-def test_environment_prepends_only_the_task_specific_tool_directory(
-    tmp_path,
-) -> None:
-    """短命令目录应只进入当前 Agent 环境，并保留原有 PATH。"""
-
-    tool_path = tmp_path / "task-tools"
-    tool_path.mkdir()
-    runner = ClaudeCodeRunner(
-        model="qwen3.5:9b",
-        timeout_seconds=60,
-        max_turns=2,
-        context_length=4096,
-        max_output_tokens=1024,
-        tool_path=tool_path,
-    )
-
-    environment = runner.environment({"PATH": "/usr/bin"})
-
-    assert environment["PATH"] == f"{tool_path}:/usr/bin"
-
-
 def test_runner_rejects_remote_model_endpoint() -> None:
     """配置错误时必须在启动 Agent 前拒绝远程模型服务。"""
 
@@ -174,7 +153,6 @@ def test_summary_counts_turns_tools_and_final_usage_without_double_counting() ->
         "visible_test_passed": 0,
         "visible_test_timed_out": False,
         "agent_test_command_calls": 0,
-        "implementation_baseline_test_calls": 0,
         "host_test_calls": 0,
         "timed_out": False,
         "token_usage": {"input_tokens": 120, "output_tokens": 30},
@@ -244,7 +222,6 @@ def test_combine_phase_results_uses_verification_exit_and_sums_metrics() -> None
     assert combined.metrics["tool_calls"] == 15
     assert combined.metrics["visible_test_calls"] == 0
     assert combined.metrics["visible_test_executions"] == 0
-    assert combined.metrics["implementation_baseline_test_calls"] == 0
     assert combined.metrics["host_test_calls"] == 0
     assert combined.metrics["token_usage"] == {
         "input_tokens": 140,
@@ -257,40 +234,6 @@ def test_combine_phase_results_uses_verification_exit_and_sums_metrics() -> None
         "verification",
         "verification",
     ]
-
-
-def test_summary_separates_authorized_helper_from_host_test() -> None:
-    """授权 Docker helper 与宿主 pytest 分开计数，且均不冒充调度执行。"""
-
-    events = []
-    for command in (
-        "/tmp/task-run/visible-test python -m pytest tests/test_one.py",
-        "/host/venv/bin/python -m pytest tests/test_two.py",
-    ):
-        events.append(
-            {
-                "event_type": "assistant",
-                "details": {
-                    "message": {
-                        "content": [
-                            {
-                                "type": "tool_use",
-                                "name": "Bash",
-                                "input": {"command": command},
-                            }
-                        ]
-                    }
-                },
-            }
-        )
-
-    metrics = ClaudeCodeRunner._summarize(events, timed_out=False)
-
-    assert metrics["visible_test_calls"] == 0
-    assert metrics["visible_test_executions"] == 0
-    assert metrics["agent_test_command_calls"] == 2
-    assert metrics["implementation_baseline_test_calls"] == 1
-    assert metrics["host_test_calls"] == 1
 
 
 def test_verification_runner_disables_bash_at_cli_boundary() -> None:
@@ -335,5 +278,4 @@ def test_reading_visible_test_script_is_not_counted_as_execution() -> None:
 
     assert metrics["visible_test_executions"] == 0
     assert metrics["agent_test_command_calls"] == 0
-    assert metrics["implementation_baseline_test_calls"] == 0
     assert metrics["host_test_calls"] == 0

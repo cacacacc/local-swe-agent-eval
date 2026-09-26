@@ -178,7 +178,7 @@ The batch stores its frozen task order, per-task run paths, merged predictions,
 harness log, and `resolved_count / resolved_rate` under
 `runs/batches/<batch-id>/`.
 
-For the fixed 15-task and non-overlapping 20-task seed-42 evaluations, the
+For the fixed, mutually non-overlapping 15-, 20-, and 30-task seed-42 evaluations, the
 repository also provides a local one-command launcher. It selects the project
 virtual environment itself and checks Docker, Claude Code, Ollama, and
 SWE-bench before creating batch output:
@@ -186,6 +186,7 @@ SWE-bench before creating batch output:
 ```bash
 ./scripts/run_evaluation_v2_seed42.sh 15
 ./scripts/run_evaluation_v2_seed42.sh 20
+./scripts/run_evaluation_v2_seed42.sh 30
 ```
 
 Docker Desktop's WSL integration must still be enabled from Docker Desktop on
@@ -201,9 +202,8 @@ and must not replace the baseline result.
 Dev v2 gives the same local model a 44-turn hard limit split across three fresh
 Claude Code sessions:
 
-1. The implementation session receives 30 turns. Before editing source it runs
-   exactly one focused baseline test through the no-network Docker helper, then
-   combines that real output with the issue to produce a candidate patch.
+1. The implementation session receives 30 turns to investigate the issue and
+   produce a candidate patch plus a target/regression test plan.
 2. If implementation does not submit a valid test plan, a Bash-free 4-turn
    planning session must write separate target and adjacent-regression argv.
 3. The parent runs both commands in cached, network-free Docker containers. The
@@ -217,9 +217,9 @@ characters. Source-read size is currently an auditable prompt constraint; the
 visible-test wrapper enforces its output limit in code.
 
 Project tests run through the cached official instance image rather than the
-orchestration repository's Python environment. The Implementation baseline call
-uses an empty patch; later calls apply the current Git patch to the image's
-`/testbed`. The wrapper starts Docker with `--network none`, limits CPU, memory,
+orchestration repository's Python environment. Parent-scheduled calls apply the
+current Git patch to the image's `/testbed`. The wrapper starts Docker with
+`--network none`, limits CPU, memory,
 processes, time, and output, and removes the one-shot container afterward. It
 never applies the SWE-bench hidden `test_patch` or runs the official evaluation
 script during solving. Required images must be pulled during environment
@@ -263,9 +263,7 @@ architecture. New runs use four additional code-enforced boundaries:
    image. Verification receives real exit codes and bounded output, has Bash
    disabled at the Claude CLI boundary, and may repair files with Read/Edit.
    The scheduler then reruns both commands.
-4. `implementation_baseline_test_calls` records the one authorized baseline
-   Docker helper call separately. Later parent-owned tests still use scheduler
-   events:
+4. Parent-owned tests use scheduler events:
    `visible_test_requests`, `visible_test_missing`, `visible_test_rejected`,
    `visible_test_executions`, `visible_test_passed`, and
    `visible_test_timed_out`. `visible_test_calls` remains a compatibility alias

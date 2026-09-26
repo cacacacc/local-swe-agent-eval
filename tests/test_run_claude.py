@@ -1,6 +1,5 @@
 """验证分阶段 Agent 的交付物门禁和失败分类。"""
 
-import json
 from pathlib import Path
 
 from agent.claude_runner import ClaudeCodeResult
@@ -11,8 +10,6 @@ from experiment.config import ExperimentConfig
 from scripts.run_claude import (
     ScheduledTestEvidence,
     _apply_patch_gate,
-    _attach_baseline_test_evidence,
-    _create_baseline_test_launcher,
     _execute_scheduled_test,
 )
 
@@ -25,10 +22,6 @@ def _result(
     test_output: str = "",
     *,
     host_test_calls: int = 0,
-    implementation_baseline_test_calls: int = 0,
-    implementation_baseline_test_attempts: int = 0,
-    implementation_baseline_test_executions: int = 0,
-    implementation_baseline_test_valid: bool = False,
 ) -> ClaudeCodeResult:
     """构造不启动真实 Claude Code 的最小结果。"""
 
@@ -42,14 +35,6 @@ def _result(
             "agent_turns": 1,
             "tool_calls": 0,
             "host_test_calls": host_test_calls,
-            "implementation_baseline_test_calls": implementation_baseline_test_calls,
-            "implementation_baseline_test_attempts": (
-                implementation_baseline_test_attempts
-            ),
-            "implementation_baseline_test_executions": (
-                implementation_baseline_test_executions
-            ),
-            "implementation_baseline_test_valid": implementation_baseline_test_valid,
             "token_usage": {},
         },
     )
@@ -66,9 +51,6 @@ def test_patch_gate_rejects_generic_success_with_empty_diff() -> None:
         "existing_source_modified": False,
         "test_attempted": False,
         "visible_test_attempted": False,
-        "implementation_baseline_test_attempted": False,
-        "implementation_baseline_test_executed": False,
-        "implementation_baseline_test_valid": False,
         "host_test_attempted": False,
         "host_test_valid": False,
     }
@@ -93,104 +75,9 @@ def test_patch_gate_records_test_evidence_without_overriding_cli_failure() -> No
         "existing_source_modified": True,
         "test_attempted": False,
         "visible_test_attempted": False,
-        "implementation_baseline_test_attempted": False,
-        "implementation_baseline_test_executed": False,
-        "implementation_baseline_test_valid": False,
         "host_test_attempted": True,
         "host_test_valid": False,
     }
-
-
-def test_patch_gate_requires_real_pre_edit_baseline_execution() -> None:
-    """只有真实启动且发生在修改前的 Docker helper 才算有效测试。"""
-
-    validated = _apply_patch_gate(
-        _result(
-            implementation_baseline_test_calls=1,
-            implementation_baseline_test_attempts=1,
-            implementation_baseline_test_executions=1,
-            implementation_baseline_test_valid=True,
-        ),
-        "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-old\n+new\n",
-    )
-
-    assert validated.metrics["patch_gate"]["test_attempted"] is True
-    assert (
-        validated.metrics["patch_gate"]["implementation_baseline_test_attempted"]
-        is True
-    )
-    assert validated.metrics["patch_gate"]["implementation_baseline_test_executed"]
-    assert validated.metrics["patch_gate"]["implementation_baseline_test_valid"]
-    assert validated.metrics["patch_gate"]["host_test_attempted"] is False
-
-
-def test_task_specific_launcher_binds_long_arguments_outside_repository(
-    tmp_path: Path,
-) -> None:
-    """短命令应预绑定任务参数，且不在待评测仓库中产生辅助文件。"""
-
-    repository = tmp_path / "workspace"
-    run_path = tmp_path / "run" / "owner__repo-7"
-    repository.mkdir()
-    run_path.mkdir(parents=True)
-    config = ExperimentConfig.load(PROJECT_ROOT / "configs" / "dev_v2.yaml")
-    task = SWEbenchTask(
-        instance_id="owner__repo-7",
-        repo="owner/repo",
-        base_commit="b" * 40,
-        problem_statement="Fix it.",
-    )
-
-    launcher = _create_baseline_test_launcher(
-        run_path,
-        repository=repository,
-        task=task,
-        base_commit="a" * 40,
-        config=config,
-    )
-
-    content = launcher.path.read_text(encoding="utf-8")
-    assert launcher.command == "visible-test"
-    assert launcher.path.stat().st_mode & 0o100
-    assert "--instance-id owner__repo-7" in content
-    assert f"--repository {repository}" in content
-    assert "--base-commit " + "a" * 40 in content
-    assert '"$@"' in content
-    assert not (repository / "visible-test").exists()
-
-
-def test_baseline_audit_distinguishes_call_execution_and_pre_edit_order(
-    tmp_path: Path,
-) -> None:
-    """审计指标不能把修改后的 helper 调用冒充有效前置测试。"""
-
-    audit_path = tmp_path / "baseline-test-audit.json"
-    audit_path.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "attempts": [
-                    {
-                        "command": ["python", "-m", "pytest", "tests/test_a.py"],
-                        "command_started": True,
-                        "repository_changed_before_test": True,
-                        "exit_code": 1,
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    enriched = _attach_baseline_test_evidence(_result(), audit_path)
-
-    assert enriched.metrics["implementation_baseline_test_attempts"] == 1
-    assert enriched.metrics["implementation_baseline_test_executions"] == 1
-    assert enriched.metrics["implementation_baseline_test_passed"] == 0
-    assert enriched.metrics["implementation_baseline_test_valid"] is False
-    assert enriched.events[-1]["event_type"] == (
-        "implementation_baseline_test_evidence"
-    )
 
 
 def test_patch_gate_rejects_only_new_reproduction_files() -> None:

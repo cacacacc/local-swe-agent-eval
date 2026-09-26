@@ -69,33 +69,18 @@ def build_implementation_phase_prompt(
     verification_turns: int,
     max_file_read_lines: int,
     max_tool_output_chars: int,
-    baseline_test_command: str,
 ) -> str:
-    """为实现阶段追加一次基线测试、补丁交付点和上下文预算护栏。
+    """为实现阶段追加补丁、测试计划交付点和上下文预算护栏。
 
     Claude Code 暂不提供可靠的逐次 Read/Bash 输出硬上限，因此这里把限制写成
-    可审计的阶段协议。Implementation 在修改源码前通过固定 helper 运行一次无网络
-    Docker 测试；之后完全沿用 8/20 版本的补交计划、测试和 verification 流程。
+    可审计的阶段协议。真实测试统一由父进程在候选补丁产生后调度，Implementation
+    不再承担容易受宿主环境误导的前置测试。
     """
 
     return (
         f"{base_prompt.rstrip()}\n\n"
         "Current phase: implementation\n"
         f"- You have at most {implementation_turns} turns in this phase.\n"
-        "- Before using Edit or Write on product or test source, run exactly one focused "
-        "baseline test with the Docker helper below. You may inspect a small number of "
-        "files first only to identify the correct visible test target. The command is "
-        "task-specific: instance, commit, Docker image, timeout, and repository are already "
-        "bound. Copy it exactly and append a complete test command argv.\n"
-        f"  Pytest example: `{baseline_test_command} python -m pytest "
-        "tests/test_module.py::test_case`\n"
-        f"  Repository-runner example: `{baseline_test_command} "
-        "./tests/runtests.py app.tests`\n"
-        "  Do not prepend `python` before the helper itself, and do not pass a bare `.py` "
-        "test path without its test runner.\n"
-        "- Choose the smallest reproduction or focused repository test relevant to the "
-        "issue. Treat its real output together with the issue statement as evidence, then "
-        "diagnose and modify the code. Do not rerun the helper in this phase.\n"
         "- Produce a non-empty candidate patch before this phase ends.\n"
         "- Do not create a Git commit; leave the candidate change in the working tree.\n"
         "- Start with rg or another targeted search; do not dump whole large files.\n"
@@ -103,8 +88,7 @@ def build_implementation_phase_prompt(
         f"- Keep each command output below about {max_tool_output_chars} characters.\n"
         "- Before assuming how an internal API works, find an existing repository usage.\n"
         "- Do not run pytest, tox, project test scripts, or package installers directly "
-        "on the host. The single helper call above is the only test command allowed in "
-        "this phase; the parent scheduler owns all later test execution.\n"
+        "on the host. The parent scheduler owns test execution after this phase.\n"
         "- Before finishing, use Write to create `.agent-test-plan.json` with exactly "
         "`target_argv` and `regression_argv`. The first command targets the bug or a "
         "focused reproduction; the second runs the nearest existing test module or "

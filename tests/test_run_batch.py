@@ -1,4 +1,4 @@
-"""验证十题批量脚本的固定顺序、题数约束和 predictions 合并。"""
+"""验证批量脚本的固定顺序、可选题数约束和 predictions 合并。"""
 
 import json
 from pathlib import Path
@@ -43,14 +43,38 @@ def test_select_fixed_tasks_uses_frozen_id_order(tmp_path: Path) -> None:
     ]
 
 
+def test_select_fixed_tasks_defaults_to_frozen_list_length(tmp_path: Path) -> None:
+    """未声明题数时应接受任意非空冻结清单，防止批处理被旧十题默认值锁死。"""
+
+    ids_path = tmp_path / "ids.json"
+    ids_path.write_text(
+        json.dumps([f"owner__repo-{index}" for index in range(15)]),
+        encoding="utf-8",
+    )
+
+    tasks = select_fixed_tasks(ids_path, make_snapshot(15))
+
+    assert len(tasks) == 15
+
+
 def test_select_fixed_tasks_rejects_wrong_count(tmp_path: Path) -> None:
-    """正式十题清单缺题或多题时必须在启动第一个 Agent 前失败。"""
+    """用户显式声明题数时，缺题或多题必须在启动第一个 Agent 前失败。"""
 
     ids_path = tmp_path / "ids.json"
     ids_path.write_text(json.dumps(["owner__repo-0"]), encoding="utf-8")
 
     with pytest.raises(AutomatedRunError, match="exactly 10"):
         select_fixed_tasks(ids_path, make_snapshot(1), expected_count=10)
+
+
+def test_select_fixed_tasks_rejects_empty_list(tmp_path: Path) -> None:
+    """空冻结清单必须立即失败，避免最终汇总时发生除零或产生伪批次。"""
+
+    ids_path = tmp_path / "ids.json"
+    ids_path.write_text("[]", encoding="utf-8")
+
+    with pytest.raises(AutomatedRunError, match="at least one task"):
+        select_fixed_tasks(ids_path, make_snapshot(0))
 
 
 def test_write_batch_predictions_preserves_one_record_per_task(tmp_path: Path) -> None:

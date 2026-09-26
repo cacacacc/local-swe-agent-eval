@@ -25,9 +25,9 @@ class ConsoleReporter:
         self,
         stream: TextIO | None = None,
         *,
-        heartbeat_seconds: float = 15.0,
+        heartbeat_seconds: float = 30.0,
     ) -> None:
-        """保存输出流；只有真实 TTY 才启动心跳线程，日志重定向时保持简洁。"""
+        """保存输出流；长操作在真实 TTY 中统一每 30 秒报告一次状态。"""
 
         self.stream = sys.stdout if stream is None else stream
         self.heartbeat_seconds = heartbeat_seconds

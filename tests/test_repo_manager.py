@@ -21,8 +21,8 @@ def run_git(path: Path, *arguments: str) -> str:
     return result.stdout.strip()
 
 
-def make_local_cache(tmp_path: Path) -> tuple[Path, str]:
-    """创建完全本地的源仓库和共享 clone，测试期间无需访问网络。"""
+def make_local_cache(tmp_path: Path) -> tuple[Path, str, str]:
+    """创建含基线和后续提交的本地缓存，用于验证历史不可泄漏。"""
 
     source = tmp_path / "source"
     source.mkdir()
@@ -33,6 +33,9 @@ def make_local_cache(tmp_path: Path) -> tuple[Path, str]:
     run_git(source, "add", "module.py")
     run_git(source, "commit", "-m", "initial")
     commit = run_git(source, "rev-parse", "HEAD")
+    (source / "module.py").write_text("VALUE = 2\n", encoding="utf-8")
+    run_git(source, "commit", "-am", "future answer")
+    future_commit = run_git(source, "rev-parse", "HEAD")
 
     cache_root = tmp_path / "cache"
     cache_path = cache_root / "example__project"
@@ -44,7 +47,7 @@ def make_local_cache(tmp_path: Path) -> tuple[Path, str]:
         check=True,
     )
     run_git(cache_path, "remote", "set-url", "origin", "https://github.com/example/project.git")
-    return cache_root, commit
+    return cache_root, commit, future_commit
 
 
 def make_task(commit: str) -> SWEbenchTask:
@@ -58,32 +61,34 @@ def make_task(commit: str) -> SWEbenchTask:
     )
 
 
-def test_prepare_creates_verified_detached_worktree_offline(tmp_path) -> None:
-    """已有缓存时应能离线创建并验证 detached worktree。"""
+def test_prepare_creates_single_commit_repository_without_future_history(tmp_path) -> None:
+    """Agent 仓库只能看到基线 tree、单个本地提交且没有 remote。"""
 
-    cache_root, commit = make_local_cache(tmp_path)
+    cache_root, commit, future_commit = make_local_cache(tmp_path)
     workspace_root = tmp_path / "workspaces"
     manager = RepositoryManager(cache_root, workspace_root)
 
     prepared = manager.prepare(make_task(commit), allow_network=False)
 
     assert prepared.resolved_commit == commit
-    assert run_git(prepared.path, "rev-parse", "HEAD") == commit
-    # detached HEAD 没有 symbolic branch，因此 symbolic-ref 应以 1 退出。
-    symbolic_ref = subprocess.run(
-        ["git", "-C", str(prepared.path), "symbolic-ref", "-q", "HEAD"],
+    assert run_git(prepared.path, "rev-parse", "HEAD") == prepared.workspace_base_commit
+    assert run_git(prepared.path, "rev-list", "--all", "--count") == "1"
+    assert run_git(prepared.path, "remote") == ""
+    # 即使共享 cache 含有未来修复对象，隔离仓库也不能通过对象哈希读取它。
+    future_lookup = subprocess.run(
+        ["git", "-C", str(prepared.path), "cat-file", "-e", future_commit],
         capture_output=True,
         text=True,
         check=False,
     )
-    assert symbolic_ref.returncode == 1
+    assert future_lookup.returncode != 0
     assert (prepared.path / "module.py").read_text(encoding="utf-8") == "VALUE = 1\n"
 
 
 def test_prepare_refuses_to_overwrite_existing_workspace(tmp_path) -> None:
     """同一任务再次准备时不得覆盖已有工作区。"""
 
-    cache_root, commit = make_local_cache(tmp_path)
+    cache_root, commit, _ = make_local_cache(tmp_path)
     workspace_root = tmp_path / "workspaces"
     manager = RepositoryManager(cache_root, workspace_root)
     task = make_task(commit)

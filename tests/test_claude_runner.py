@@ -146,6 +146,12 @@ def test_summary_counts_turns_tools_and_final_usage_without_double_counting() ->
         "agent_turns": 1,
         "tool_calls": 1,
         "visible_test_calls": 0,
+        "visible_test_requests": 0,
+        "visible_test_rejected": 0,
+        "visible_test_executions": 0,
+        "visible_test_passed": 0,
+        "visible_test_timed_out": False,
+        "agent_test_command_calls": 0,
         "host_test_calls": 0,
         "timed_out": False,
         "token_usage": {"input_tokens": 120, "output_tokens": 30},
@@ -214,6 +220,7 @@ def test_combine_phase_results_uses_verification_exit_and_sums_metrics() -> None
     assert combined.metrics["agent_turns"] == 35
     assert combined.metrics["tool_calls"] == 15
     assert combined.metrics["visible_test_calls"] == 0
+    assert combined.metrics["visible_test_executions"] == 0
     assert combined.metrics["host_test_calls"] == 0
     assert combined.metrics["token_usage"] == {
         "input_tokens": 140,
@@ -228,8 +235,8 @@ def test_combine_phase_results_uses_verification_exit_and_sums_metrics() -> None
     ]
 
 
-def test_summary_separates_visible_sandbox_from_host_tests() -> None:
-    """测试遵循率必须区分沙箱调用与错误的宿主 pytest 调用。"""
+def test_summary_never_infers_visible_execution_from_bash_text() -> None:
+    """模型 Bash 只能记为宿主尝试，脚本名称不能冒充 Docker 执行。"""
 
     events = []
     for command in (
@@ -255,5 +262,52 @@ def test_summary_separates_visible_sandbox_from_host_tests() -> None:
 
     metrics = ClaudeCodeRunner._summarize(events, timed_out=False)
 
-    assert metrics["visible_test_calls"] == 1
-    assert metrics["host_test_calls"] == 1
+    assert metrics["visible_test_calls"] == 0
+    assert metrics["visible_test_executions"] == 0
+    assert metrics["agent_test_command_calls"] == 2
+    assert metrics["host_test_calls"] == 2
+
+
+def test_verification_runner_disables_bash_at_cli_boundary() -> None:
+    """验证会话必须由 CLI 禁用 Bash，不能只依赖模型遵循 Prompt。"""
+
+    runner = ClaudeCodeRunner(
+        model="qwen3.5:9b",
+        timeout_seconds=60,
+        max_turns=10,
+        context_length=32768,
+        max_output_tokens=8192,
+        allow_bash=False,
+    )
+
+    command = runner.command("Verify")
+
+    assert "Bash" in command[command.index("--disallowed-tools") + 1 :]
+
+
+def test_reading_visible_test_script_is_not_counted_as_execution() -> None:
+    """读取调度脚本只是探索行为，不能增加任何测试调用指标。"""
+
+    metrics = ClaudeCodeRunner._summarize(
+        [
+            {
+                "event_type": "assistant",
+                "details": {
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "name": "Bash",
+                                "input": {"command": "cat scripts/run_visible_tests.py"},
+                            }
+                        ]
+                    }
+                },
+            }
+        ],
+        timed_out=False,
+    )
+
+    assert metrics["visible_test_executions"] == 0
+    assert metrics["agent_test_command_calls"] == 0
+    assert metrics["host_test_calls"] == 0

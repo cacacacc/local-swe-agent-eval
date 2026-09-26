@@ -9,8 +9,10 @@ The first phase establishes two trusted boundaries:
 
 1. `benchmark.swebench_loader` validates dataset records and exposes only the
    fields an agent is allowed to see.
-2. `benchmark.repo_manager` creates a shared repository cache and checks out an
-   isolated worktree at the task's exact `base_commit`.
+2. `benchmark.repo_manager` uses a shared repository cache only as a trusted
+   preparation source. It exports the task's exact `base_commit` tree and
+   initializes a new one-commit repository with no remote or shared Git object
+   database, so the agent cannot inspect post-base fixes through Git history.
 
 The agent-facing task representation intentionally excludes reference patches,
 test patches, and other evaluation-only fields.
@@ -155,8 +157,8 @@ python -m scripts.run_and_evaluate \
 ```
 
 Both automation commands show phase panels, task progress bars, elapsed-time
-heartbeats in an interactive terminal, the live SWE-bench harness stream, and a
-final aligned result table.
+heartbeats every 30 seconds in an interactive terminal, the live SWE-bench
+harness stream, and a final aligned result table.
 
 After Dev is complete and `configs/evaluation.yaml` has been reviewed and frozen,
 run all ten fixed evaluation tasks with one command. Agent inference remains
@@ -175,6 +177,20 @@ python -m scripts.run_batch \
 The batch stores its frozen task order, per-task run paths, merged predictions,
 harness log, and `resolved_count / resolved_rate` under
 `runs/batches/<batch-id>/`.
+
+For the fixed 15-task and non-overlapping 20-task seed-42 evaluations, the
+repository also provides a local one-command launcher. It selects the project
+virtual environment itself and checks Docker, Claude Code, Ollama, and
+SWE-bench before creating batch output:
+
+```bash
+./scripts/run_evaluation_v2_seed42.sh 15
+./scripts/run_evaluation_v2_seed42.sh 20
+```
+
+Docker Desktop's WSL integration must still be enabled from Docker Desktop on
+Windows; a Linux process inside WSL cannot grant that host-side integration.
+The launcher reports the exact setting to change when the Docker CLI is absent.
 
 ## Phase 5: bounded two-session agent architecture
 
@@ -226,3 +242,30 @@ same architecture for a ten-task ablation. Its results are reported separately
 and never replace the original `configs/evaluation.yaml` baseline. Metrics split
 `visible_test_calls` from `host_test_calls`, because prompt compliance alone is
 not a reliable sandbox boundary for a small local model.
+
+## Post-r2 hardening for new evaluations
+
+The completed r2 artifacts above remain immutable evidence of the earlier
+architecture. New runs use four additional code-enforced boundaries:
+
+1. Agent repositories contain one isolated baseline commit and no remote. The
+   upstream commit hash remains in metadata, while patch collection compares
+   against the new workspace baseline.
+2. The implementation session writes a temporary `.agent-test-plan.json` with
+   one `argv` array. The scheduler validates and consumes this file before
+   collecting the patch; shell command strings and shell executables are
+   rejected.
+3. The parent process executes the accepted argv in the cached, network-free
+   SWE-bench image. The fresh verification session receives the real exit code
+   and truncated output, has Bash disabled at the Claude CLI boundary, and may
+   repair files with Read/Edit. The scheduler then reruns the accepted argv.
+4. Test metrics come from scheduler events rather than command-text matching:
+   `visible_test_requests`, `visible_test_rejected`,
+   `visible_test_executions`, `visible_test_passed`, and
+   `visible_test_timed_out`. `visible_test_calls` remains a compatibility alias
+   for confirmed executions; model-issued test commands are recorded as
+   `agent_test_command_calls` and `host_test_calls`.
+
+This hardening is a new experimental protocol. It must not be used to rewrite
+the original baseline or r2 results, even when the same task IDs are inspected
+for debugging.

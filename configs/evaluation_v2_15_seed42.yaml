@@ -1,0 +1,45 @@
+# 扩展评测配置：从排除既有 13 题后的 SWE-bench Verified 候选集中，
+# 对排序后的 instance ID 使用 seed 42 无放回抽取 15 题。
+schema_version: 1
+
+experiment:
+  name: local-qwen35-9b-evaluation-v2-15-seed42
+  phase: evaluation
+  random_seed: 42
+  configuration_frozen: true
+
+dataset:
+  name: princeton-nlp/SWE-bench_Verified
+  split: test
+  tasks_file: experiments/evaluation_tasks_15_seed42.json
+
+# 保持与十题 v2 ablation 相同的模型和两阶段预算，便于横向比较。
+model:
+  runtime: ollama
+  name: qwen3.5:9b
+  context_length: 32768
+  max_output_tokens: 8192
+
+agent:
+  framework: claude-code
+  timeout_seconds: 5400
+  max_turns: 40
+  verification_turns: 10
+  max_file_read_lines: 200
+  max_tool_output_chars: 12000
+  visible_test_sandbox: true
+  visible_test_timeout_seconds: 900
+  prompt_template: prompts/swe_agent_prompt_v2.txt
+
+network:
+  environment_preparation: true
+  formal_solving: false
+
+evaluation:
+  max_workers: 2
+  cache_level: env
+
+storage:
+  repository_cache: repo-cache
+  workspaces: workspaces
+  runs: runs

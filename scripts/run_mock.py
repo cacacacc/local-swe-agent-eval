@@ -28,8 +28,10 @@ def run_mock_task(
     task: SWEbenchTask,
     repository: Path | str,
     runs_root: Path | str,
+    *,
+    workspace_base_commit: str | None = None,
 ) -> Path:
-    """执行 Mock Agent，并返回已经完成写入的产物目录。"""
+    """执行 Mock Agent，并按隔离仓库基线收集完整补丁。"""
 
     session = RunManager(runs_root).start(
         task,
@@ -37,6 +39,7 @@ def run_mock_task(
         agent="MockAgentRunner",
         model="mock-no-llm",
         prompt=MOCK_PROMPT,
+        patch_base_commit=workspace_base_commit,
     )
     try:
         result = MockAgentRunner().run(task, repository)
@@ -117,7 +120,12 @@ def main() -> int:
         arguments.cache_root,
         arguments.workspace_root,
     ).prepare(task, allow_network=arguments.allow_network)
-    run_path = run_mock_task(task, prepared.path, arguments.runs_root)
+    run_path = run_mock_task(
+        task,
+        prepared.path,
+        arguments.runs_root,
+        workspace_base_commit=prepared.workspace_base_commit,
+    )
     print(run_path)
     return 0
 

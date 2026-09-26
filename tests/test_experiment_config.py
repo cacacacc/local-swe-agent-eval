@@ -132,6 +132,21 @@ def test_evaluation_v2_is_frozen_as_a_separate_ablation() -> None:
     assert ablation.agent.visible_test_sandbox is True
 
 
+@pytest.mark.parametrize("task_count", [15, 20])
+def test_extended_evaluation_v2_configs_are_frozen_and_sized(task_count: int) -> None:
+    """扩展评测必须冻结，并让配置名称、任务清单和声明规模保持一致。"""
+
+    config = ExperimentConfig.load(
+        PROJECT_ROOT / "configs" / f"evaluation_v2_{task_count}_seed42.yaml"
+    )
+    task_ids = json.loads(config.tasks_path.read_text(encoding="utf-8"))
+
+    config.require_frozen()
+    assert config.experiment.name.endswith(f"{task_count}-seed42")
+    assert len(task_ids) == task_count
+    assert len(set(task_ids)) == task_count
+
+
 def test_phase_prompts_reanchor_task_and_enforce_delivery_boundaries() -> None:
     """两个独立会话都必须携带原任务，且分别强调交付补丁和验证修复。"""
 
@@ -142,27 +157,27 @@ def test_phase_prompts_reanchor_task_and_enforce_delivery_boundaries() -> None:
         verification_turns=10,
         max_file_read_lines=200,
         max_tool_output_chars=12000,
-        visible_test_command="python sandbox.py --",
     )
     verification = build_verification_phase_prompt(
         base,
         verification_turns=10,
         max_file_read_lines=200,
         max_tool_output_chars=12000,
-        visible_test_command="python sandbox.py --",
         candidate_patch="diff --git a/a.py b/a.py\n-old\n+new\n",
+        scheduled_test_evidence="Exit code: 1\nFAILED expected value",
     )
 
     assert base.strip() in implementation
     assert "non-empty candidate patch" in implementation
     assert "at most 200 source lines" in implementation
-    assert "python sandbox.py --" in implementation
+    assert ".agent-test-plan.json" in implementation
+    assert "parent scheduler owns all test execution" in implementation
     assert base.strip() in verification
     assert "Candidate patch collected relative" in verification
     assert "diff --git a/a.py b/a.py" in verification
-    assert "first tool action must run" in verification
+    assert "FAILED expected value" in verification
+    assert "Bash is disabled" in verification
     assert "hidden SWE-bench tests" in verification
-    assert "network-disabled visible-test" in verification
 
 
 def test_dev_config_cannot_be_used_as_formal_evaluation() -> None:

@@ -7,12 +7,11 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 import re
-import shlex
-import sys
+from typing import Any
 
 from agent.claude_runner import (
     ClaudeCodeResult,
@@ -24,7 +23,13 @@ from agent.prompt_builder import (
     build_implementation_phase_prompt,
     build_verification_phase_prompt,
 )
-from agent.test_sandbox import VisibleTestSandbox, truncate_output
+from agent.test_plan import TestPlanRequest, consume_test_plan
+from agent.test_sandbox import (
+    TestSandboxError,
+    VisibleTestResult,
+    VisibleTestSandbox,
+    truncate_output,
+)
 from benchmark.repo_manager import RepositoryManager
 from benchmark.swebench_loader import SWEbenchLoader
 from benchmark.task import SWEbenchTask
@@ -42,8 +47,9 @@ def _runner(
     turns: int,
     timeout_seconds: int,
     base_url: str,
+    allow_bash: bool = True,
 ) -> ClaudeCodeRunner:
-    """按阶段预算构造隔离的 Claude Code 进程。"""
+    """按阶段预算构造 Claude Code；验证阶段可在 CLI 层禁用 Bash。"""
 
     return ClaudeCodeRunner(
         model=config.model.name,
@@ -52,6 +58,7 @@ def _runner(
         context_length=config.model.context_length,
         max_output_tokens=config.model.max_output_tokens,
         base_url=base_url,
+        allow_bash=allow_bash,
     )
 
 
@@ -64,11 +71,13 @@ def _apply_patch_gate(result: ClaudeCodeResult, patch: str) -> ClaudeCodeResult:
 
     patch_generated = bool(patch.strip())
     metrics = dict(result.metrics)
+    visible_executions = int(metrics.get("visible_test_executions", 0))
+    host_attempts = int(metrics.get("host_test_calls", 0))
     metrics["patch_gate"] = {
         "patch_generated": patch_generated,
-        "test_attempted": bool(result.test_output.strip()),
-        "visible_test_attempted": int(metrics.get("visible_test_calls", 0)) > 0,
-        "host_test_attempted": int(metrics.get("host_test_calls", 0)) > 0,
+        "test_attempted": visible_executions > 0 or host_attempts > 0,
+        "visible_test_attempted": visible_executions > 0,
+        "host_test_attempted": host_attempts > 0,
     }
     events = list(result.events)
     events.append(
@@ -86,30 +95,122 @@ def _apply_patch_gate(result: ClaudeCodeResult, patch: str) -> ClaudeCodeResult:
     return replace(result, exit_code=exit_code, events=tuple(events), metrics=metrics)
 
 
-def _visible_test_command(task: SWEbenchTask, config: ExperimentConfig) -> str | None:
-    """生成写入 Prompt 的固定沙箱前缀；正式基线默认不启用。"""
+@dataclass(frozen=True, slots=True)
+class ScheduledTestEvidence:
+    """一次调度器测试尝试及其可审计结果。"""
 
-    if not config.agent.visible_test_sandbox:
-        return None
-    script = config.project_root / "scripts" / "run_visible_tests.py"
-    if not script.is_file():
-        raise FileNotFoundError(f"visible test runner does not exist: {script}")
-    return shlex.join(
-        [
-            sys.executable,
-            str(script),
-            "--repository",
-            ".",
-            "--instance-id",
-            task.instance_id,
-            "--base-commit",
-            task.base_commit,
-            "--timeout",
-            str(config.agent.visible_test_timeout_seconds),
-            "--max-output-chars",
-            str(config.agent.max_tool_output_chars),
-            "--",
-        ]
+    request: TestPlanRequest
+    result: VisibleTestResult | None = None
+    error: str | None = None
+
+    def metrics(self) -> dict[str, int | bool]:
+        """生成不会把文本提及误算为容器执行的指标。"""
+
+        executed = self.result is not None
+        return {
+            "agent_turns": 0,
+            "tool_calls": 0,
+            "host_test_calls": 0,
+            "agent_test_command_calls": 0,
+            "visible_test_calls": int(executed),
+            "visible_test_requests": int(self.request.requested),
+            "visible_test_rejected": int(
+                self.request.status == "rejected" or self.error is not None
+            ),
+            "visible_test_executions": int(executed),
+            "visible_test_passed": int(executed and self.result.exit_code == 0),
+            "visible_test_timed_out": bool(executed and self.result.timed_out),
+            "timed_out": False,
+            "token_usage": {},
+        }
+
+    def prompt_text(self) -> str:
+        """把真实执行证据压缩成可直接注入修复会话的文本。"""
+
+        if self.request.status == "missing":
+            return "No structured test plan was submitted by the implementation session."
+        if self.request.status == "rejected":
+            return f"The submitted test plan was rejected: {self.request.error}"
+        command = " ".join(self.request.argv)
+        if self.error is not None:
+            return f"The scheduled test `{command}` was rejected: {self.error}"
+        assert self.result is not None
+        return (
+            f"Scheduled visible test argv: {list(self.request.argv)!r}\n"
+            f"Docker image: {self.result.image}\n"
+            f"Exit code: {self.result.exit_code}\n"
+            f"Timed out: {self.result.timed_out}\n"
+            "Output:\n"
+            f"{self.result.output.rstrip()}"
+        )
+
+
+def _execute_scheduled_test(
+    repository: Path,
+    *,
+    task: SWEbenchTask,
+    workspace_base_commit: str,
+    sandbox: VisibleTestSandbox,
+    fallback_argv: tuple[str, ...] = (),
+) -> ScheduledTestEvidence:
+    """消费模型计划并在 Docker 中执行；缺省时可复测上一轮 argv。
+
+    无效计划只形成 rejected 证据而不终止整个任务，保证修复会话仍能看到明确
+    原因。若修复会话没有提交新计划，则复用首次已验证的 argv，避免把重复写控制
+    文件浪费成模型 turns。
+    """
+
+    request = consume_test_plan(repository)
+    if request.status == "missing" and fallback_argv:
+        request = TestPlanRequest(status="accepted", argv=fallback_argv)
+    if not request.accepted:
+        return ScheduledTestEvidence(request=request)
+    try:
+        result = sandbox.run(
+            repository,
+            instance_id=task.instance_id,
+            base_commit=workspace_base_commit,
+            command=request.argv,
+        )
+    except (TestSandboxError, ValueError) as error:
+        return ScheduledTestEvidence(request=request, error=str(error))
+    return ScheduledTestEvidence(request=request, result=result)
+
+
+def _scheduled_test_result(evidence: ScheduledTestEvidence) -> ClaudeCodeResult:
+    """把调度器证据包装成 phase，使 trajectory、日志和汇总保持同一拓扑。"""
+
+    details: dict[str, Any] = {
+        "request_status": evidence.request.status,
+        "argv": list(evidence.request.argv),
+        "error": evidence.request.error or evidence.error,
+    }
+    if evidence.result is not None:
+        details.update(
+            {
+                "exit_code": evidence.result.exit_code,
+                "image": evidence.result.image,
+                "timed_out": evidence.result.timed_out,
+                "output": evidence.result.output,
+            }
+        )
+    text = evidence.prompt_text()
+    return ClaudeCodeResult(
+        # 调度测试失败是修复输入而非 Claude 进程失败；总体 exit code 仍由验证会话
+        # 决定，官方 resolved 则继续只由 harness 决定。
+        exit_code=0,
+        agent_log=text + "\n",
+        test_output=text + "\n",
+        events=(
+            {
+                "sequence": 1,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "event_type": "visible_test_execution",
+                "details": details,
+            },
+        ),
+        timed_out=False,
+        metrics=evidence.metrics(),
     )
 
 
@@ -150,9 +251,11 @@ def run_claude_task(
     runs_root: Path,
     *,
     base_url: str,
+    workspace_base_commit: str | None = None,
 ) -> Path:
-    """执行真实 Agent，失败或超时时也尽量保存现场与部分 patch。"""
+    """执行实现、调度测试与无 Bash 修复阶段，并持久化完整证据。"""
 
+    patch_base_commit = workspace_base_commit or task.base_commit
     prompt = PromptBuilder.from_file(config.prompt_template_path).build(task)
     runtime_fingerprint = RuntimeFingerprintCollector(
         project_root=config.project_root,
@@ -182,6 +285,7 @@ def run_claude_task(
         model=config.model.name,
         prompt=prompt,
         configuration=configuration,
+        patch_base_commit=patch_base_commit,
     )
     try:
         if config.agent.verification_turns:
@@ -200,14 +304,12 @@ def run_claude_task(
                 1,
                 config.agent.timeout_seconds - implementation_timeout,
             )
-            visible_test_command = _visible_test_command(task, config)
             implementation_prompt = build_implementation_phase_prompt(
                 prompt,
                 implementation_turns=implementation_turns,
                 verification_turns=config.agent.verification_turns,
                 max_file_read_lines=config.agent.max_file_read_lines,
                 max_tool_output_chars=config.agent.max_tool_output_chars,
-                visible_test_command=visible_test_command,
             )
             implementation_result = _runner(
                 config,
@@ -215,9 +317,19 @@ def run_claude_task(
                 timeout_seconds=implementation_timeout,
                 base_url=base_url,
             ).run(repository, implementation_prompt)
-            # 直接把相对 base commit 的实际 patch 交给新会话。不能依赖普通
-            # ``git diff``，因为模型可能无视 Prompt 自行 commit，导致验证阶段误判
-            # 为没有修改并浪费 turns 搜索 Git 历史。
+            if config.agent.visible_test_sandbox:
+                initial_evidence = _execute_scheduled_test(
+                    repository,
+                    task=task,
+                    workspace_base_commit=patch_base_commit,
+                    sandbox=test_sandbox,
+                )
+            else:
+                initial_evidence = ScheduledTestEvidence(
+                    request=TestPlanRequest(status="missing")
+                )
+            # 测试计划已经被消费并删除，此时收集的 candidate patch 不会夹带调度
+            # 控制文件。显式比较隔离仓库基线也能覆盖模型擅自创建的 commit。
             candidate_patch = session.collect_patch(repository)
             candidate_patch_for_prompt = truncate_output(
                 candidate_patch,
@@ -228,8 +340,8 @@ def run_claude_task(
                 verification_turns=config.agent.verification_turns,
                 max_file_read_lines=config.agent.max_file_read_lines,
                 max_tool_output_chars=config.agent.max_tool_output_chars,
-                visible_test_command=visible_test_command,
                 candidate_patch=candidate_patch_for_prompt,
+                scheduled_test_evidence=initial_evidence.prompt_text(),
             )
             # 第二会话从干净上下文开始，但直接看到第一阶段留在 worktree 的 diff；
             # 任务正文会被重新注入，因此不依赖易失败的 auto-compact 摘要。
@@ -238,13 +350,42 @@ def run_claude_task(
                 turns=config.agent.verification_turns,
                 timeout_seconds=verification_timeout,
                 base_url=base_url,
+                allow_bash=False,
             ).run(repository, verification_prompt)
+            if config.agent.visible_test_sandbox:
+                fallback_argv = (
+                    initial_evidence.request.argv
+                    if initial_evidence.request.accepted
+                    else ()
+                )
+                final_evidence = _execute_scheduled_test(
+                    repository,
+                    task=task,
+                    workspace_base_commit=patch_base_commit,
+                    sandbox=test_sandbox,
+                    fallback_argv=fallback_argv,
+                )
+            else:
+                final_evidence = ScheduledTestEvidence(
+                    request=TestPlanRequest(status="missing")
+                )
             result = combine_phase_results(
                 (
                     ("implementation", implementation_result),
+                    (
+                        "scheduled_test_initial",
+                        _scheduled_test_result(initial_evidence),
+                    ),
                     ("verification", verification_result),
+                    (
+                        "scheduled_test_final",
+                        _scheduled_test_result(final_evidence),
+                    ),
                 )
             )
+            # combine 默认采用最后一个 phase 的退出码；最后一阶段是调度器测试，
+            # 因此显式恢复 Claude 验证会话状态，避免测试失败被误报成进程异常。
+            result = replace(result, exit_code=verification_result.exit_code)
         else:
             # 已冻结的正式基线配置继续走原来的单会话路径，保证历史 fingerprint
             # 对应的实验协议不被后续架构开发悄悄改写。
@@ -343,6 +484,7 @@ def main() -> int:
         config,
         config.project_root / config.storage.runs / arguments.run_id,
         base_url=arguments.base_url,
+        workspace_base_commit=prepared.workspace_base_commit,
     )
     print(run_path)
     return 0

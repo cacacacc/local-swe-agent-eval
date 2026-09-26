@@ -69,7 +69,6 @@ def build_implementation_phase_prompt(
     verification_turns: int,
     max_file_read_lines: int,
     max_tool_output_chars: int,
-    visible_test_command: str | None = None,
 ) -> str:
     """为第一阶段追加明确的补丁交付点和上下文预算护栏。
 
@@ -78,13 +77,6 @@ def build_implementation_phase_prompt(
     把全部预算消耗完。
     """
 
-    sandbox_instruction = ""
-    if visible_test_command:
-        sandbox_instruction = (
-            "- Do not run project tests with the host Python environment. Use this "
-            "network-disabled visible-test prefix and append the test argv after `--`:\n"
-            f"  {visible_test_command}\n"
-        )
     return (
         f"{base_prompt.rstrip()}\n\n"
         "Current phase: implementation\n"
@@ -95,8 +87,12 @@ def build_implementation_phase_prompt(
         f"- Read at most {max_file_read_lines} source lines in one tool call.\n"
         f"- Keep each command output below about {max_tool_output_chars} characters.\n"
         "- Before assuming how an internal API works, find an existing repository usage.\n"
-        "- Write down a minimal reproduction or focused test command before editing.\n"
-        f"{sandbox_instruction}"
+        "- Do not run pytest, tox, project test scripts, package installers, or the "
+        "visible-test helper from Bash. The parent scheduler owns all test execution.\n"
+        "- Before finishing, write exactly one JSON object such as "
+        "`{\"argv\": [\"python\", \"-m\", \"pytest\", \"tests/test_one.py\"]}` "
+        "to `.agent-test-plan.json`. Use argv items, never a shell command string. This "
+        "control file is consumed and excluded from the patch.\n"
         f"- A fresh verification session owns the final {verification_turns} turns, so "
         "leave the working tree with your best concrete patch even if local dependencies "
         "prevent tests from running.\n"
@@ -109,43 +105,43 @@ def build_verification_phase_prompt(
     verification_turns: int,
     max_file_read_lines: int,
     max_tool_output_chars: int,
-    visible_test_command: str | None = None,
     candidate_patch: str = "",
+    scheduled_test_evidence: str = "",
 ) -> str:
-    """构造独立验证会话 Prompt，并重新注入任务目标以防上下文丢失。"""
-
-    sandbox_instruction = ""
-    if visible_test_command:
-        sandbox_instruction = (
-            "- Run repository tests only through this network-disabled visible-test prefix; "
-            "append the test argv after `--`:\n"
-            f"  {visible_test_command}\n"
-        )
+    """注入候选补丁和调度测试证据，构造无 Bash 的修复会话 Prompt。"""
     patch_block = (
         "Candidate patch collected relative to the task base commit\n"
         "<candidate_patch>\n"
         f"{candidate_patch.rstrip()}\n"
         "</candidate_patch>\n"
     )
+    test_block = (
+        "Scheduler-owned visible test evidence\n"
+        "<visible_test_evidence>\n"
+        f"{scheduled_test_evidence.rstrip()}\n"
+        "</visible_test_evidence>\n"
+    )
     return (
         f"{base_prompt.rstrip()}\n\n"
         "Current phase: verification and repair\n"
         f"- You have at most {verification_turns} turns. Do not restart broad exploration.\n"
         f"{patch_block}"
+        f"{test_block}"
         "- The patch above is authoritative even if plain `git diff` is empty because an "
         "earlier agent may have committed it. Do not inspect Git history.\n"
         "- Do not create another Git commit.\n"
-        "- If the candidate patch is non-empty, your first tool action must run the "
-        "issue's minimal reproduction or narrowest available test through the "
-        "visible-test sandbox. If it is empty, make a minimal patch first and test it next.\n"
-        f"{sandbox_instruction}"
+        "- Bash is disabled in this phase. Do not attempt pytest, package installation, "
+        "Git commands, or any host process; use Read and Edit to repair the files.\n"
         "- Treat the actual traceback or assertion as authoritative and repair the patch.\n"
         "- Search for an existing API usage before accepting unfamiliar calling syntax.\n"
         f"- Read at most {max_file_read_lines} source lines in one tool call.\n"
         f"- Keep each command output below about {max_tool_output_chars} characters; "
         "show only the first relevant failure and a short tail.\n"
-        "- Finish only after checking the diff relative to the task base commit. A generic "
-        "response or empty patch is a failure.\n"
+        "- The parent scheduler automatically reruns the accepted implementation argv. "
+        "Only if the test target must change, replace `.agent-test-plan.json` with a new "
+        "single-object argv plan using Edit. Never place a shell command string in it.\n"
+        "- Finish after inspecting every changed source file relevant to the candidate. A "
+        "generic response or empty patch is a failure.\n"
         "- Do not inspect or run hidden SWE-bench tests; use only repository-visible tests "
         "and reproductions derived from the problem statement.\n"
     )

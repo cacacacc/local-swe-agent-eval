@@ -12,6 +12,14 @@ def test_format_duration_uses_fixed_width_clock() -> None:
     assert format_duration(3661.9) == "01:01:01"
 
 
+def test_reporter_uses_thirty_second_heartbeat_by_default() -> None:
+    """所有长任务入口应共享 30 秒心跳，避免不同脚本的输出频率漂移。"""
+
+    reporter = ConsoleReporter(StringIO())
+
+    assert reporter.heartbeat_seconds == 30.0
+
+
 def test_reporter_prints_stage_task_and_aligned_table() -> None:
     """非 TTY 输出仍应包含阶段、题目进度和可读的汇总表。"""
 

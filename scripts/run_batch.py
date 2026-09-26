@@ -1,4 +1,4 @@
-"""串行求解固定十题，再批量官方评测并逐题导回结果。"""
+"""串行求解配置中冻结的题目，再批量官方评测并逐题导回结果。"""
 
 from __future__ import annotations
 
@@ -41,9 +41,13 @@ def select_fixed_tasks(
     ids_path: Path,
     snapshot: SWEbenchLoader,
     *,
-    expected_count: int,
+    expected_count: int | None = None,
 ) -> tuple[SWEbenchTask, ...]:
-    """按冻结 ID 文件的顺序选择安全快照，并严格检查题数与重复项。"""
+    """按冻结 ID 文件顺序选择任务，并按需校验调用方声明的题数。
+
+    冻结 ID 文件本身是实验题集的权威来源，因此默认不假设固定为十题。
+    ``expected_count`` 只作为用户显式要求的额外防误操作边界。
+    """
 
     try:
         raw_ids = json.loads(ids_path.read_text(encoding="utf-8"))
@@ -51,7 +55,9 @@ def select_fixed_tasks(
         raise AutomatedRunError(f"cannot read fixed task IDs {ids_path}: {error}") from error
     if not isinstance(raw_ids, list) or not all(isinstance(item, str) for item in raw_ids):
         raise AutomatedRunError("fixed task ID file must contain a JSON string array")
-    if len(raw_ids) != expected_count:
+    if not raw_ids:
+        raise AutomatedRunError("fixed task ID file must contain at least one task")
+    if expected_count is not None and len(raw_ids) != expected_count:
         raise AutomatedRunError(
             f"batch requires exactly {expected_count} fixed tasks, found {len(raw_ids)}"
         )
@@ -115,15 +121,17 @@ def _result_row(run_path: Path, task: SWEbenchTask) -> dict[str, Any]:
 
 
 def run_batch(arguments: argparse.Namespace) -> Path:
-    """完成正式十题流水线，并返回包含主要指标的批次汇总路径。"""
+    """完成冻结题集流水线，并返回包含主要指标的批次汇总路径。"""
 
     if not _SAFE_BATCH_ID.fullmatch(arguments.batch_id):
         raise AutomatedRunError("--batch-id contains unsafe characters")
-    if arguments.expected_tasks <= 0 or arguments.evaluation_timeout <= 0:
-        raise AutomatedRunError("task count and evaluation timeout must be positive")
+    if arguments.expected_tasks is not None and arguments.expected_tasks <= 0:
+        raise AutomatedRunError("expected task count must be positive")
+    if arguments.evaluation_timeout <= 0:
+        raise AutomatedRunError("evaluation timeout must be positive")
 
     config = ExperimentConfig.load(arguments.config)
-    # 十题脚本代表主要实验结果，不能在 Dev 参数仍可变化时误启动。
+    # 正式批处理代表主要实验结果，不能在 Dev 参数仍可变化时误启动。
     if config.experiment.phase != "evaluation":
         raise AutomatedRunError("batch script requires an evaluation configuration")
     config.require_frozen()
@@ -145,7 +153,7 @@ def run_batch(arguments: argparse.Namespace) -> Path:
 
     reporter = ConsoleReporter()
     reporter.banner(
-        "Local SWE-bench 十题正式实验",
+        "Local SWE-bench 正式批量实验",
         f"batch={arguments.batch_id}  tasks={len(tasks)}  model={config.model.name}",
     )
     # 在创建 batch 产物和运行第一个 Agent 之前一次性准备全部镜像。这样缺失镜像
@@ -201,6 +209,7 @@ def run_batch(arguments: argparse.Namespace) -> Path:
                     config,
                     config.project_root / config.storage.runs / run_id,
                     base_url=arguments.base_url,
+                    workspace_base_commit=prepared.workspace_base_commit,
                 )
             # 空 patch 仍必须进入正式 harness，才能诚实计入 empty patch rate。
             prediction_path = write_prediction(
@@ -308,7 +317,7 @@ def run_batch(arguments: argparse.Namespace) -> Path:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """声明正式批量运行参数；默认题数、workers 和超时与实验协议一致。"""
+    """声明正式批量运行参数；题数默认取冻结清单，workers 取实验配置。"""
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
@@ -319,7 +328,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--swebench-dataset", default="verified")
     parser.add_argument("--swebench-executable", type=Path)
     parser.add_argument("--base-url", default="http://localhost:11434")
-    parser.add_argument("--expected-tasks", type=int, default=10)
+    parser.add_argument(
+        "--expected-tasks",
+        type=int,
+        help="可选的题数断言；省略时以配置中的冻结任务清单为准",
+    )
     parser.add_argument("--evaluation-timeout", type=int, default=1800)
     parser.add_argument("--evaluation-workers", type=int)
     parser.add_argument("--allow-network-preparation", action="store_true")
@@ -327,7 +340,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    """执行十题正式实验，并打印最终 summary.json 路径。"""
+    """执行正式批量实验，并打印最终 summary.json 路径。"""
 
     summary_path = run_batch(build_parser().parse_args())
     print(f"batch_summary={summary_path}")

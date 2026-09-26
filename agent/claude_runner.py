@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 from typing import Any, Mapping, Sequence
@@ -54,8 +55,13 @@ def combine_phase_results(
     aggregate_usage: dict[str, int] = {}
     total_turns = 0
     total_tool_calls = 0
-    total_visible_test_calls = 0
     total_host_test_calls = 0
+    total_agent_test_commands = 0
+    total_visible_test_requests = 0
+    total_visible_test_rejected = 0
+    total_visible_test_executions = 0
+    total_visible_test_passed = 0
+    total_visible_test_timed_out = 0
 
     for phase_name, result in phases:
         events.append(
@@ -81,8 +87,25 @@ def combine_phase_results(
         phase_metrics[phase_name] = dict(result.metrics)
         total_turns += int(result.metrics.get("agent_turns", 0))
         total_tool_calls += int(result.metrics.get("tool_calls", 0))
-        total_visible_test_calls += int(result.metrics.get("visible_test_calls", 0))
         total_host_test_calls += int(result.metrics.get("host_test_calls", 0))
+        total_agent_test_commands += int(
+            result.metrics.get("agent_test_command_calls", 0)
+        )
+        total_visible_test_requests += int(
+            result.metrics.get("visible_test_requests", 0)
+        )
+        total_visible_test_rejected += int(
+            result.metrics.get("visible_test_rejected", 0)
+        )
+        total_visible_test_executions += int(
+            result.metrics.get("visible_test_executions", 0)
+        )
+        total_visible_test_passed += int(
+            result.metrics.get("visible_test_passed", 0)
+        )
+        total_visible_test_timed_out += int(
+            bool(result.metrics.get("visible_test_timed_out", False))
+        )
         usage = result.metrics.get("token_usage", {})
         if isinstance(usage, Mapping):
             for key, value in usage.items():
@@ -92,7 +115,15 @@ def combine_phase_results(
     metrics: dict[str, Any] = {
         "agent_turns": total_turns,
         "tool_calls": total_tool_calls,
-        "visible_test_calls": total_visible_test_calls,
+        # 旧字段保留为兼容别名，但只等于调度器确认创建过容器的执行次数，不能再
+        # 通过 Bash 文本中出现脚本名称来推测。
+        "visible_test_calls": total_visible_test_executions,
+        "visible_test_requests": total_visible_test_requests,
+        "visible_test_rejected": total_visible_test_rejected,
+        "visible_test_executions": total_visible_test_executions,
+        "visible_test_passed": total_visible_test_passed,
+        "visible_test_timed_out": total_visible_test_timed_out,
+        "agent_test_command_calls": total_agent_test_commands,
         "host_test_calls": total_host_test_calls,
         "timed_out": any(result.timed_out for _, result in phases),
         "token_usage": aggregate_usage,
@@ -138,6 +169,40 @@ def _sanitize_value(value: Any) -> Any:
     return value
 
 
+_TEST_COMMAND_PATTERN = re.compile(
+    r"(?:^|[;&|]\s*)"
+    r"(?:\S*python\S*\s+-m\s+)?"
+    r"(?:pytest|tox|sphinx-build|npm\s+test)(?:\s|$)",
+    flags=re.IGNORECASE,
+)
+
+
+def _looks_like_test_command(command: str) -> bool:
+    """识别模型实际尝试执行的测试，而不是对脚本名称做子串计数。
+
+    ``cat scripts/run_visible_tests.py`` 不应被记成测试；直接执行该脚本、仓库专用
+    ``runtests.py``/``bin/test`` 以及常见测试入口才属于模型发起的宿主测试尝试。
+    该指标只用于合规分析，真正的 visible execution 由 Docker 调度结果产生。
+    """
+
+    stripped = command.strip()
+    if _TEST_COMMAND_PATTERN.search(stripped):
+        return True
+    first_segment = re.split(r"[;&|]", stripped, maxsplit=1)[0].strip()
+    tokens = first_segment.split()
+    if not tokens:
+        return False
+    executable = Path(tokens[0]).name.lower()
+    if executable in {"cat", "head", "less", "more", "rg", "sed", "tail"}:
+        return False
+    return any(
+        token.endswith("run_visible_tests.py")
+        or token.endswith("runtests.py")
+        or token.rstrip("/").endswith("bin/test")
+        for token in tokens
+    )
+
+
 class ClaudeCodeRunner:
     """以固定 CLI 参数执行 Claude Code，并实施本地模型与外联限制。"""
 
@@ -151,6 +216,7 @@ class ClaudeCodeRunner:
         max_output_tokens: int,
         base_url: str = "http://localhost:11434",
         executable: str = "claude",
+        allow_bash: bool = True,
     ) -> None:
         """验证实验上限和 Ollama endpoint，拒绝把请求发往远程主机。"""
 
@@ -182,10 +248,16 @@ class ClaudeCodeRunner:
         self.max_output_tokens = max_output_tokens
         self.base_url = base_url.rstrip("/")
         self.executable = executable
+        self.allow_bash = allow_bash
 
     def command(self, prompt: str) -> list[str]:
         """构造无 shell 插值的固定命令，避免题目文本被解释为命令。"""
 
+        disallowed_tools = ["WebFetch", "WebSearch"]
+        if not self.allow_bash:
+            # 验证会话只能 Read/Edit；真正的测试由父进程在 Docker 中执行，CLI
+            # 级禁用比 Prompt 软约束更能防止小模型回到宿主 pytest/pip。
+            disallowed_tools.append("Bash")
         return [
             self.executable,
             "--print",
@@ -206,8 +278,7 @@ class ClaudeCodeRunner:
             "--no-chrome",
             "--disable-slash-commands",
             "--disallowed-tools",
-            "WebFetch",
-            "WebSearch",
+            *disallowed_tools,
         ]
 
     def environment(self, source: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -307,8 +378,8 @@ class ClaudeCodeRunner:
 
         turns = 0
         tool_calls = 0
-        visible_test_calls = 0
         host_test_calls = 0
+        agent_test_command_calls = 0
         usage: dict[str, int] = {}
         terminal: dict[str, Any] = {}
         for event in events:
@@ -336,22 +407,10 @@ class ClaudeCodeRunner:
                         )
                         if not isinstance(command, str):
                             continue
-                        lowered = command.lower()
-                        if "run_visible_tests" in lowered:
-                            visible_test_calls += 1
-                        elif any(
-                            marker in lowered
-                            for marker in (
-                                "pytest",
-                                "unittest",
-                                "tox",
-                                "npm test",
-                                " test",
-                                "sphinx-build",
-                            )
-                        ):
-                            # 宿主测试与 Docker 沙箱测试必须分开计数；Dev 轨迹表明
-                            # 小模型可能忽略 Prompt，错误调用调度仓库的 Python。
+                        if _looks_like_test_command(command):
+                            # 所有由模型 Bash 发起的测试都属于越过调度器的宿主尝试；
+                            # 即使文本提到 run_visible_tests，也不能冒充已创建容器。
+                            agent_test_command_calls += 1
                             host_test_calls += 1
             # Claude Code 的最终 result 事件提供权威用量；只读取该事件，避免把
             # 每条 message 的增量 usage 与最终累计值重复相加。
@@ -376,7 +435,13 @@ class ClaudeCodeRunner:
         summary = {
             "agent_turns": turns,
             "tool_calls": tool_calls,
-            "visible_test_calls": visible_test_calls,
+            "visible_test_calls": 0,
+            "visible_test_requests": 0,
+            "visible_test_rejected": 0,
+            "visible_test_executions": 0,
+            "visible_test_passed": 0,
+            "visible_test_timed_out": False,
+            "agent_test_command_calls": agent_test_command_calls,
             "host_test_calls": host_test_calls,
             "timed_out": timed_out,
             "token_usage": usage,
@@ -493,17 +558,7 @@ class ClaudeCodeRunner:
             if block.get("type") == "tool_use" and block.get("name") == "Bash":
                 tool_input = block.get("input")
                 command = tool_input.get("command") if isinstance(tool_input, Mapping) else None
-                if isinstance(command, str) and any(
-                    marker in command.lower()
-                    for marker in (
-                        "pytest",
-                        "unittest",
-                        "tox",
-                        "npm test",
-                        " test",
-                        "run_visible_tests",
-                    )
-                ):
+                if isinstance(command, str) and _looks_like_test_command(command):
                     tool_id = block.get("id")
                     if isinstance(tool_id, str):
                         test_tool_ids.add(tool_id)

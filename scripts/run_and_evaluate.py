@@ -197,6 +197,7 @@ def run_pipeline(arguments: argparse.Namespace) -> Path:
             config,
             config.project_root / config.storage.runs / arguments.run_id,
             base_url=arguments.base_url,
+            workspace_base_commit=prepared.workspace_base_commit,
         )
 
     reporter.stage(2, 4, "生成官方 prediction")

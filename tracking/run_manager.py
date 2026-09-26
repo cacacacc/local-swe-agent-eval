@@ -40,6 +40,7 @@ class RunSession:
         task: SWEbenchTask,
         metadata: dict[str, Any],
         started_monotonic: float,
+        patch_base_commit: str,
     ) -> None:
         """保存运行上下文；单调时钟专用于准确计算耗时。"""
 
@@ -47,6 +48,7 @@ class RunSession:
         self.task = task
         self._metadata = metadata
         self._started_monotonic = started_monotonic
+        self._patch_base_commit = patch_base_commit
         self._finished = False
 
     def collect_patch(self, repository: Path | str) -> str:
@@ -54,8 +56,9 @@ class RunSession:
 
         ``git diff`` 默认不会包含未跟踪文件，因此先用 ``--intent-to-add``
         将它们标记为“计划加入”，但不会真正创建 commit。diff 必须显式以任务的
-        ``base_commit`` 为左侧基线；Agent 可能自行 commit，若只比较 working tree
-        会把已经提交的有效修复误判为空 patch。
+        隔离仓库的单提交基线为左侧；Agent 可能自行 commit，若只比较 working
+        tree 会把已经提交的有效修复误判为空 patch。上游原始 SHA 只用于审计，
+        不能作为隔离仓库中并不存在的对象参与 diff。
         """
 
         repository_path = Path(repository).resolve()
@@ -65,7 +68,7 @@ class RunSession:
             "diff",
             "--binary",
             "--no-ext-diff",
-            self.task.base_commit,
+            self._patch_base_commit,
             "--",
         )
 
@@ -189,6 +192,7 @@ class RunManager:
         model: str,
         prompt: str,
         configuration: Mapping[str, Any] | None = None,
+        patch_base_commit: str | None = None,
     ) -> RunSession:
         """启动新会话并立即持久化 prompt 与初始元数据。
 
@@ -223,7 +227,17 @@ class RunManager:
             "status": "running",
             "configuration": dict(configuration) if configuration is not None else None,
         }
-        session = RunSession(run_path, task, metadata, time.monotonic())
+        # 旧调用方仍可传入普通 checkout，此时原始 base commit 继续有效；新的隔离
+        # RepositoryManager 会显式传入重新初始化后的 workspace baseline。
+        effective_patch_base = patch_base_commit or task.base_commit
+        metadata["workspace_base_commit"] = effective_patch_base
+        session = RunSession(
+            run_path,
+            task,
+            metadata,
+            time.monotonic(),
+            effective_patch_base,
+        )
         session._write_json("metadata.json", metadata)
         session._write_text("prompt.txt", prompt)
         return session

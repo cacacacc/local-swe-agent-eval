@@ -145,6 +145,7 @@ class AgentSettings:
     max_turns: int
     prompt_template: Path
     verification_turns: int
+    test_planning_turns: int
     max_file_read_lines: int
     max_tool_output_chars: int
     visible_test_sandbox: bool
@@ -299,6 +300,7 @@ class ExperimentConfig:
             },
             optional={
                 "verification_turns",
+                "test_planning_turns",
                 "max_file_read_lines",
                 "max_tool_output_chars",
                 "visible_test_sandbox",
@@ -324,11 +326,16 @@ class ExperimentConfig:
                 agent_raw["prompt_template"],
                 "agent.prompt_template",
             ),
-            # 旧的冻结配置没有这些字段，默认值保持原来的单会话行为；只有新的
-            # Dev v2 配置显式启用双阶段运行和工具输出护栏。
+            # 旧的冻结配置没有这些字段，默认值保持原来的单会话行为；新的 v2
+            # 配置显式保留测试规划与验证预算，并启用工具输出护栏。
             verification_turns=_integer(
                 agent_raw.get("verification_turns", 0),
                 "agent.verification_turns",
+                minimum=0,
+            ),
+            test_planning_turns=_integer(
+                agent_raw.get("test_planning_turns", 0),
+                "agent.test_planning_turns",
                 minimum=0,
             ),
             max_file_read_lines=_integer(
@@ -351,9 +358,11 @@ class ExperimentConfig:
                 minimum=0,
             ),
         )
-        if agent.verification_turns >= agent.max_turns:
+        reserved_turns = agent.verification_turns + agent.test_planning_turns
+        if reserved_turns >= agent.max_turns:
             raise ConfigurationError(
-                "agent.verification_turns must be smaller than agent.max_turns"
+                "agent verification and test planning turns must leave at least one "
+                "implementation turn"
             )
         if agent.verification_turns and (
             agent.max_file_read_lines <= 0 or agent.max_tool_output_chars <= 0
@@ -365,6 +374,17 @@ class ExperimentConfig:
         if agent.visible_test_sandbox and agent.visible_test_timeout_seconds <= 0:
             raise ConfigurationError(
                 "visible test sandbox requires positive visible_test_timeout_seconds"
+            )
+        if agent.test_planning_turns and not agent.visible_test_sandbox:
+            raise ConfigurationError(
+                "test planning turns require the visible test sandbox"
+            )
+        if agent.verification_turns and (
+            not agent.visible_test_sandbox or agent.test_planning_turns <= 0
+        ):
+            raise ConfigurationError(
+                "verification requires visible_test_sandbox and positive "
+                "test_planning_turns"
             )
 
         # 环境准备可以联网下载依赖；正式求解必须离线以降低答案泄漏风险。
@@ -493,8 +513,11 @@ class ExperimentConfig:
             "timeout_seconds": self.agent.timeout_seconds,
             "max_turns": self.agent.max_turns,
             "verification_turns": self.agent.verification_turns,
+            "test_planning_turns": self.agent.test_planning_turns,
             "implementation_turns": (
-                self.agent.max_turns - self.agent.verification_turns
+                self.agent.max_turns
+                - self.agent.verification_turns
+                - self.agent.test_planning_turns
             ),
             "max_file_read_lines": self.agent.max_file_read_lines,
             "max_tool_output_chars": self.agent.max_tool_output_chars,

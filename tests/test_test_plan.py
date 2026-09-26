@@ -14,18 +14,27 @@ def write_plan(repository: Path, value: object) -> Path:
     return path
 
 
-def test_consume_accepts_argv_and_removes_control_file(tmp_path: Path) -> None:
-    """合法 argv 应原样保留，同时控制文件不得进入最终 patch。"""
+def test_consume_accepts_target_and_regression_argv(tmp_path: Path) -> None:
+    """两类合法 argv 应原样保留，同时控制文件不得进入最终 patch。"""
 
     path = write_plan(
         tmp_path,
-        {"argv": ["python", "-m", "pytest", "tests/test_one.py"]},
+        {
+            "target_argv": [
+                "python", "-m", "pytest", "tests/test_one.py::test_bug"
+            ],
+            "regression_argv": [
+                "python", "-m", "pytest", "tests/test_one.py"
+            ],
+        },
     )
 
     request = consume_test_plan(tmp_path)
 
     assert request.accepted is True
-    assert request.argv == ("python", "-m", "pytest", "tests/test_one.py")
+    assert request.target_argv[-1] == "tests/test_one.py::test_bug"
+    assert request.regression_argv[-1] == "tests/test_one.py"
+    assert [label for label, _ in request.commands] == ["target", "regression"]
     assert not path.exists()
 
 
@@ -34,13 +43,13 @@ def test_consume_rejects_shell_and_unknown_fields(tmp_path: Path) -> None:
 
     path = write_plan(
         tmp_path,
-        {"argv": ["bash", "-lc", "pytest"], "network": True},
+        {"target_argv": ["bash", "-lc", "pytest"], "network": True},
     )
 
     request = consume_test_plan(tmp_path)
 
     assert request.status == "rejected"
-    assert "only the argv" in request.error
+    assert "target_argv and regression_argv" in request.error
     assert not path.exists()
 
 
@@ -57,9 +66,47 @@ def test_consume_reports_missing_without_creating_file(tmp_path: Path) -> None:
 def test_consume_rejects_shell_executable_even_with_exact_schema(tmp_path: Path) -> None:
     """argv 虽无 shell 插值，仍不得把 shell 本身作为测试入口。"""
 
-    write_plan(tmp_path, {"argv": ["bash", "-lc", "pytest"]})
+    write_plan(
+        tmp_path,
+        {
+            "target_argv": ["bash", "-lc", "pytest"],
+            "regression_argv": ["python", "-m", "pytest", "tests"],
+        },
+    )
 
     request = consume_test_plan(tmp_path)
 
     assert request.status == "rejected"
     assert request.error == "test executable is forbidden: bash"
+
+
+def test_consume_rejects_duplicate_target_and_regression(tmp_path: Path) -> None:
+    """两条相同命令不能冒充目标测试与相邻回归测试。"""
+
+    command = ["python", "-m", "pytest", "tests/test_one.py"]
+    write_plan(
+        tmp_path,
+        {"target_argv": command, "regression_argv": command},
+    )
+
+    request = consume_test_plan(tmp_path)
+
+    assert request.status == "rejected"
+    assert request.error == "target and regression argv must be different"
+
+
+def test_consume_rejects_full_shell_command_hidden_in_executable(tmp_path: Path) -> None:
+    """整条命令不能作为 argv[0] 绕过 shell 禁令并产生误导性的 exit 127。"""
+
+    write_plan(
+        tmp_path,
+        {
+            "target_argv": ["python -m pytest tests/test_bug.py"],
+            "regression_argv": ["python", "-m", "pytest", "tests/test_bug.py"],
+        },
+    )
+
+    request = consume_test_plan(tmp_path)
+
+    assert request.status == "rejected"
+    assert request.error == "test executable must be one argv item without whitespace"

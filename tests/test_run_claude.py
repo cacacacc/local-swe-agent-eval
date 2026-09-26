@@ -7,7 +7,13 @@ from agent.test_plan import TestPlanRequest as StructuredTestPlanRequest
 from agent.test_sandbox import VisibleTestResult
 from benchmark.task import SWEbenchTask
 from experiment.config import ExperimentConfig
-from scripts.run_claude import _apply_patch_gate, _execute_scheduled_test
+from scripts.run_claude import (
+    ScheduledTestExecution,
+    ScheduledTestEvidence,
+    _apply_patch_gate,
+    _build_test_inventory,
+    _execute_scheduled_test,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -44,9 +50,16 @@ def test_patch_gate_rejects_generic_success_with_empty_diff() -> None:
     assert validated.exit_code == 2
     assert validated.metrics["patch_gate"] == {
         "patch_generated": False,
+        "existing_source_modified": False,
+        "patch_bytes": 1,
+        "modified_file_count": 0,
+        "forbidden_artifacts": [],
+        "patch_too_large": False,
+        "too_many_files": False,
         "test_attempted": False,
         "visible_test_attempted": False,
         "host_test_attempted": False,
+        "host_test_valid": False,
     }
     assert validated.events[-1]["event_type"] == "patch_validation"
 
@@ -60,16 +73,89 @@ def test_patch_gate_records_test_evidence_without_overriding_cli_failure() -> No
             test_output="$ pytest\n1 failed\n",
             host_test_calls=1,
         ),
-        "diff --git a/a.py b/a.py\n",
+        "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-old\n+new\n",
     )
 
     assert validated.exit_code == 1
     assert validated.metrics["patch_gate"] == {
         "patch_generated": True,
-        "test_attempted": True,
+        "existing_source_modified": True,
+        "patch_bytes": 69,
+        "modified_file_count": 1,
+        "forbidden_artifacts": [],
+        "patch_too_large": False,
+        "too_many_files": False,
+        "test_attempted": False,
         "visible_test_attempted": False,
         "host_test_attempted": True,
+        "host_test_valid": False,
     }
+
+
+def test_patch_gate_rejects_only_new_reproduction_files() -> None:
+    """只新增复现或临时文件不能冒充对既有产品源码的修复。"""
+
+    patch = (
+        "diff --git a/reproduce.py b/reproduce.py\n"
+        "new file mode 100644\n"
+        "--- /dev/null\n+++ b/reproduce.py\n@@ -0,0 +1 @@\n+print(1)\n"
+    )
+
+    validated = _apply_patch_gate(_result(), patch)
+
+    assert validated.exit_code == 2
+    assert validated.metrics["patch_gate"]["existing_source_modified"] is False
+
+
+def test_patch_gate_cannot_be_bypassed_by_modifying_existing_documentation() -> None:
+    """修改既有 README 仍不属于产品源码修复，不能绕过补丁门禁。"""
+
+    patch = (
+        "diff --git a/README.md b/README.md\n"
+        "--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old\n+new\n"
+    )
+
+    validated = _apply_patch_gate(_result(), patch)
+
+    assert validated.exit_code == 2
+    assert validated.metrics["patch_gate"]["existing_source_modified"] is False
+
+
+def test_patch_gate_rejects_virtual_environment_even_with_source_fix() -> None:
+    """源码修改不能掩盖误加入虚拟环境等大规模生成物。"""
+
+    patch = (
+        "diff --git a/pkg/core.py b/pkg/core.py\n"
+        "--- a/pkg/core.py\n+++ b/pkg/core.py\n@@ -1 +1 @@\n-old\n+new\n"
+        "diff --git a/.testvenv/bin/python b/.testvenv/bin/python\n"
+        "new file mode 100755\n--- /dev/null\n+++ b/.testvenv/bin/python\n"
+        "@@ -0,0 +1 @@\n+binary\n"
+    )
+
+    validated = _apply_patch_gate(_result(), patch)
+
+    assert validated.exit_code == 2
+    assert validated.metrics["patch_gate"]["existing_source_modified"] is True
+    assert validated.metrics["patch_gate"]["forbidden_artifacts"] == [
+        ".testvenv/bin/python"
+    ]
+
+
+def test_patch_gate_rejects_scratch_reproduction_beside_source_fix() -> None:
+    """临时复现脚本不能因为同时存在源码修改就混入最终交付。"""
+
+    patch = (
+        "diff --git a/pkg/core.py b/pkg/core.py\n"
+        "--- a/pkg/core.py\n+++ b/pkg/core.py\n@@ -1 +1 @@\n-old\n+new\n"
+        "diff --git a/test_bug.py b/test_bug.py\n"
+        "new file mode 100644\n--- /dev/null\n+++ b/test_bug.py\n"
+        "@@ -0,0 +1 @@\n+assert False\n"
+    )
+
+    validated = _apply_patch_gate(_result(), patch)
+
+    assert validated.exit_code == 2
+    assert validated.metrics["patch_gate"]["forbidden_artifacts"] == ["test_bug.py"]
 
 
 def test_v2_config_keeps_scheduler_resource_limits() -> None:
@@ -89,7 +175,10 @@ def test_scheduler_metrics_require_a_real_sandbox_result(
 
     request = StructuredTestPlanRequest(
         status="accepted",
-        argv=("python", "-m", "pytest", "tests/test_one.py"),
+        target_argv=(
+            "python", "-m", "pytest", "tests/test_one.py::test_bug"
+        ),
+        regression_argv=("python", "-m", "pytest", "tests/test_one.py"),
     )
     monkeypatch.setattr("scripts.run_claude.consume_test_plan", lambda _: request)
 
@@ -100,12 +189,13 @@ def test_scheduler_metrics_require_a_real_sandbox_result(
             assert repository == tmp_path
             assert instance_id == "owner__repo-7"
             assert base_commit == "a" * 40
-            assert command == request.argv
+            assert command in {request.target_argv, request.regression_argv}
             return VisibleTestResult(
                 exit_code=0,
                 output="1 passed\n",
                 image="swebench/example:latest",
                 timed_out=False,
+                command_started=True,
             )
 
     task = SWEbenchTask(
@@ -123,6 +213,150 @@ def test_scheduler_metrics_require_a_real_sandbox_result(
     )
 
     assert evidence.metrics()["visible_test_requests"] == 1
-    assert evidence.metrics()["visible_test_executions"] == 1
-    assert evidence.metrics()["visible_test_passed"] == 1
+    assert evidence.metrics()["visible_test_executions"] == 2
+    assert evidence.metrics()["visible_test_passed"] == 2
     assert evidence.metrics()["visible_test_rejected"] == 0
+    assert evidence.ready_for_verification is True
+    assert evidence.ready_for_implementation is False
+    assert evidence.all_tests_passed is True
+
+
+def test_missing_plan_is_counted_and_blocks_verification() -> None:
+    """缺失计划必须形成显式指标，且不能被当作可进入 verification 的证据。"""
+
+    evidence = ScheduledTestEvidence(
+        request=StructuredTestPlanRequest(status="missing")
+    )
+
+    assert evidence.metrics()["visible_test_missing"] == 1
+    assert evidence.metrics()["visible_test_executions"] == 0
+    assert evidence.ready_for_verification is False
+
+
+def test_baseline_gate_requires_failing_target_and_passing_regression() -> None:
+    """基线只有稳定复现目标失败且相邻回归全绿时才能放行 implementation。"""
+
+    request = StructuredTestPlanRequest(
+        status="accepted",
+        target_argv=("python", "-m", "pytest", "tests/test_bug.py::test_bug"),
+        regression_argv=("python", "-m", "pytest", "tests/test_neighbor.py"),
+    )
+    evidence = ScheduledTestEvidence(
+        request=request,
+        executions=(
+            ScheduledTestExecution(
+                label="target",
+                argv=request.target_argv,
+                result=VisibleTestResult(1, "failed", "image", False, True),
+            ),
+            ScheduledTestExecution(
+                label="regression",
+                argv=request.regression_argv,
+                result=VisibleTestResult(0, "passed", "image", False, True),
+            ),
+        ),
+    )
+
+    assert evidence.ready_for_implementation is True
+    assert evidence.ready_for_verification is True
+    assert evidence.all_tests_passed is False
+
+
+def test_baseline_gate_rejects_missing_test_command_exit_code() -> None:
+    """exit 127 属于命令错误，不能被当作目标行为的基线复现。"""
+
+    request = StructuredTestPlanRequest(
+        status="accepted",
+        target_argv=("pytest", "tests/test_bug.py"),
+        regression_argv=("pytest", "tests/test_neighbor.py"),
+    )
+    evidence = ScheduledTestEvidence(
+        request=request,
+        executions=(
+            ScheduledTestExecution(
+                label="target",
+                argv=request.target_argv,
+                result=VisibleTestResult(127, "not found", "image", False, True),
+            ),
+            ScheduledTestExecution(
+                label="regression",
+                argv=request.regression_argv,
+                result=VisibleTestResult(0, "passed", "image", False, True),
+            ),
+        ),
+    )
+
+    assert evidence.ready_for_implementation is False
+
+
+def test_test_inventory_prioritizes_issue_terms_and_stays_bounded(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """父进程索引应优先列出 issue 相关测试，并在注入 Prompt 前限制长度。"""
+
+    class Completed:
+        """模拟 git ls-files 的最小结果。"""
+
+        returncode = 0
+        stderr = ""
+        stdout = (
+            "tests/test_unrelated.py\n"
+            "xarray/tests/test_indexes.py\n"
+            "src/core.py\n"
+        )
+
+    monkeypatch.setattr("scripts.run_claude.subprocess.run", lambda *args, **kwargs: Completed())
+
+    inventory = _build_test_inventory(
+        tmp_path,
+        "indexes should preserve coordinate dtype",
+        maximum_chars=80,
+    )
+
+    assert inventory.splitlines()[0] == "- xarray/tests/test_indexes.py"
+    assert len(inventory) <= 80
+
+
+def test_scheduler_rejects_container_result_before_test_command_started(
+    tmp_path: Path,
+) -> None:
+    """补丁应用等前置步骤失败时，不得冒充真实 Docker 测试或测试超时。"""
+
+    request = StructuredTestPlanRequest(
+        status="accepted",
+        target_argv=("python", "-m", "pytest", "tests/test_bug.py::test_bug"),
+        regression_argv=("python", "-m", "pytest", "tests/test_bug.py"),
+    )
+
+    class FakeSandbox:
+        """模拟容器已创建但测试命令尚未启动就失败的结果。"""
+
+        def run(self, repository, *, instance_id, base_commit, command):
+            return VisibleTestResult(
+                exit_code=1,
+                output="error: patch failed\n",
+                image="swebench/example:latest",
+                timed_out=True,
+                command_started=False,
+            )
+
+    task = SWEbenchTask(
+        instance_id="owner__repo-8",
+        repo="owner/repo",
+        base_commit="b" * 40,
+        problem_statement="Fix it.",
+    )
+    evidence = _execute_scheduled_test(
+        tmp_path,
+        task=task,
+        workspace_base_commit="a" * 40,
+        sandbox=FakeSandbox(),
+        request=request,
+    )
+
+    metrics = evidence.metrics()
+    assert metrics["visible_test_executions"] == 0
+    assert metrics["visible_test_timed_out"] is False
+    assert metrics["visible_test_rejected"] == 1
+    assert evidence.ready_for_verification is False

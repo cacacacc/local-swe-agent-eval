@@ -13,7 +13,7 @@ dataset:
   split: test
   tasks_file: experiments/evaluation_tasks_15_seed42.json
 
-# 保持与十题 v2 ablation 相同的模型和两阶段预算，便于横向比较。
+# 保持与十题 v2 相同模型，并采用 4+30+10 的“先测试、后实现、再验证”预算。
 model:
   runtime: ollama
   name: qwen3.5:9b
@@ -23,8 +23,9 @@ model:
 agent:
   framework: claude-code
   timeout_seconds: 5400
-  max_turns: 40
+  max_turns: 44
   verification_turns: 10
+  test_planning_turns: 4
   max_file_read_lines: 200
   max_tool_output_chars: 12000
   visible_test_sandbox: true

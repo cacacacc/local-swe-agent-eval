@@ -58,6 +58,7 @@ def combine_phase_results(
     total_host_test_calls = 0
     total_agent_test_commands = 0
     total_visible_test_requests = 0
+    total_visible_test_missing = 0
     total_visible_test_rejected = 0
     total_visible_test_executions = 0
     total_visible_test_passed = 0
@@ -94,6 +95,9 @@ def combine_phase_results(
         total_visible_test_requests += int(
             result.metrics.get("visible_test_requests", 0)
         )
+        total_visible_test_missing += int(
+            result.metrics.get("visible_test_missing", 0)
+        )
         total_visible_test_rejected += int(
             result.metrics.get("visible_test_rejected", 0)
         )
@@ -119,6 +123,7 @@ def combine_phase_results(
         # 通过 Bash 文本中出现脚本名称来推测。
         "visible_test_calls": total_visible_test_executions,
         "visible_test_requests": total_visible_test_requests,
+        "visible_test_missing": total_visible_test_missing,
         "visible_test_rejected": total_visible_test_rejected,
         "visible_test_executions": total_visible_test_executions,
         "visible_test_passed": total_visible_test_passed,
@@ -437,6 +442,7 @@ class ClaudeCodeRunner:
             "tool_calls": tool_calls,
             "visible_test_calls": 0,
             "visible_test_requests": 0,
+            "visible_test_missing": 0,
             "visible_test_rejected": 0,
             "visible_test_executions": 0,
             "visible_test_passed": 0,

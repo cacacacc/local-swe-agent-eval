@@ -147,6 +147,7 @@ def test_summary_counts_turns_tools_and_final_usage_without_double_counting() ->
         "tool_calls": 1,
         "visible_test_calls": 0,
         "visible_test_requests": 0,
+        "visible_test_missing": 0,
         "visible_test_rejected": 0,
         "visible_test_executions": 0,
         "visible_test_passed": 0,

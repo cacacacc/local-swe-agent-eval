@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 import re
+import subprocess
 from typing import Any
 
 from agent.claude_runner import (
@@ -21,6 +22,7 @@ from agent.claude_runner import (
 from agent.prompt_builder import (
     PromptBuilder,
     build_implementation_phase_prompt,
+    build_test_planning_phase_prompt,
     build_verification_phase_prompt,
 )
 from agent.test_plan import TestPlanRequest, consume_test_plan
@@ -39,6 +41,56 @@ from tracking.run_manager import RunManager
 
 
 _SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9_.-]+$")
+_SOURCE_SUFFIXES = {
+    ".c",
+    ".cc",
+    ".cpp",
+    ".css",
+    ".go",
+    ".h",
+    ".hpp",
+    ".html",
+    ".java",
+    ".jinja",
+    ".jinja2",
+    ".js",
+    ".jsx",
+    ".php",
+    ".pxd",
+    ".py",
+    ".pyi",
+    ".pyx",
+    ".rb",
+    ".rs",
+    ".scss",
+    ".ts",
+    ".tsx",
+}
+_FORBIDDEN_PATCH_PARTS = {
+    ".mypy_cache",
+    ".pytest_cache",
+    ".testvenv",
+    ".tox",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    "site-packages",
+    "venv",
+}
+_FORBIDDEN_PATCH_NAMES = {
+    ".agent-test-plan.json",
+    "bug_repro.py",
+    "repro.py",
+    "reproduce.py",
+    "test_bug.py",
+}
+_MAX_PATCH_BYTES = 1_000_000
+_MAX_PATCH_FILES = 100
+_INVENTORY_STOP_WORDS = {
+    "about", "after", "before", "because", "could", "description", "does",
+    "from", "have", "into", "issue", "model", "should", "that", "this",
+    "when", "where", "with", "would",
+}
 
 
 def _runner(
@@ -63,21 +115,28 @@ def _runner(
 
 
 def _apply_patch_gate(result: ClaudeCodeResult, patch: str) -> ClaudeCodeResult:
-    """把空补丁从“正常完成”改为明确失败，并记录测试证据是否存在。
+    """拒绝空补丁、非源码交付和生成物污染，并记录测试证据。
 
     该门禁不把“运行过测试”当作成功，因为部分仓库在宿主环境没有依赖；真正的
-    resolved 状态仍只由官方 harness 决定。它只消除模型通用回复造成的假完成。
+    resolved 状态仍只由官方 harness 决定。它消除通用回复、临时环境和异常大补丁
+    造成的假完成，但不把本地门禁通过解释为官方正确。
     """
 
     patch_generated = bool(patch.strip())
+    existing_source_modified = _patch_modifies_existing_source(patch)
+    patch_safety = _inspect_patch_safety(patch)
     metrics = dict(result.metrics)
     visible_executions = int(metrics.get("visible_test_executions", 0))
     host_attempts = int(metrics.get("host_test_calls", 0))
     metrics["patch_gate"] = {
         "patch_generated": patch_generated,
-        "test_attempted": visible_executions > 0 or host_attempts > 0,
+        "existing_source_modified": existing_source_modified,
+        **patch_safety,
+        # 宿主测试没有使用 SWE-bench instance 环境，永远不能满足测试门禁。
+        "test_attempted": visible_executions > 0,
         "visible_test_attempted": visible_executions > 0,
         "host_test_attempted": host_attempts > 0,
+        "host_test_valid": False,
     }
     events = list(result.events)
     events.append(
@@ -89,37 +148,251 @@ def _apply_patch_gate(result: ClaudeCodeResult, patch: str) -> ClaudeCodeResult:
         }
     )
     exit_code = result.exit_code
-    if not patch_generated and exit_code == 0:
+    delivery_valid = (
+        patch_generated
+        and existing_source_modified
+        and not patch_safety["forbidden_artifacts"]
+        and not patch_safety["patch_too_large"]
+        and not patch_safety["too_many_files"]
+    )
+    if not delivery_valid and exit_code == 0:
         # 2 表示运行器的交付物门禁失败，区别于 Claude CLI 自身的退出码 1。
         exit_code = 2
     return replace(result, exit_code=exit_code, events=tuple(events), metrics=metrics)
 
 
-@dataclass(frozen=True, slots=True)
-class ScheduledTestEvidence:
-    """一次调度器测试尝试及其可审计结果。"""
+def _inspect_patch_safety(patch: str) -> dict[str, Any]:
+    """识别虚拟环境等生成物，并限制异常大的多文件补丁。"""
 
-    request: TestPlanRequest
+    paths: list[Path] = []
+    for match in re.finditer(r"^diff --git a/(.+?) b/(.+?)$", patch, re.MULTILINE):
+        paths.append(Path(match.group(2)))
+    forbidden = sorted(
+        {
+            path.as_posix()
+            for path in paths
+            if (
+                {part.lower() for part in path.parts} & _FORBIDDEN_PATCH_PARTS
+                or path.name.lower() in _FORBIDDEN_PATCH_NAMES
+            )
+        }
+    )
+    return {
+        "patch_bytes": len(patch.encode("utf-8")),
+        "modified_file_count": len(paths),
+        "forbidden_artifacts": forbidden,
+        "patch_too_large": len(patch.encode("utf-8")) > _MAX_PATCH_BYTES,
+        "too_many_files": len(paths) > _MAX_PATCH_FILES,
+    }
+
+
+def _build_test_inventory(
+    repository: Path,
+    problem_statement: str,
+    *,
+    maximum_chars: int,
+) -> str:
+    """从 Git 跟踪文件生成与 issue 相关的有界测试索引。
+
+    planner 会话没有 Glob/Grep；由父进程只读执行 ``git ls-files``，既不给模型
+    宿主命令权限，也避免它在短 turns 内靠猜路径浪费预算。
+    """
+
+    completed = subprocess.run(
+        ["git", "-C", str(repository), "ls-files"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(completed.stderr.strip() or "git ls-files failed")
+    terms = {
+        term
+        for term in re.findall(r"[a-z0-9_]{4,}", problem_statement.lower())
+        if term not in _INVENTORY_STOP_WORDS
+    }
+    candidates: list[tuple[int, str]] = []
+    for raw_path in completed.stdout.splitlines():
+        path = Path(raw_path)
+        lowered = raw_path.lower()
+        parts = {part.lower() for part in path.parts}
+        name = path.name.lower()
+        is_test = bool(parts & {"test", "tests", "testing"}) or (
+            name.startswith("test_")
+            or name.startswith("test-")
+            or name.endswith("_test.py")
+            or name.endswith(".test.js")
+            or name.endswith(".test.ts")
+        )
+        if is_test:
+            candidates.append((sum(term in lowered for term in terms), raw_path))
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    lines: list[str] = []
+    used = 0
+    for _, path in candidates:
+        rendered = f"- {path}\n"
+        if used + len(rendered) > maximum_chars:
+            break
+        lines.append(rendered)
+        used += len(rendered)
+    if not lines:
+        return "(no tracked test-like files found)"
+    if len(lines) < len(candidates):
+        omitted = f"... ({len(candidates) - len(lines)} lower-ranked paths omitted)\n"
+        if used + len(omitted) <= maximum_chars:
+            lines.append(omitted)
+    return "".join(lines).rstrip()
+
+
+def _patch_modifies_existing_source(patch: str) -> bool:
+    """判断补丁是否修改至少一个既有的非测试源码文件。
+
+    该门禁专门拦截只留下复现脚本、临时文本或新增测试目录的探索结果。已有测试
+    文件的修改也不算产品修复，避免模型通过改测试绕过交付要求。
+    """
+
+    for section in re.split(r"(?=^diff --git )", patch, flags=re.MULTILINE):
+        match = re.match(r"diff --git a/(.+?) b/(.+?)\n", section)
+        if match is None or "new file mode " in section:
+            continue
+        path = Path(match.group(2))
+        lowered_parts = {part.lower() for part in path.parts}
+        name = path.name.lower()
+        is_test = bool(lowered_parts & {"test", "tests", "testing"}) or (
+            name.startswith("test_")
+            or name.endswith("_test.py")
+            or name.endswith(".test.js")
+            or name.endswith(".test.ts")
+        )
+        # 文档、日志和任意既有临时文件同样不能满足“修复产品源码”的要求；
+        # 显式后缀白名单适配 SWE-bench 中常见的 Python/C/前端与模板源码。
+        if not is_test and path.suffix.lower() in _SOURCE_SUFFIXES and "@@" in section:
+            return True
+    return False
+
+
+def _protocol_failure_result(message: str) -> ClaudeCodeResult:
+    """构造阻止 verification 的明确协议失败，而不丢失已有候选补丁。"""
+
+    return ClaudeCodeResult(
+        exit_code=3,
+        agent_log=message.rstrip() + "\n",
+        test_output=message.rstrip() + "\n",
+        events=(
+            {
+                "sequence": 1,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "event_type": "test_protocol_failure",
+                "details": {"message": message},
+            },
+        ),
+        timed_out=False,
+        metrics={
+            "agent_turns": 0,
+            "tool_calls": 0,
+            "host_test_calls": 0,
+            "agent_test_command_calls": 0,
+            "visible_test_calls": 0,
+            "visible_test_requests": 0,
+            "visible_test_missing": 0,
+            "visible_test_rejected": 0,
+            "visible_test_executions": 0,
+            "visible_test_passed": 0,
+            "visible_test_timed_out": False,
+            "timed_out": False,
+            "token_usage": {},
+        },
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduledTestExecution:
+    """测试计划中一条带用途标签的真实 Docker 执行结果。"""
+
+    label: str
+    argv: tuple[str, ...]
     result: VisibleTestResult | None = None
     error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduledTestEvidence:
+    """一份双命令测试计划及其可审计 Docker 执行结果。"""
+
+    request: TestPlanRequest
+    executions: tuple[ScheduledTestExecution, ...] = ()
+
+    @property
+    def ready_for_verification(self) -> bool:
+        """仅当目标与回归命令都真实进入 Docker 后允许验证会话启动。"""
+
+        return (
+            self.request.accepted
+            and len(self.executions) == len(self.request.commands) == 2
+            and all(
+                execution.result is not None and execution.result.command_started
+                for execution in self.executions
+            )
+        )
+
+    @property
+    def ready_for_implementation(self) -> bool:
+        """要求基线目标测试稳定复现失败，同时相邻回归测试保持通过。"""
+
+        if not self.ready_for_verification:
+            return False
+        by_label = {execution.label: execution.result for execution in self.executions}
+        target = by_label["target"]
+        regression = by_label["regression"]
+        assert target is not None and regression is not None
+        # pytest/unittest 与直接 AssertionError 都以 1 表示测试失败；2/4/5、126/127
+        # 等通常是用法、收集或可执行文件错误，不能冒充成功复现。
+        return target.exit_code == 1 and regression.exit_code == 0
+
+    @property
+    def all_tests_passed(self) -> bool:
+        """仅当两条命令真实启动且均以零退出时允许最终状态 completed。"""
+
+        return self.ready_for_verification and all(
+            execution.result is not None and execution.result.exit_code == 0
+            for execution in self.executions
+        )
 
     def metrics(self) -> dict[str, int | bool]:
         """生成不会把文本提及误算为容器执行的指标。"""
 
-        executed = self.result is not None
+        executed = sum(
+            item.result is not None and item.result.command_started
+            for item in self.executions
+        )
+        rejected = self.request.status == "rejected" or any(
+            item.error is not None
+            or (item.result is not None and not item.result.command_started)
+            for item in self.executions
+        )
         return {
             "agent_turns": 0,
             "tool_calls": 0,
             "host_test_calls": 0,
             "agent_test_command_calls": 0,
-            "visible_test_calls": int(executed),
+            "visible_test_calls": executed,
             "visible_test_requests": int(self.request.requested),
-            "visible_test_rejected": int(
-                self.request.status == "rejected" or self.error is not None
+            "visible_test_missing": int(self.request.status == "missing"),
+            "visible_test_rejected": int(rejected),
+            "visible_test_executions": executed,
+            "visible_test_passed": sum(
+                item.result is not None and item.result.exit_code == 0
+                and item.result.command_started
+                for item in self.executions
             ),
-            "visible_test_executions": int(executed),
-            "visible_test_passed": int(executed and self.result.exit_code == 0),
-            "visible_test_timed_out": bool(executed and self.result.timed_out),
+            "visible_test_timed_out": any(
+                item.result is not None
+                and item.result.command_started
+                and item.result.timed_out
+                for item in self.executions
+            ),
             "timed_out": False,
             "token_usage": {},
         }
@@ -128,21 +401,28 @@ class ScheduledTestEvidence:
         """把真实执行证据压缩成可直接注入修复会话的文本。"""
 
         if self.request.status == "missing":
-            return "No structured test plan was submitted by the implementation session."
+            return "No structured test plan was submitted by the planning session."
         if self.request.status == "rejected":
             return f"The submitted test plan was rejected: {self.request.error}"
-        command = " ".join(self.request.argv)
-        if self.error is not None:
-            return f"The scheduled test `{command}` was rejected: {self.error}"
-        assert self.result is not None
-        return (
-            f"Scheduled visible test argv: {list(self.request.argv)!r}\n"
-            f"Docker image: {self.result.image}\n"
-            f"Exit code: {self.result.exit_code}\n"
-            f"Timed out: {self.result.timed_out}\n"
-            "Output:\n"
-            f"{self.result.output.rstrip()}"
-        )
+        blocks: list[str] = []
+        for execution in self.executions:
+            command = " ".join(execution.argv)
+            if execution.error is not None:
+                blocks.append(
+                    f"[{execution.label}] `{command}` could not run: {execution.error}"
+                )
+                continue
+            assert execution.result is not None
+            blocks.append(
+                f"[{execution.label}] argv: {list(execution.argv)!r}\n"
+                f"Docker image: {execution.result.image}\n"
+                f"Command started: {execution.result.command_started}\n"
+                f"Exit code: {execution.result.exit_code}\n"
+                f"Timed out: {execution.result.timed_out}\n"
+                "Output:\n"
+                f"{execution.result.output.rstrip()}"
+            )
+        return "\n\n".join(blocks)
 
 
 def _execute_scheduled_test(
@@ -151,30 +431,31 @@ def _execute_scheduled_test(
     task: SWEbenchTask,
     workspace_base_commit: str,
     sandbox: VisibleTestSandbox,
-    fallback_argv: tuple[str, ...] = (),
+    request: TestPlanRequest | None = None,
 ) -> ScheduledTestEvidence:
-    """消费模型计划并在 Docker 中执行；缺省时可复测上一轮 argv。
+    """消费或复用双命令计划，并分别在一次性 Docker 容器中执行。"""
 
-    无效计划只形成 rejected 证据而不终止整个任务，保证修复会话仍能看到明确
-    原因。若修复会话没有提交新计划，则复用首次已验证的 argv，避免把重复写控制
-    文件浪费成模型 turns。
-    """
-
-    request = consume_test_plan(repository)
-    if request.status == "missing" and fallback_argv:
-        request = TestPlanRequest(status="accepted", argv=fallback_argv)
+    request = consume_test_plan(repository) if request is None else request
     if not request.accepted:
         return ScheduledTestEvidence(request=request)
-    try:
-        result = sandbox.run(
-            repository,
-            instance_id=task.instance_id,
-            base_commit=workspace_base_commit,
-            command=request.argv,
-        )
-    except (TestSandboxError, ValueError) as error:
-        return ScheduledTestEvidence(request=request, error=str(error))
-    return ScheduledTestEvidence(request=request, result=result)
+    executions: list[ScheduledTestExecution] = []
+    for label, argv in request.commands:
+        try:
+            result = sandbox.run(
+                repository,
+                instance_id=task.instance_id,
+                base_commit=workspace_base_commit,
+                command=argv,
+            )
+        except (TestSandboxError, ValueError) as error:
+            executions.append(
+                ScheduledTestExecution(label=label, argv=argv, error=str(error))
+            )
+        else:
+            executions.append(
+                ScheduledTestExecution(label=label, argv=argv, result=result)
+            )
+    return ScheduledTestEvidence(request=request, executions=tuple(executions))
 
 
 def _scheduled_test_result(evidence: ScheduledTestEvidence) -> ClaudeCodeResult:
@@ -182,22 +463,41 @@ def _scheduled_test_result(evidence: ScheduledTestEvidence) -> ClaudeCodeResult:
 
     details: dict[str, Any] = {
         "request_status": evidence.request.status,
-        "argv": list(evidence.request.argv),
-        "error": evidence.request.error or evidence.error,
-    }
-    if evidence.result is not None:
-        details.update(
+        "all_commands_started": evidence.ready_for_verification,
+        "baseline_contract_satisfied": evidence.ready_for_implementation,
+        "all_tests_passed": evidence.all_tests_passed,
+        "commands": [
             {
-                "exit_code": evidence.result.exit_code,
-                "image": evidence.result.image,
-                "timed_out": evidence.result.timed_out,
-                "output": evidence.result.output,
+                "label": execution.label,
+                "argv": list(execution.argv),
+                "error": execution.error,
+                "exit_code": (
+                    execution.result.exit_code
+                    if execution.result is not None
+                    else None
+                ),
+                "image": (
+                    execution.result.image if execution.result is not None else None
+                ),
+                "timed_out": (
+                    execution.result.timed_out
+                    if execution.result is not None
+                    else False
+                ),
+                "command_started": (
+                    execution.result.command_started
+                    if execution.result is not None
+                    else False
+                ),
             }
-        )
+            for execution in evidence.executions
+        ],
+        "error": evidence.request.error,
+    }
     text = evidence.prompt_text()
     return ClaudeCodeResult(
-        # 调度测试失败是修复输入而非 Claude 进程失败；总体 exit code 仍由验证会话
-        # 决定，官方 resolved 则继续只由 harness 决定。
+        # 此 phase 只负责保存证据；阶段推进由父进程依据不同属性判定，不能用
+        # 这里的零退出码绕过基线复现、真实启动或最终全绿门禁。
         exit_code=0,
         agent_log=text + "\n",
         test_output=text + "\n",
@@ -290,102 +590,182 @@ def run_claude_task(
     try:
         if config.agent.verification_turns:
             implementation_turns = (
-                config.agent.max_turns - config.agent.verification_turns
+                config.agent.max_turns
+                - config.agent.verification_turns
+                - config.agent.test_planning_turns
             )
-            # 墙钟时间按 turns 同比例硬切分，确保实现阶段即使卡住，也不能侵占
-            # 独立验证会话的修复时间。
+            # 三个会话的墙钟预算按 turns 比例硬切分，防止实现探索侵占测试规划
+            # 和验证修复时间；最后一段吸收整数除法余数。
             implementation_timeout = max(
                 1,
                 config.agent.timeout_seconds
                 * implementation_turns
                 // config.agent.max_turns,
             )
+            planning_timeout = max(
+                1,
+                config.agent.timeout_seconds
+                * config.agent.test_planning_turns
+                // config.agent.max_turns,
+            )
             verification_timeout = max(
                 1,
-                config.agent.timeout_seconds - implementation_timeout,
+                config.agent.timeout_seconds
+                - implementation_timeout
+                - planning_timeout,
             )
-            implementation_prompt = build_implementation_phase_prompt(
+            phases: list[tuple[str, ClaudeCodeResult]] = []
+            baseline_patch = session.collect_patch(repository)
+            planning_prompt = build_test_planning_phase_prompt(
                 prompt,
-                implementation_turns=implementation_turns,
-                verification_turns=config.agent.verification_turns,
+                planning_turns=config.agent.test_planning_turns,
                 max_file_read_lines=config.agent.max_file_read_lines,
-                max_tool_output_chars=config.agent.max_tool_output_chars,
+                previous_plan_error="not yet submitted",
+                test_inventory=_build_test_inventory(
+                    repository,
+                    task.problem_statement,
+                    maximum_chars=config.agent.max_tool_output_chars,
+                ),
             )
-            implementation_result = _runner(
+            planning_result = _runner(
                 config,
-                turns=implementation_turns,
-                timeout_seconds=implementation_timeout,
+                turns=config.agent.test_planning_turns,
+                timeout_seconds=planning_timeout,
                 base_url=base_url,
-            ).run(repository, implementation_prompt)
-            if config.agent.visible_test_sandbox:
-                initial_evidence = _execute_scheduled_test(
+                allow_bash=False,
+            ).run(repository, planning_prompt)
+            phases.append(("test_planning", planning_result))
+            accepted_request = consume_test_plan(repository)
+            # 实现前 planner 的唯一授权写入是已被消费的控制文件。若它提前改了源码，
+            # 后续所谓“基线测试”便不再是基线，因此必须立即拒绝。
+            if session.collect_patch(repository) != baseline_patch:
+                accepted_request = TestPlanRequest(
+                    status="rejected",
+                    error="test planner modified the unmodified baseline",
+                )
+
+            baseline_evidence = _execute_scheduled_test(
+                repository,
+                task=task,
+                workspace_base_commit=patch_base_commit,
+                sandbox=test_sandbox,
+                request=accepted_request,
+            )
+            phases.append(
+                ("scheduled_test_baseline", _scheduled_test_result(baseline_evidence))
+            )
+            post_implementation_evidence: ScheduledTestEvidence | None = None
+            if not baseline_evidence.ready_for_implementation:
+                failure = _protocol_failure_result(
+                    "Implementation was not started: the baseline target command must "
+                    "really execute and fail with exit 1, while the adjacent regression "
+                    "command must really execute and pass with exit 0."
+                )
+                phases.append(("baseline_test_protocol_gate", failure))
+                result = combine_phase_results(tuple(phases))
+                result = replace(result, exit_code=failure.exit_code)
+            else:
+                implementation_prompt = build_implementation_phase_prompt(
+                    prompt,
+                    implementation_turns=implementation_turns,
+                    verification_turns=config.agent.verification_turns,
+                    max_file_read_lines=config.agent.max_file_read_lines,
+                    max_tool_output_chars=config.agent.max_tool_output_chars,
+                    baseline_test_evidence=truncate_output(
+                        baseline_evidence.prompt_text(),
+                        config.agent.max_tool_output_chars,
+                    ),
+                )
+                implementation_result = _runner(
+                    config,
+                    turns=implementation_turns,
+                    timeout_seconds=implementation_timeout,
+                    base_url=base_url,
+                ).run(repository, implementation_prompt)
+                phases.append(("implementation", implementation_result))
+                # 防御性消费误写的控制文件，确保它既不污染补丁，也不能偷偷替换
+                # 已经在原始基线上实际运行过的测试策略。
+                consume_test_plan(repository)
+                candidate_patch = session.collect_patch(repository)
+                candidate_patch_for_prompt = truncate_output(
+                    candidate_patch,
+                    config.agent.max_tool_output_chars,
+                )
+                post_implementation_evidence = _execute_scheduled_test(
                     repository,
                     task=task,
                     workspace_base_commit=patch_base_commit,
                     sandbox=test_sandbox,
+                    request=accepted_request,
                 )
-            else:
-                initial_evidence = ScheduledTestEvidence(
-                    request=TestPlanRequest(status="missing")
+                phases.append(
+                    (
+                        "scheduled_test_post_implementation",
+                        _scheduled_test_result(post_implementation_evidence),
+                    )
                 )
-            # 测试计划已经被消费并删除，此时收集的 candidate patch 不会夹带调度
-            # 控制文件。显式比较隔离仓库基线也能覆盖模型擅自创建的 commit。
-            candidate_patch = session.collect_patch(repository)
-            candidate_patch_for_prompt = truncate_output(
-                candidate_patch,
-                config.agent.max_tool_output_chars,
-            )
-            verification_prompt = build_verification_phase_prompt(
-                prompt,
-                verification_turns=config.agent.verification_turns,
-                max_file_read_lines=config.agent.max_file_read_lines,
-                max_tool_output_chars=config.agent.max_tool_output_chars,
-                candidate_patch=candidate_patch_for_prompt,
-                scheduled_test_evidence=initial_evidence.prompt_text(),
-            )
-            # 第二会话从干净上下文开始，但直接看到第一阶段留在 worktree 的 diff；
-            # 任务正文会被重新注入，因此不依赖易失败的 auto-compact 摘要。
-            verification_result = _runner(
-                config,
-                turns=config.agent.verification_turns,
-                timeout_seconds=verification_timeout,
-                base_url=base_url,
-                allow_bash=False,
-            ).run(repository, verification_prompt)
-            if config.agent.visible_test_sandbox:
-                fallback_argv = (
-                    initial_evidence.request.argv
-                    if initial_evidence.request.accepted
-                    else ()
+                if not post_implementation_evidence.ready_for_verification:
+                    failure = _protocol_failure_result(
+                        "Verification was not started because both post-implementation "
+                        "target and regression tests did not execute in Docker."
+                    )
+                    phases.append(("test_protocol_gate", failure))
+                    result = combine_phase_results(tuple(phases))
+                    result = replace(result, exit_code=failure.exit_code)
+                    post_implementation_evidence = None
+
+            if post_implementation_evidence is not None:
+                verification_prompt = build_verification_phase_prompt(
+                    prompt,
+                    verification_turns=config.agent.verification_turns,
+                    max_file_read_lines=config.agent.max_file_read_lines,
+                    max_tool_output_chars=config.agent.max_tool_output_chars,
+                    candidate_patch=candidate_patch_for_prompt,
+                    scheduled_test_evidence=truncate_output(
+                        post_implementation_evidence.prompt_text(),
+                        config.agent.max_tool_output_chars,
+                    ),
+                )
+                # 验证会话只有在两类测试都真实进入 Docker 后才会启动，并直接看到
+                # 退出码与输出；Bash 在 CLI 层禁用，避免回退到宿主环境测试。
+                verification_result = _runner(
+                    config,
+                    turns=config.agent.verification_turns,
+                    timeout_seconds=verification_timeout,
+                    base_url=base_url,
+                    allow_bash=False,
+                ).run(repository, verification_prompt)
+                phases.append(("verification", verification_result))
+
+                replacement_request = consume_test_plan(repository)
+                final_request = (
+                    accepted_request
+                    if replacement_request.status == "missing"
+                    else replacement_request
                 )
                 final_evidence = _execute_scheduled_test(
                     repository,
                     task=task,
                     workspace_base_commit=patch_base_commit,
                     sandbox=test_sandbox,
-                    fallback_argv=fallback_argv,
+                    request=final_request,
                 )
-            else:
-                final_evidence = ScheduledTestEvidence(
-                    request=TestPlanRequest(status="missing")
+                phases.append(
+                    ("scheduled_test_final", _scheduled_test_result(final_evidence))
                 )
-            result = combine_phase_results(
-                (
-                    ("implementation", implementation_result),
-                    (
-                        "scheduled_test_initial",
-                        _scheduled_test_result(initial_evidence),
-                    ),
-                    ("verification", verification_result),
-                    (
-                        "scheduled_test_final",
-                        _scheduled_test_result(final_evidence),
-                    ),
-                )
-            )
-            # combine 默认采用最后一个 phase 的退出码；最后一阶段是调度器测试，
-            # 因此显式恢复 Claude 验证会话状态，避免测试失败被误报成进程异常。
-            result = replace(result, exit_code=verification_result.exit_code)
+                result = combine_phase_results(tuple(phases))
+                if final_evidence.all_tests_passed:
+                    # 本地 completed 只表示协议与两条可见测试均通过；官方 resolved
+                    # 仍只由 SWE-bench harness 判定，二者不能混为同一指标。
+                    result = replace(result, exit_code=verification_result.exit_code)
+                else:
+                    failure = _protocol_failure_result(
+                        "Final target and regression tests did not both execute and pass "
+                        "in Docker."
+                    )
+                    phases.append(("test_protocol_gate_final", failure))
+                    result = combine_phase_results(tuple(phases))
+                    result = replace(result, exit_code=failure.exit_code)
         else:
             # 已冻结的正式基线配置继续走原来的单会话路径，保证历史 fingerprint
             # 对应的实验协议不被后续架构开发悄悄改写。

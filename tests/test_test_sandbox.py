@@ -133,7 +133,11 @@ def test_sandbox_applies_only_current_patch_and_disables_network(
                 stderr="",
             )
         if command[:2] == ["docker", "run"]:
-            return subprocess.CompletedProcess(command, 0, stdout="1 passed\n", stderr="")
+            shell_command = command[command.index("bash") + 2]
+            marker = shell_command.split("printf '%s\\n' ", 1)[1].split(" &&", 1)[0]
+            return subprocess.CompletedProcess(
+                command, 0, stdout=f"{marker}\n1 passed\n", stderr=""
+            )
         if command[:3] == ["docker", "rm", "--force"]:
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
         raise AssertionError(f"unexpected command: {command}")
@@ -157,14 +161,57 @@ def test_sandbox_applies_only_current_patch_and_disables_network(
     assert volume.endswith(":/tmp/agent.patch:ro")
     assert "/testbed" not in volume
     assert result.exit_code == 0
+    assert result.command_started is True
     assert result.output == "1 passed\n"
 
 
-def test_sandbox_rejects_empty_patch_before_starting_container(
+def test_sandbox_does_not_count_patch_apply_failure_as_test_execution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """无补丁时不得浪费 Docker 资源，也不能把基线测试冒充补丁验证。"""
+    """容器已启动但补丁应用失败时，不能生成真实测试启动证据。"""
+
+    repository = tmp_path / "repo"
+    repository.mkdir()
+
+    def fake_run(command, **kwargs):
+        command = [str(item) for item in command]
+        if command[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[:4] == ["git", "-C", str(repository), "add"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[:4] == ["git", "-C", str(repository), "diff"]:
+            return subprocess.CompletedProcess(
+                command, 0, stdout="diff --git a/a.py b/a.py\n-old\n+new\n", stderr=""
+            )
+        if command[:2] == ["docker", "run"]:
+            return subprocess.CompletedProcess(
+                command, 1, stdout="error: patch failed\n", stderr=""
+            )
+        if command[:3] == ["docker", "rm", "--force"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr("agent.test_sandbox.subprocess.run", fake_run)
+    result = VisibleTestSandbox(
+        timeout_seconds=30,
+        max_output_chars=12000,
+    ).run(
+        repository,
+        instance_id="owner__repo-7",
+        base_commit="0123456789abcdef0123456789abcdef01234567",
+        command=("python", "-m", "pytest"),
+    )
+
+    assert result.command_started is False
+    assert result.exit_code == 1
+
+
+def test_sandbox_runs_unmodified_baseline_when_patch_is_empty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """实现前即使没有补丁，也必须在官方镜像里取得真实基线测试证据。"""
 
     repository = tmp_path / "repo"
     repository.mkdir()
@@ -177,15 +224,27 @@ def test_sandbox_rejects_empty_patch_before_starting_container(
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
         if "diff" in command:
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-        raise AssertionError("Docker container should not start for an empty patch")
+        if command[:2] == ["docker", "run"]:
+            shell_command = command[command.index("bash") + 2]
+            marker = shell_command.split("printf '%s\\n' ", 1)[1].split(" &&", 1)[0]
+            assert "[ ! -s /tmp/agent.patch ]" in shell_command
+            return subprocess.CompletedProcess(
+                command, 1, stdout=f"{marker}\n1 failed\n", stderr=""
+            )
+        if command[:3] == ["docker", "rm", "--force"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        raise AssertionError(f"unexpected command: {command}")
 
     monkeypatch.setattr("agent.test_sandbox.subprocess.run", fake_run)
     sandbox = VisibleTestSandbox(timeout_seconds=30, max_output_chars=12000)
 
-    with pytest.raises(SandboxError, match="no patch"):
-        sandbox.run(
-            repository,
-            instance_id="owner__repo-7",
-            base_commit="0123456789abcdef0123456789abcdef01234567",
-            command=("python", "-m", "pytest"),
-        )
+    result = sandbox.run(
+        repository,
+        instance_id="owner__repo-7",
+        base_commit="0123456789abcdef0123456789abcdef01234567",
+        command=("python", "-m", "pytest"),
+    )
+
+    assert result.command_started is True
+    assert result.exit_code == 1
+    assert result.output == "1 failed\n"

@@ -20,13 +20,14 @@ model:
   context_length: 32768
   max_output_tokens: 8192
 
-# 40 是硬上限：前 30 turns 负责理解与实现，最后 10 turns 在全新会话中验证和修复。
+# 44 是硬上限：先用 4 turns 规划并运行基线测试，再用 30 turns 实现，最后用 10 turns 验证和修复。
 # 文件与输出限制先作为可审计 Prompt 协议，后续再根据 Dev 轨迹决定是否增加 CLI hook 硬限制。
 agent:
   framework: claude-code
   timeout_seconds: 5400
-  max_turns: 40
+  max_turns: 44
   verification_turns: 10
+  test_planning_turns: 4
   max_file_read_lines: 200
   max_tool_output_chars: 12000
   # Agent 只能把自己的 patch 放进无网络官方镜像，不能接触 hidden test patch。

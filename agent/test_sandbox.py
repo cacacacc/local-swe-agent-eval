@@ -22,12 +22,13 @@ class TestSandboxError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class VisibleTestResult:
-    """一次可见测试的退出码、截断输出和实际使用的镜像。"""
+    """一次可见测试的启动证据、退出码、截断输出和实际镜像。"""
 
     exit_code: int
     output: str
     image: str
     timed_out: bool
+    command_started: bool
 
 
 def image_candidates(instance_id: str) -> tuple[str, str]:
@@ -162,6 +163,9 @@ class VisibleTestSandbox:
         image = self.resolve_image(instance_id)
         patch = self._collect_patch(repository_path, base_commit)
         container_name = self._container_name(instance_id)
+        # 唯一标记只在 git apply 成功之后、exec 测试之前输出。Docker 返回结果但
+        # 缺少该标记时，调度器不能把镜像或补丁准备失败误算成真实测试执行。
+        started_marker = f"__LOCAL_SWE_TEST_STARTED_{uuid.uuid4().hex}__"
         with tempfile.TemporaryDirectory(prefix="local-swe-visible-test-") as directory:
             patch_path = Path(directory) / "agent.patch"
             patch_path.write_text(patch, encoding="utf-8")
@@ -187,7 +191,12 @@ class VisibleTestSandbox:
                 "bash",
                 "-lc",
                 # 命令参数通过 "$@" 原样传递，不把 issue 文本或 argv 拼接为 shell。
-                "cd /testbed && git apply --binary /tmp/agent.patch && exec \"$@\"",
+                (
+                    "cd /testbed && "
+                    "([ ! -s /tmp/agent.patch ] || "
+                    "git apply --binary /tmp/agent.patch) && "
+                    f"printf '%s\\n' {started_marker} && exec \"$@\""
+                ),
                 "visible-test",
                 *command,
             ]
@@ -225,16 +234,19 @@ class VisibleTestSandbox:
                     check=False,
                 )
 
+        command_started = started_marker in output
+        output = output.replace(f"{started_marker}\n", "", 1)
         return VisibleTestResult(
             exit_code=exit_code,
             output=truncate_output(output, self.max_output_chars),
             image=image,
             timed_out=timed_out,
+            command_started=command_started,
         )
 
     @staticmethod
     def _collect_patch(repository: Path, base_commit: str) -> str:
-        """收集 committed、tracked 与 untracked 修改，供一次性容器复现。"""
+        """收集 committed、tracked 与 untracked 修改；基线测试允许空补丁。"""
 
         add = subprocess.run(
             ["git", "-C", str(repository), "add", "--intent-to-add", "--all"],
@@ -265,8 +277,6 @@ class VisibleTestSandbox:
         )
         if diff.returncode != 0:
             raise TestSandboxError(diff.stderr.strip() or "git diff failed")
-        if not diff.stdout.strip():
-            raise TestSandboxError("working tree has no patch to test")
         return diff.stdout
 
     @staticmethod

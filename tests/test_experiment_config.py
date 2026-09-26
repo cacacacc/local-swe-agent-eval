@@ -10,6 +10,7 @@ from agent.prompt_builder import (
     PromptBuilder,
     PromptTemplateError,
     build_implementation_phase_prompt,
+    build_test_planning_phase_prompt,
     build_verification_phase_prompt,
 )
 from benchmark.task import SWEbenchTask
@@ -90,6 +91,22 @@ def test_config_rejects_network_during_formal_solving(tmp_path) -> None:
         destination.unlink(missing_ok=True)
 
 
+def test_verification_requires_reserved_test_planner(tmp_path) -> None:
+    """启用 verification 时不得省略 planner，否则缺失计划会再次被静默跳过。"""
+
+    raw = yaml.safe_load(
+        (PROJECT_ROOT / "configs" / "dev_v2.yaml").read_text(encoding="utf-8")
+    )
+    raw["agent"]["test_planning_turns"] = 0
+    destination = PROJECT_ROOT / "configs" / "temporary-no-planner-test.yaml"
+    try:
+        destination.write_text(yaml.safe_dump(raw), encoding="utf-8")
+        with pytest.raises(ConfigurationError, match="verification requires"):
+            ExperimentConfig.load(destination)
+    finally:
+        destination.unlink(missing_ok=True)
+
+
 def test_evaluation_config_is_frozen_for_formal_batch() -> None:
     """完成 Dev 后，仓库中的 evaluation 配置必须允许正式十题脚本启动。"""
 
@@ -105,8 +122,9 @@ def test_dev_v2_reserves_an_independent_verification_session() -> None:
 
     assert config.experiment.phase == "dev"
     assert config.experiment.configuration_frozen is False
-    assert config.agent.max_turns == 40
+    assert config.agent.max_turns == 44
     assert config.agent.verification_turns == 10
+    assert config.agent.test_planning_turns == 4
     assert config.agent.max_file_read_lines == 200
     assert config.agent.max_tool_output_chars == 12000
     assert config.agent.visible_test_sandbox is True
@@ -127,8 +145,9 @@ def test_evaluation_v2_is_frozen_as_a_separate_ablation() -> None:
     assert ablation.experiment.phase == "evaluation"
     assert ablation.experiment.name.endswith("evaluation-v2")
     assert ablation.fingerprint != baseline.fingerprint
-    assert ablation.agent.max_turns == 40
+    assert ablation.agent.max_turns == 44
     assert ablation.agent.verification_turns == 10
+    assert ablation.agent.test_planning_turns == 4
     assert ablation.agent.visible_test_sandbox is True
 
 
@@ -148,7 +167,7 @@ def test_extended_evaluation_v2_configs_are_frozen_and_sized(task_count: int) ->
 
 
 def test_phase_prompts_reanchor_task_and_enforce_delivery_boundaries() -> None:
-    """两个独立会话都必须携带原任务，且分别强调交付补丁和验证修复。"""
+    """三个独立会话必须携带原任务，并让基线测试证据先于代码修改。"""
 
     base = "instance_id: example__repo-1\nProblem: preserve semantics\n"
     implementation = build_implementation_phase_prompt(
@@ -157,6 +176,14 @@ def test_phase_prompts_reanchor_task_and_enforce_delivery_boundaries() -> None:
         verification_turns=10,
         max_file_read_lines=200,
         max_tool_output_chars=12000,
+        baseline_test_evidence="Exit code: 1\nFAILED baseline behavior",
+    )
+    planning = build_test_planning_phase_prompt(
+        base,
+        planning_turns=4,
+        max_file_read_lines=200,
+        previous_plan_error="not yet submitted",
+        test_inventory="- tests/test_semantics.py",
     )
     verification = build_verification_phase_prompt(
         base,
@@ -170,8 +197,16 @@ def test_phase_prompts_reanchor_task_and_enforce_delivery_boundaries() -> None:
     assert base.strip() in implementation
     assert "non-empty candidate patch" in implementation
     assert "at most 200 source lines" in implementation
+    assert "FAILED baseline behavior" in implementation
+    assert "unmodified baseline" in implementation
     assert ".agent-test-plan.json" in implementation
+    assert "Do not create or replace" in implementation
     assert "parent scheduler owns all test execution" in implementation
+    assert "target_argv" in planning and "regression_argv" in planning
+    assert "Your only deliverable" in planning
+    assert "Bash is disabled" in planning
+    assert "Glob and Grep are unavailable" in planning
+    assert "tests/test_semantics.py" in planning
     assert base.strip() in verification
     assert "Candidate patch collected relative" in verification
     assert "diff --git a/a.py b/a.py" in verification

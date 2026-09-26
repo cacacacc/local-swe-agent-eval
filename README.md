@@ -192,20 +192,24 @@ Docker Desktop's WSL integration must still be enabled from Docker Desktop on
 Windows; a Linux process inside WSL cannot grant that host-side integration.
 The launcher reports the exact setting to change when the Docker CLI is absent.
 
-## Phase 5: bounded two-session agent architecture
+## Phase 5: bounded three-phase agent architecture
 
 The completed ten-task evaluation remains the immutable baseline represented by
 `configs/evaluation.yaml`. Architecture experiments use `configs/dev_v2.yaml`
 and must not replace the baseline result.
 
-Dev v2 gives the same local model a 40-turn hard limit split across two fresh
+Dev v2 gives the same local model a 44-turn hard limit split across three fresh
 Claude Code sessions:
 
-1. The implementation session receives 30 turns to reproduce, locate, and leave
-   a concrete candidate patch in the worktree.
-2. The verification session receives 10 reserved turns, re-reads the full task,
-   inspects the existing diff, runs a focused visible test, and repairs the
-   first observed failure.
+1. A Bash-free 4-turn planning session uses the issue and unmodified repository
+   to select separate target and adjacent-regression argv.
+2. The parent runs both commands against the unmodified baseline in cached,
+   network-free Docker containers. Only after both really start does the 30-turn
+   implementation session receive the issue plus their exit codes and output,
+   diagnose the failure, and edit code. The parent reruns the same plan afterward.
+3. The 10-turn verification session starts only after both post-implementation
+   commands really execute. It receives their bounded evidence, may repair the
+   patch, and is followed by one final parent-owned rerun.
 
 Starting a new session prevents implementation history and failed automatic
 compaction from consuming the verification context. The v2 prompt also limits
@@ -251,20 +255,33 @@ architecture. New runs use four additional code-enforced boundaries:
 1. Agent repositories contain one isolated baseline commit and no remote. The
    upstream commit hash remains in metadata, while patch collection compares
    against the new workspace baseline.
-2. The implementation session writes a temporary `.agent-test-plan.json` with
-   one `argv` array. The scheduler validates and consumes this file before
-   collecting the patch; shell command strings and shell executables are
-   rejected.
-3. The parent process executes the accepted argv in the cached, network-free
-   SWE-bench image. The fresh verification session receives the real exit code
-   and truncated output, has Bash disabled at the Claude CLI boundary, and may
-   repair files with Read/Edit. The scheduler then reruns the accepted argv.
+2. A mandatory pre-implementation planner writes a temporary
+   `.agent-test-plan.json` containing `target_argv` and `regression_argv`.
+   Missing or invalid output stops before implementation instead of silently
+   continuing.
+3. The parent executes both argv arrays on the unmodified baseline, injects the
+   real exit codes and bounded output into implementation, reruns them after the
+   patch, and only then opens Bash-disabled verification. The scheduler performs
+   one final rerun after any verification repair.
 4. Test metrics come from scheduler events rather than command-text matching:
-   `visible_test_requests`, `visible_test_rejected`,
+   `visible_test_requests`, `visible_test_missing`, `visible_test_rejected`,
    `visible_test_executions`, `visible_test_passed`, and
    `visible_test_timed_out`. `visible_test_calls` remains a compatibility alias
    for confirmed executions; model-issued test commands are recorded as
    `agent_test_command_calls` and `host_test_calls`.
+
+The pre-implementation gate also enforces test semantics, not only container
+startup: the focused target must reproduce the baseline defect with exit code 1,
+while the adjacent regression command must pass with exit code 0. The parent
+injects a bounded, issue-ranked list of tracked test files because Bash, Glob,
+and Grep are unavailable to the planner. After verification, both commands must
+exit 0 before the local run can be marked completed.
+
+Patch validation rejects virtual environments, caches, `site-packages`, common
+root-level scratch reproductions such as `test_bug.py`, patches larger than 1 MB,
+and patches spanning more than 100 files. These delivery gates do not replace the
+official harness; they prevent generated artifacts and weak local evidence from
+being mislabeled as a clean agent completion.
 
 This hardening is a new experimental protocol. It must not be used to rewrite
 the original baseline or r2 results, even when the same task IDs are inspected

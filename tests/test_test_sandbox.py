@@ -211,13 +211,15 @@ def test_sandbox_runs_unmodified_baseline_when_patch_is_empty(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """实现前即使没有补丁，也必须在官方镜像里取得真实基线测试证据。"""
+    """Implementation 首次测试应在空 patch 下进入同一个无网络 Docker。"""
 
     repository = tmp_path / "repo"
     repository.mkdir()
+    calls: list[list[str]] = []
 
     def fake_run(command, **kwargs):
         command = [str(item) for item in command]
+        calls.append(command)
         if command[:3] == ["docker", "image", "inspect"]:
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
         if "add" in command:
@@ -227,9 +229,11 @@ def test_sandbox_runs_unmodified_baseline_when_patch_is_empty(
         if command[:2] == ["docker", "run"]:
             shell_command = command[command.index("bash") + 2]
             marker = shell_command.split("printf '%s\\n' ", 1)[1].split(" &&", 1)[0]
-            assert "[ ! -s /tmp/agent.patch ]" in shell_command
             return subprocess.CompletedProcess(
-                command, 1, stdout=f"{marker}\n1 failed\n", stderr=""
+                command,
+                1,
+                stdout=f"{marker}\n1 failed\n",
+                stderr="",
             )
         if command[:3] == ["docker", "rm", "--force"]:
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
@@ -245,6 +249,10 @@ def test_sandbox_runs_unmodified_baseline_when_patch_is_empty(
         command=("python", "-m", "pytest"),
     )
 
+    docker_run = next(command for command in calls if command[:2] == ["docker", "run"])
+    shell_program = docker_run[docker_run.index("-lc") + 1]
+    assert "[ ! -s /tmp/agent.patch ]" in shell_program
+    assert docker_run[docker_run.index("--network") + 1] == "none"
     assert result.command_started is True
     assert result.exit_code == 1
     assert result.output == "1 failed\n"

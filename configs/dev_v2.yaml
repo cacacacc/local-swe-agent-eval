@@ -20,7 +20,7 @@ model:
   context_length: 32768
   max_output_tokens: 8192
 
-# 44 是硬上限：先用 4 turns 规划并运行基线测试，再用 30 turns 实现，最后用 10 turns 验证和修复。
+# 44 是硬上限：30 turns 实现、4 turns 强制规划测试、10 turns 验证和修复。
 # 文件与输出限制先作为可审计 Prompt 协议，后续再根据 Dev 轨迹决定是否增加 CLI hook 硬限制。
 agent:
   framework: claude-code

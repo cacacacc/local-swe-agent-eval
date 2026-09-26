@@ -153,6 +153,7 @@ def test_summary_counts_turns_tools_and_final_usage_without_double_counting() ->
         "visible_test_passed": 0,
         "visible_test_timed_out": False,
         "agent_test_command_calls": 0,
+        "implementation_baseline_test_calls": 0,
         "host_test_calls": 0,
         "timed_out": False,
         "token_usage": {"input_tokens": 120, "output_tokens": 30},
@@ -222,6 +223,7 @@ def test_combine_phase_results_uses_verification_exit_and_sums_metrics() -> None
     assert combined.metrics["tool_calls"] == 15
     assert combined.metrics["visible_test_calls"] == 0
     assert combined.metrics["visible_test_executions"] == 0
+    assert combined.metrics["implementation_baseline_test_calls"] == 0
     assert combined.metrics["host_test_calls"] == 0
     assert combined.metrics["token_usage"] == {
         "input_tokens": 140,
@@ -236,8 +238,8 @@ def test_combine_phase_results_uses_verification_exit_and_sums_metrics() -> None
     ]
 
 
-def test_summary_never_infers_visible_execution_from_bash_text() -> None:
-    """模型 Bash 只能记为宿主尝试，脚本名称不能冒充 Docker 执行。"""
+def test_summary_separates_authorized_helper_from_host_test() -> None:
+    """授权 Docker helper 与宿主 pytest 分开计数，且均不冒充调度执行。"""
 
     events = []
     for command in (
@@ -266,7 +268,8 @@ def test_summary_never_infers_visible_execution_from_bash_text() -> None:
     assert metrics["visible_test_calls"] == 0
     assert metrics["visible_test_executions"] == 0
     assert metrics["agent_test_command_calls"] == 2
-    assert metrics["host_test_calls"] == 2
+    assert metrics["implementation_baseline_test_calls"] == 1
+    assert metrics["host_test_calls"] == 1
 
 
 def test_verification_runner_disables_bash_at_cli_boundary() -> None:
@@ -311,4 +314,5 @@ def test_reading_visible_test_script_is_not_counted_as_execution() -> None:
 
     assert metrics["visible_test_executions"] == 0
     assert metrics["agent_test_command_calls"] == 0
+    assert metrics["implementation_baseline_test_calls"] == 0
     assert metrics["host_test_calls"] == 0

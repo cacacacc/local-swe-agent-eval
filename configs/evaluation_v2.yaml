@@ -14,7 +14,7 @@ dataset:
   split: test
   tasks_file: experiments/evaluation_tasks.json
 
-# 保持模型不变，使差异主要来自 4+30+10 三会话和实现前基线测试沙箱。
+# 保持模型不变，使差异主要来自 30+4+10 三会话和可见测试沙箱。
 model:
   runtime: ollama
   name: qwen3.5:9b

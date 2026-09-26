@@ -154,10 +154,6 @@ def _validate_argv(argv: Any, field: str) -> str | None:
     # 镜像外的宿主工具。shell、网络和包管理入口即使在无网络容器中也没有必要。
     if executable.is_absolute() or ".." in executable.parts:
         return "test executable must stay relative to /testbed or use PATH"
-    if any(character.isspace() for character in argv[0]):
-        # subprocess 使用 argv 直启程序；把整条 shell 命令塞进 argv[0] 只会得到
-        # exit 127，却曾被旧门禁误算成“测试真实执行”。
-        return "test executable must be one argv item without whitespace"
     if executable.name.lower() in _FORBIDDEN_EXECUTABLES:
         return f"test executable is forbidden: {executable.name}"
     return None

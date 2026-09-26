@@ -13,7 +13,7 @@ dataset:
   split: test
   tasks_file: experiments/evaluation_tasks_20_seed42.json
 
-# 保持模型不变，采用 4+30+10 的“先测试、后实现、再验证”预算和同一 sandbox 边界。
+# 保持模型不变，采用 30+4+10 三阶段预算和同一 sandbox 边界。
 model:
   runtime: ollama
   name: qwen3.5:9b

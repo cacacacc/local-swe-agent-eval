@@ -167,7 +167,7 @@ def test_extended_evaluation_v2_configs_are_frozen_and_sized(task_count: int) ->
 
 
 def test_phase_prompts_reanchor_task_and_enforce_delivery_boundaries() -> None:
-    """三个独立会话必须携带原任务，并让基线测试证据先于代码修改。"""
+    """两个独立会话都必须携带原任务，且分别强调交付补丁和验证修复。"""
 
     base = "instance_id: example__repo-1\nProblem: preserve semantics\n"
     implementation = build_implementation_phase_prompt(
@@ -176,14 +176,14 @@ def test_phase_prompts_reanchor_task_and_enforce_delivery_boundaries() -> None:
         verification_turns=10,
         max_file_read_lines=200,
         max_tool_output_chars=12000,
-        baseline_test_evidence="Exit code: 1\nFAILED baseline behavior",
+        baseline_test_command="python run_visible_tests.py --",
     )
     planning = build_test_planning_phase_prompt(
         base,
         planning_turns=4,
         max_file_read_lines=200,
-        previous_plan_error="not yet submitted",
-        test_inventory="- tests/test_semantics.py",
+        candidate_patch="diff --git a/a.py b/a.py\n-old\n+new\n",
+        previous_plan_error="missing",
     )
     verification = build_verification_phase_prompt(
         base,
@@ -197,16 +197,14 @@ def test_phase_prompts_reanchor_task_and_enforce_delivery_boundaries() -> None:
     assert base.strip() in implementation
     assert "non-empty candidate patch" in implementation
     assert "at most 200 source lines" in implementation
-    assert "FAILED baseline behavior" in implementation
-    assert "unmodified baseline" in implementation
+    assert "run exactly one focused baseline test" in implementation
+    assert "python run_visible_tests.py -- <test argv>" in implementation
+    assert "Treat its real output together with the issue statement" in implementation
     assert ".agent-test-plan.json" in implementation
-    assert "Do not create or replace" in implementation
-    assert "parent scheduler owns all test execution" in implementation
+    assert "parent scheduler owns all later test execution" in implementation
     assert "target_argv" in planning and "regression_argv" in planning
     assert "Your only deliverable" in planning
     assert "Bash is disabled" in planning
-    assert "Glob and Grep are unavailable" in planning
-    assert "tests/test_semantics.py" in planning
     assert base.strip() in verification
     assert "Candidate patch collected relative" in verification
     assert "diff --git a/a.py b/a.py" in verification

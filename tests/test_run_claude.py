@@ -8,10 +8,8 @@ from agent.test_sandbox import VisibleTestResult
 from benchmark.task import SWEbenchTask
 from experiment.config import ExperimentConfig
 from scripts.run_claude import (
-    ScheduledTestExecution,
     ScheduledTestEvidence,
     _apply_patch_gate,
-    _build_test_inventory,
     _execute_scheduled_test,
 )
 
@@ -24,6 +22,7 @@ def _result(
     test_output: str = "",
     *,
     host_test_calls: int = 0,
+    implementation_baseline_test_calls: int = 0,
 ) -> ClaudeCodeResult:
     """构造不启动真实 Claude Code 的最小结果。"""
 
@@ -37,6 +36,7 @@ def _result(
             "agent_turns": 1,
             "tool_calls": 0,
             "host_test_calls": host_test_calls,
+            "implementation_baseline_test_calls": implementation_baseline_test_calls,
             "token_usage": {},
         },
     )
@@ -51,13 +51,9 @@ def test_patch_gate_rejects_generic_success_with_empty_diff() -> None:
     assert validated.metrics["patch_gate"] == {
         "patch_generated": False,
         "existing_source_modified": False,
-        "patch_bytes": 1,
-        "modified_file_count": 0,
-        "forbidden_artifacts": [],
-        "patch_too_large": False,
-        "too_many_files": False,
         "test_attempted": False,
         "visible_test_attempted": False,
+        "implementation_baseline_test_attempted": False,
         "host_test_attempted": False,
         "host_test_valid": False,
     }
@@ -80,16 +76,28 @@ def test_patch_gate_records_test_evidence_without_overriding_cli_failure() -> No
     assert validated.metrics["patch_gate"] == {
         "patch_generated": True,
         "existing_source_modified": True,
-        "patch_bytes": 69,
-        "modified_file_count": 1,
-        "forbidden_artifacts": [],
-        "patch_too_large": False,
-        "too_many_files": False,
         "test_attempted": False,
         "visible_test_attempted": False,
+        "implementation_baseline_test_attempted": False,
         "host_test_attempted": True,
         "host_test_valid": False,
     }
+
+
+def test_patch_gate_counts_authorized_implementation_baseline_test() -> None:
+    """Docker helper 应算有效测试尝试，但不得混入宿主测试指标。"""
+
+    validated = _apply_patch_gate(
+        _result(implementation_baseline_test_calls=1),
+        "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-old\n+new\n",
+    )
+
+    assert validated.metrics["patch_gate"]["test_attempted"] is True
+    assert (
+        validated.metrics["patch_gate"]["implementation_baseline_test_attempted"]
+        is True
+    )
+    assert validated.metrics["patch_gate"]["host_test_attempted"] is False
 
 
 def test_patch_gate_rejects_only_new_reproduction_files() -> None:
@@ -119,43 +127,6 @@ def test_patch_gate_cannot_be_bypassed_by_modifying_existing_documentation() -> 
 
     assert validated.exit_code == 2
     assert validated.metrics["patch_gate"]["existing_source_modified"] is False
-
-
-def test_patch_gate_rejects_virtual_environment_even_with_source_fix() -> None:
-    """源码修改不能掩盖误加入虚拟环境等大规模生成物。"""
-
-    patch = (
-        "diff --git a/pkg/core.py b/pkg/core.py\n"
-        "--- a/pkg/core.py\n+++ b/pkg/core.py\n@@ -1 +1 @@\n-old\n+new\n"
-        "diff --git a/.testvenv/bin/python b/.testvenv/bin/python\n"
-        "new file mode 100755\n--- /dev/null\n+++ b/.testvenv/bin/python\n"
-        "@@ -0,0 +1 @@\n+binary\n"
-    )
-
-    validated = _apply_patch_gate(_result(), patch)
-
-    assert validated.exit_code == 2
-    assert validated.metrics["patch_gate"]["existing_source_modified"] is True
-    assert validated.metrics["patch_gate"]["forbidden_artifacts"] == [
-        ".testvenv/bin/python"
-    ]
-
-
-def test_patch_gate_rejects_scratch_reproduction_beside_source_fix() -> None:
-    """临时复现脚本不能因为同时存在源码修改就混入最终交付。"""
-
-    patch = (
-        "diff --git a/pkg/core.py b/pkg/core.py\n"
-        "--- a/pkg/core.py\n+++ b/pkg/core.py\n@@ -1 +1 @@\n-old\n+new\n"
-        "diff --git a/test_bug.py b/test_bug.py\n"
-        "new file mode 100644\n--- /dev/null\n+++ b/test_bug.py\n"
-        "@@ -0,0 +1 @@\n+assert False\n"
-    )
-
-    validated = _apply_patch_gate(_result(), patch)
-
-    assert validated.exit_code == 2
-    assert validated.metrics["patch_gate"]["forbidden_artifacts"] == ["test_bug.py"]
 
 
 def test_v2_config_keeps_scheduler_resource_limits() -> None:
@@ -217,8 +188,6 @@ def test_scheduler_metrics_require_a_real_sandbox_result(
     assert evidence.metrics()["visible_test_passed"] == 2
     assert evidence.metrics()["visible_test_rejected"] == 0
     assert evidence.ready_for_verification is True
-    assert evidence.ready_for_implementation is False
-    assert evidence.all_tests_passed is True
 
 
 def test_missing_plan_is_counted_and_blocks_verification() -> None:
@@ -231,91 +200,6 @@ def test_missing_plan_is_counted_and_blocks_verification() -> None:
     assert evidence.metrics()["visible_test_missing"] == 1
     assert evidence.metrics()["visible_test_executions"] == 0
     assert evidence.ready_for_verification is False
-
-
-def test_baseline_gate_requires_failing_target_and_passing_regression() -> None:
-    """基线只有稳定复现目标失败且相邻回归全绿时才能放行 implementation。"""
-
-    request = StructuredTestPlanRequest(
-        status="accepted",
-        target_argv=("python", "-m", "pytest", "tests/test_bug.py::test_bug"),
-        regression_argv=("python", "-m", "pytest", "tests/test_neighbor.py"),
-    )
-    evidence = ScheduledTestEvidence(
-        request=request,
-        executions=(
-            ScheduledTestExecution(
-                label="target",
-                argv=request.target_argv,
-                result=VisibleTestResult(1, "failed", "image", False, True),
-            ),
-            ScheduledTestExecution(
-                label="regression",
-                argv=request.regression_argv,
-                result=VisibleTestResult(0, "passed", "image", False, True),
-            ),
-        ),
-    )
-
-    assert evidence.ready_for_implementation is True
-    assert evidence.ready_for_verification is True
-    assert evidence.all_tests_passed is False
-
-
-def test_baseline_gate_rejects_missing_test_command_exit_code() -> None:
-    """exit 127 属于命令错误，不能被当作目标行为的基线复现。"""
-
-    request = StructuredTestPlanRequest(
-        status="accepted",
-        target_argv=("pytest", "tests/test_bug.py"),
-        regression_argv=("pytest", "tests/test_neighbor.py"),
-    )
-    evidence = ScheduledTestEvidence(
-        request=request,
-        executions=(
-            ScheduledTestExecution(
-                label="target",
-                argv=request.target_argv,
-                result=VisibleTestResult(127, "not found", "image", False, True),
-            ),
-            ScheduledTestExecution(
-                label="regression",
-                argv=request.regression_argv,
-                result=VisibleTestResult(0, "passed", "image", False, True),
-            ),
-        ),
-    )
-
-    assert evidence.ready_for_implementation is False
-
-
-def test_test_inventory_prioritizes_issue_terms_and_stays_bounded(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    """父进程索引应优先列出 issue 相关测试，并在注入 Prompt 前限制长度。"""
-
-    class Completed:
-        """模拟 git ls-files 的最小结果。"""
-
-        returncode = 0
-        stderr = ""
-        stdout = (
-            "tests/test_unrelated.py\n"
-            "xarray/tests/test_indexes.py\n"
-            "src/core.py\n"
-        )
-
-    monkeypatch.setattr("scripts.run_claude.subprocess.run", lambda *args, **kwargs: Completed())
-
-    inventory = _build_test_inventory(
-        tmp_path,
-        "indexes should preserve coordinate dtype",
-        maximum_chars=80,
-    )
-
-    assert inventory.splitlines()[0] == "- xarray/tests/test_indexes.py"
-    assert len(inventory) <= 80
 
 
 def test_scheduler_rejects_container_result_before_test_command_started(

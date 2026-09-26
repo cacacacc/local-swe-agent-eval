@@ -57,6 +57,7 @@ def combine_phase_results(
     total_tool_calls = 0
     total_host_test_calls = 0
     total_agent_test_commands = 0
+    total_implementation_baseline_tests = 0
     total_visible_test_requests = 0
     total_visible_test_missing = 0
     total_visible_test_rejected = 0
@@ -91,6 +92,9 @@ def combine_phase_results(
         total_host_test_calls += int(result.metrics.get("host_test_calls", 0))
         total_agent_test_commands += int(
             result.metrics.get("agent_test_command_calls", 0)
+        )
+        total_implementation_baseline_tests += int(
+            result.metrics.get("implementation_baseline_test_calls", 0)
         )
         total_visible_test_requests += int(
             result.metrics.get("visible_test_requests", 0)
@@ -129,6 +133,7 @@ def combine_phase_results(
         "visible_test_passed": total_visible_test_passed,
         "visible_test_timed_out": total_visible_test_timed_out,
         "agent_test_command_calls": total_agent_test_commands,
+        "implementation_baseline_test_calls": total_implementation_baseline_tests,
         "host_test_calls": total_host_test_calls,
         "timed_out": any(result.timed_out for _, result in phases),
         "token_usage": aggregate_usage,
@@ -206,6 +211,28 @@ def _looks_like_test_command(command: str) -> bool:
         or token.rstrip("/").endswith("bin/test")
         for token in tokens
     )
+
+
+def _uses_visible_test_helper(command: str) -> bool:
+    """识别 Implementation 明确调用的项目 Docker helper。
+
+    该指标只区分授权的基线测试和宿主测试；是否真实创建容器仍可通过对应 Bash
+    tool result 中的 ``visible-test image`` 输出审计，不能冒充 scheduler event。
+    """
+
+    first_segment = re.split(r"[;&|]", command.strip(), maxsplit=1)[0].strip()
+    tokens = first_segment.split()
+    if not tokens or Path(tokens[0]).name.lower() in {
+        "cat",
+        "head",
+        "less",
+        "more",
+        "rg",
+        "sed",
+        "tail",
+    }:
+        return False
+    return any(token.endswith("run_visible_tests.py") for token in tokens)
 
 
 class ClaudeCodeRunner:
@@ -385,6 +412,7 @@ class ClaudeCodeRunner:
         tool_calls = 0
         host_test_calls = 0
         agent_test_command_calls = 0
+        implementation_baseline_test_calls = 0
         usage: dict[str, int] = {}
         terminal: dict[str, Any] = {}
         for event in events:
@@ -413,10 +441,11 @@ class ClaudeCodeRunner:
                         if not isinstance(command, str):
                             continue
                         if _looks_like_test_command(command):
-                            # 所有由模型 Bash 发起的测试都属于越过调度器的宿主尝试；
-                            # 即使文本提到 run_visible_tests，也不能冒充已创建容器。
                             agent_test_command_calls += 1
-                            host_test_calls += 1
+                            if _uses_visible_test_helper(command):
+                                implementation_baseline_test_calls += 1
+                            else:
+                                host_test_calls += 1
             # Claude Code 的最终 result 事件提供权威用量；只读取该事件，避免把
             # 每条 message 的增量 usage 与最终累计值重复相加。
             if event_type == "result":
@@ -448,6 +477,7 @@ class ClaudeCodeRunner:
             "visible_test_passed": 0,
             "visible_test_timed_out": False,
             "agent_test_command_calls": agent_test_command_calls,
+            "implementation_baseline_test_calls": implementation_baseline_test_calls,
             "host_test_calls": host_test_calls,
             "timed_out": timed_out,
             "token_usage": usage,

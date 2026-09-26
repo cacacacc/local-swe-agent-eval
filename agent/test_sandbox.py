@@ -150,7 +150,7 @@ class VisibleTestSandbox:
         base_commit: str,
         command: Sequence[str],
     ) -> VisibleTestResult:
-        """生成当前 patch，在隔离镜像中应用后直接执行 argv 测试命令。"""
+        """在隔离镜像中执行 argv；有 patch 时先应用，没有时测试原始基线。"""
 
         repository_path = Path(repository).resolve()
         if not repository_path.is_dir():
@@ -246,7 +246,7 @@ class VisibleTestSandbox:
 
     @staticmethod
     def _collect_patch(repository: Path, base_commit: str) -> str:
-        """收集 committed、tracked 与 untracked 修改；基线测试允许空补丁。"""
+        """收集 committed、tracked 与 untracked 修改；基线测试允许空 patch。"""
 
         add = subprocess.run(
             ["git", "-C", str(repository), "add", "--intent-to-add", "--all"],

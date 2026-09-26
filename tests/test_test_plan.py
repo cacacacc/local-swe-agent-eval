@@ -93,20 +93,3 @@ def test_consume_rejects_duplicate_target_and_regression(tmp_path: Path) -> None
 
     assert request.status == "rejected"
     assert request.error == "target and regression argv must be different"
-
-
-def test_consume_rejects_full_shell_command_hidden_in_executable(tmp_path: Path) -> None:
-    """整条命令不能作为 argv[0] 绕过 shell 禁令并产生误导性的 exit 127。"""
-
-    write_plan(
-        tmp_path,
-        {
-            "target_argv": ["python -m pytest tests/test_bug.py"],
-            "regression_argv": ["python", "-m", "pytest", "tests/test_bug.py"],
-        },
-    )
-
-    request = consume_test_plan(tmp_path)
-
-    assert request.status == "rejected"
-    assert request.error == "test executable must be one argv item without whitespace"

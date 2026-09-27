@@ -155,28 +155,39 @@ def build_recovery_implementation_prompt(
     recovery_turns: int,
     max_file_read_lines: int,
     max_tool_output_chars: int,
+    implementation_handoff: str = "",
 ) -> str:
-    """为空补丁构造一次独立、可使用工具的限时恢复实现会话。
+    """为空补丁构造带可见交接信息、禁止 Bash 的限时恢复实现会话。
 
     Recovery 只复用原本预留给 Verification、但因没有候选补丁而无法使用的
-    turns，因此不会扩大单题模型预算。新会话明确要求从已有问题描述直接交付最小
-    源码修改，避免再次陷入宽泛调查或只留下复现文件。
+    turns，因此不会扩大单题模型预算。上一阶段只交接可见结论和工具调用摘要，
+    不传递 thinking 或大段工具输出；新会话必须尽早 Edit，避免再次陷入宽泛调查。
     """
+
+    handoff = implementation_handoff.strip() or (
+        "No usable visible finding was produced by the previous session."
+    )
 
     return (
         f"{base_prompt.rstrip()}\n\n"
         "Current phase: empty-patch recovery implementation\n"
+        "Visible handoff from the previous implementation session\n"
+        "<implementation_handoff>\n"
+        f"{handoff}\n"
+        "</implementation_handoff>\n"
         "- The previous implementation session ended without a usable patch. Do not "
-        "repeat broad exploration.\n"
+        "repeat searches or file reads already summarized in the handoff.\n"
         f"- You have at most {recovery_turns} turns to make a minimal concrete source "
         "change that addresses the issue.\n"
-        "- Use targeted Read, Grep, Glob, and Bash inspection as needed, but do not run "
-        "tests or package installers on the host; the parent scheduler runs tests.\n"
+        "- Bash is disabled in this phase. Use only targeted Read, Grep, and Glob for "
+        "inspection; do not run tests or package installers.\n"
+        "- Make the first Edit no later than the fourth tool call: use at most three "
+        "read-only Read, Grep, or Glob calls before editing existing product source.\n"
         "- Modify existing product source. A reproduction script, generated environment, "
         "test-only change, explanation, or empty working tree is not a fix.\n"
         "- Do not create a Git commit or `.agent-test-plan.json`.\n"
         f"- Read at most {max_file_read_lines} source lines in one tool call.\n"
         f"- Keep each command output below about {max_tool_output_chars} characters.\n"
-        "- Stop investigating once the likely defect is identified and leave the best "
-        "concrete patch in the working tree before this phase ends.\n"
+        "- If evidence remains incomplete, still leave the safest minimal Edit supported "
+        "by the issue and handoff before this phase ends.\n"
     )

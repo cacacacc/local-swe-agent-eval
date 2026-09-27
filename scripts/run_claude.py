@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 from agent.claude_runner import (
     ClaudeCodeResult,
@@ -79,7 +79,7 @@ def _runner(
     base_url: str,
     allow_bash: bool = True,
 ) -> ClaudeCodeRunner:
-    """按阶段预算构造 Claude Code；验证阶段可在 CLI 层禁用 Bash。"""
+    """按阶段预算构造 Claude Code；受限阶段可在 CLI 层禁用 Bash。"""
 
     return ClaudeCodeRunner(
         model=config.model.name,
@@ -160,6 +160,94 @@ def _should_run_verification(patch: str) -> bool:
     """只以候选 patch 是否非空决定 Verification，不依赖测试计划或结果。"""
 
     return bool(patch.strip())
+
+
+def _build_recovery_handoff(
+    result: ClaudeCodeResult,
+    *,
+    maximum_chars: int,
+) -> str:
+    """从首轮公开轨迹生成短交接，不复制 thinking 和工具返回内容。
+
+    Recovery 是全新模型会话，若只重新发送 issue，它会重复首轮定位并耗尽有限
+    turns。这里保留最后几段模型可见结论及已调用工具的关键参数，让它能直接继续；
+    ``tool_result``、stderr、原始日志和任意隐藏推理均不进入新 prompt。
+    """
+
+    visible_texts: list[str] = []
+    tool_summaries: list[str] = []
+    for event in result.events:
+        if event.get("event_type") != "assistant":
+            continue
+        details = event.get("details")
+        if not isinstance(details, Mapping):
+            continue
+        message = details.get("message")
+        if not isinstance(message, Mapping):
+            continue
+        content = message.get("content")
+        if not isinstance(content, Sequence) or isinstance(content, (str, bytes)):
+            continue
+        for block in content:
+            if not isinstance(block, Mapping):
+                continue
+            block_type = block.get("type")
+            if block_type == "text":
+                value = block.get("text")
+                if isinstance(value, str) and value.strip():
+                    visible_texts.append(truncate_output(value.strip(), 1200))
+                continue
+            if block_type != "tool_use":
+                # 显式白名单只接纳 text/tool_use；即便上游清洗规则改变，thinking
+                # 和 tool_result 也不会意外进入 Recovery 上下文。
+                continue
+            name = block.get("name")
+            tool_input = block.get("input")
+            if not isinstance(name, str) or not isinstance(tool_input, Mapping):
+                continue
+            summary = _summarize_recovery_tool_call(name, tool_input)
+            if summary and summary not in tool_summaries:
+                tool_summaries.append(summary)
+
+    terminal_reason = result.metrics.get("terminal_reason", "unknown")
+    result_subtype = result.metrics.get("result_subtype", "unknown")
+    lines = [
+        f"Previous termination: reason={terminal_reason}; subtype={result_subtype}",
+    ]
+    if visible_texts:
+        lines.append("Recent visible conclusions:")
+        lines.extend(f"- {text}" for text in visible_texts[-3:])
+    if tool_summaries:
+        lines.append("Recent inspected resources and tool calls:")
+        lines.extend(f"- {summary}" for summary in tool_summaries[-8:])
+    if not visible_texts and not tool_summaries:
+        lines.append("No usable visible findings or tool calls were recorded.")
+    return truncate_output("\n".join(lines), maximum_chars)
+
+
+def _summarize_recovery_tool_call(name: str, tool_input: Mapping[str, Any]) -> str:
+    """把允许交接的工具参数压缩为单行，避免携带任意大段结果。"""
+
+    fields_by_tool = {
+        "Read": ("file_path", "offset", "limit"),
+        "Edit": ("file_path",),
+        "Write": ("file_path",),
+        "Grep": ("pattern", "path", "glob"),
+        "Glob": ("pattern", "path"),
+        # Recovery 禁用 Bash，但上一阶段执行过的命令可以帮助避免重复定位。
+        "Bash": ("description", "command"),
+    }
+    fields = fields_by_tool.get(name)
+    if fields is None:
+        return ""
+    parts: list[str] = []
+    for field in fields:
+        value = tool_input.get(field)
+        if isinstance(value, (str, int)) and not isinstance(value, bool):
+            normalized = " ".join(str(value).split())
+            if normalized:
+                parts.append(f"{field}={truncate_output(normalized, 300)}")
+    return f"{name}: {', '.join(parts)}" if parts else name
 
 
 @dataclass(frozen=True, slots=True)
@@ -587,19 +675,28 @@ def run_claude_task(
             candidate_patch = session.collect_patch(repository)
             if not _should_run_verification(candidate_patch):
                 # 空 patch 无法进入 Verification，但其预留 turns 不能白白浪费。
-                # 使用全新上下文和可用 Bash 做一次 Recovery Implementation；
-                # 这仍保持每题 30+10 的固定模型预算，不额外增加实验计算量。
+                # Recovery 使用首轮公开轨迹的短交接，并在 CLI 层禁用 Bash，迫使
+                # 小模型把有限 turns 用于源码修改而不是重复环境探测。
+                recovery_handoff = _build_recovery_handoff(
+                    implementation_result,
+                    maximum_chars=min(
+                        config.agent.max_tool_output_chars,
+                        6000,
+                    ),
+                )
                 recovery_prompt = build_recovery_implementation_prompt(
                     prompt,
                     recovery_turns=config.agent.verification_turns,
                     max_file_read_lines=config.agent.max_file_read_lines,
                     max_tool_output_chars=config.agent.max_tool_output_chars,
+                    implementation_handoff=recovery_handoff,
                 )
                 recovery_result = _runner(
                     config,
                     turns=config.agent.verification_turns,
                     timeout_seconds=verification_timeout,
                     base_url=base_url,
+                    allow_bash=False,
                 ).run(repository, recovery_prompt)
                 phases.append(("recovery_implementation", recovery_result))
 

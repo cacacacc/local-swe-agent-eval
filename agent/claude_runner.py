@@ -299,8 +299,8 @@ class ClaudeCodeRunner:
 
         disallowed_tools = ["WebFetch", "WebSearch"]
         if not self.allow_bash:
-            # 验证会话只能 Read/Edit；真正的测试由父进程在 Docker 中执行，CLI
-            # 级禁用比 Prompt 软约束更能防止小模型回到宿主 pytest/pip。
+            # Verification/Recovery 只允许内置读写工具；真正的测试由父进程在
+            # Docker 中执行，CLI 级禁用比 Prompt 软约束更能阻止宿主命令。
             disallowed_tools.append("Bash")
         return [
             self.executable,

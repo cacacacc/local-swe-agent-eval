@@ -12,6 +12,7 @@ from experiment.config import ExperimentConfig
 from scripts.run_claude import (
     ScheduledTestEvidence,
     _apply_patch_gate,
+    _build_recovery_handoff,
     _execute_scheduled_test,
     _should_run_verification,
     run_claude_task,
@@ -59,6 +60,66 @@ def test_patch_gate_rejects_generic_success_with_empty_diff() -> None:
         "host_test_valid": False,
     }
     assert validated.events[-1]["event_type"] == "patch_validation"
+
+
+def test_recovery_handoff_keeps_visible_findings_without_tool_results() -> None:
+    """Recovery 只应接收公开结论和工具参数，不能携带 thinking 或工具输出。"""
+
+    implementation = ClaudeCodeResult(
+        exit_code=1,
+        agent_log="raw log must not be copied",
+        test_output="tool output must not be copied",
+        events=(
+            {
+                "event_type": "assistant",
+                "details": {
+                    "message": {
+                        "content": [
+                            {"type": "thinking", "thinking": "private chain"},
+                            {
+                                "type": "text",
+                                "text": "The likely defect is in parser.py.",
+                            },
+                            {
+                                "type": "tool_use",
+                                "name": "Read",
+                                "input": {
+                                    "file_path": "src/parser.py",
+                                    "offset": 10,
+                                    "limit": 80,
+                                },
+                            },
+                        ]
+                    }
+                },
+            },
+            {
+                "event_type": "user",
+                "details": {
+                    "message": {
+                        "content": [
+                            {"type": "tool_result", "content": "secret result"}
+                        ]
+                    }
+                },
+            },
+        ),
+        timed_out=False,
+        metrics={
+            "terminal_reason": "blocking_limit",
+            "result_subtype": "error_during_execution",
+        },
+    )
+
+    handoff = _build_recovery_handoff(implementation, maximum_chars=2000)
+
+    assert "reason=blocking_limit" in handoff
+    assert "The likely defect is in parser.py." in handoff
+    assert "Read: file_path=src/parser.py, offset=10, limit=80" in handoff
+    assert "private chain" not in handoff
+    assert "secret result" not in handoff
+    assert "raw log" not in handoff
+    assert "tool output" not in handoff
 
 
 def test_patch_gate_records_test_evidence_without_overriding_cli_failure() -> None:
@@ -441,6 +502,7 @@ def test_empty_patch_reuses_verification_budget_for_recovery(
         text=True,
     ).stdout.strip()
     calls: list[str] = []
+    runner_options: list[dict[str, object]] = []
 
     class FakeAgent:
         """首轮不修改文件，Recovery 会话交付一个既有源码修改。"""
@@ -470,7 +532,13 @@ def test_empty_patch_reuses_verification_budget_for_recovery(
         def run(self, *args, **kwargs):
             raise AssertionError("missing parent plan must not invent a Docker command")
 
-    monkeypatch.setattr("scripts.run_claude._runner", lambda *args, **kwargs: FakeAgent())
+    def fake_runner(*args, **kwargs):
+        """记录各阶段 runner 选项，验证 Recovery 的 Bash 硬门禁。"""
+
+        runner_options.append(dict(kwargs))
+        return FakeAgent()
+
+    monkeypatch.setattr("scripts.run_claude._runner", fake_runner)
     monkeypatch.setattr("scripts.run_claude.VisibleTestSandbox", FakeSandbox)
     monkeypatch.setattr(
         "scripts.run_claude.RuntimeFingerprintCollector.collect",
@@ -494,6 +562,8 @@ def test_empty_patch_reuses_verification_budget_for_recovery(
 
     result = json.loads((run_path / "result.json").read_text(encoding="utf-8"))
     assert calls == ["implementation", "recovery"]
+    assert "allow_bash" not in runner_options[0]
+    assert runner_options[1]["allow_bash"] is False
     assert result["run_status"] == "completed"
     assert result["patch_generated"] is True
     assert "recovery_implementation" in result["metrics"]["phases"]

@@ -190,6 +190,10 @@ def test_phase_prompts_reanchor_task_and_enforce_delivery_boundaries() -> None:
         recovery_turns=10,
         max_file_read_lines=200,
         max_tool_output_chars=12000,
+        implementation_handoff=(
+            "Previous termination: reason=max_turns; subtype=error_max_turns\n"
+            "- Read: file_path=src/example.py"
+        ),
     )
 
     assert base.strip() in implementation
@@ -208,6 +212,10 @@ def test_phase_prompts_reanchor_task_and_enforce_delivery_boundaries() -> None:
     assert base.strip() in recovery
     assert "empty-patch recovery implementation" in recovery
     assert "at most 10 turns" in recovery
+    assert "reason=max_turns" in recovery
+    assert "file_path=src/example.py" in recovery
+    assert "Bash is disabled" in recovery
+    assert "first Edit no later than the fourth tool call" in recovery
     assert "Modify existing product source" in recovery
     assert "do not run tests" in recovery
 

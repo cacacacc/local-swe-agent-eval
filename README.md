@@ -206,8 +206,12 @@ Claude Code sessions, with deterministic parent-owned test planning between them
 1. The implementation session receives 30 turns to investigate the issue and
    produce a candidate patch.
 2. The parent maps modified source paths to existing repository tests, selecting
-   Django's own runner or pytest without asking another model session.
-3. The parent attempts both commands in cached, network-free Docker containers.
+   a target module plus a different adjacent regression module (or a Django test
+   app) without asking another model session.
+3. The parent runs every command once on the unmodified instance image and once
+   with the candidate patch in cached, network-free Docker containers. Only a
+   baseline-pass to patched-fail transition is classified as `new_regression`;
+   unchanged baseline failures remain diagnostic context.
    Every non-empty patch enters the 10-turn verification session; missing plans,
    runner errors, and failing tests are recorded and injected as evidence instead
    of acting as hard gates.
@@ -263,14 +267,16 @@ architecture. New runs use four additional code-enforced boundaries:
 1. Agent repositories contain one isolated baseline commit and no remote. The
    upstream commit hash remains in metadata, while patch collection compares
    against the new workspace baseline.
-2. The parent derives target and adjacent-regression commands from the repository
-   and changed source paths. A stale model-created control file is consumed only
-   for audit and never controls execution.
-3. The parent attempts both argv arrays in the cached, network-free SWE-bench
-   image. Every non-empty patch reaches Verification, which receives available
-   exit codes and bounded output with Bash disabled. Missing or failed tests remain
-   metrics rather than protocol failures, and the scheduler regenerates commands
-   from the final patch before rerunning them.
+2. The parent derives a target command and a genuinely different adjacent
+   regression command from the repository and changed source paths. A stale
+   model-created control file is consumed only for audit and never controls
+   execution.
+3. The parent runs both argv arrays against the unchanged baseline and candidate
+   patch in the cached, network-free SWE-bench image. Every non-empty patch reaches
+   Verification, which receives the comparison classifications and bounded output
+   with Bash disabled. Missing or failed tests remain metrics rather than protocol
+   failures, and the scheduler regenerates commands from the final patch before
+   rerunning them.
 4. Parent-owned tests use scheduler events, including
    `visible_test_parent_generated`:
    `visible_test_requests`, `visible_test_missing`, `visible_test_rejected`,

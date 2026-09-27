@@ -207,11 +207,11 @@ def test_sandbox_does_not_count_patch_apply_failure_as_test_execution(
     assert result.exit_code == 1
 
 
-def test_sandbox_runs_unmodified_baseline_when_patch_is_empty(
+def test_sandbox_runs_unmodified_baseline_without_collecting_patch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Implementation 首次测试应在空 patch 下进入同一个无网络 Docker。"""
+    """基线比较必须直接运行镜像 checkout，不能读取或应用候选 patch。"""
 
     repository = tmp_path / "repo"
     repository.mkdir()
@@ -247,12 +247,14 @@ def test_sandbox_runs_unmodified_baseline_when_patch_is_empty(
         instance_id="owner__repo-7",
         base_commit="0123456789abcdef0123456789abcdef01234567",
         command=("python", "-m", "pytest"),
+        apply_patch=False,
     )
 
     docker_run = next(command for command in calls if command[:2] == ["docker", "run"])
     shell_program = docker_run[docker_run.index("-lc") + 1]
     assert "[ ! -s /tmp/agent.patch ]" in shell_program
     assert docker_run[docker_run.index("--network") + 1] == "none"
+    assert not any(command[:2] == ["git", "-C"] for command in calls)
     assert result.command_started is True
     assert result.exit_code == 1
     assert result.output == "1 failed\n"

@@ -122,7 +122,8 @@ def generate_repository_test_plan(
 
     生成器只选择任务仓库中已经存在的测试文件，绝不读取 SWE-bench 隐藏
     ``test_patch``。目标测试取与修改源码文件名最接近的现有测试模块并采用
-    fail-fast；回归测试运行该完整模块，避免把顶层 ``tests/`` 全量套件重复运行。
+    fail-fast；回归测试选择同目录或共同路径最深的另一个测试模块，避免用取消
+    ``-x`` 的同一命令冒充相邻回归。Django 的回归命令运行目标测试 app。
     Django 使用项目自己的 ``tests/runtests.py``，其余
     SWE-bench Python 仓库使用 pytest。无法找到可信测试时返回 ``missing``，
     调用方仍应把这一事实交给 Verification，而不能把它当作硬门禁。
@@ -139,18 +140,19 @@ def generate_repository_test_plan(
         )
 
     test_files = _repository_test_files(repository_path, repo)
-    target = _select_test_file(test_files, source_paths, repo=repo)
-    if target is None:
+    selected = _select_test_files(test_files, source_paths, repo=repo)
+    if selected is None:
         return TestPlanRequest(
             status="missing",
             error=f"parent planner found no repository-visible test for {repo}",
             origin="parent",
         )
 
+    target, regression = selected
     if repo == "django/django":
-        commands = _django_commands(target)
+        commands = _django_commands(target, regression)
     else:
-        commands = _pytest_commands(target)
+        commands = _pytest_commands(target, regression)
     if commands is None:
         return TestPlanRequest(
             status="missing",
@@ -206,13 +208,13 @@ def _repository_test_files(repository: Path, repo: str) -> list[Path]:
     return sorted(candidates, key=lambda path: path.as_posix())
 
 
-def _select_test_file(
+def _select_test_files(
     test_files: list[Path],
     source_paths: list[Path],
     *,
     repo: str,
-) -> Path | None:
-    """按修改路径 token 给测试文件打分，选择稳定且最邻近的模块。"""
+) -> tuple[Path, Path | None] | None:
+    """按修改路径选择目标文件和一个不同的相邻回归文件。"""
 
     ignored = {
         "__init__",
@@ -236,6 +238,11 @@ def _select_test_file(
             for token in re.findall(r"[a-z0-9]+", part.lower()):
                 if len(token) >= 3 and token not in ignored:
                     tokens.add(token)
+                    # 包路径常用 sqlite3 等带版本后缀名称，而测试模块通常省略数字；
+                    # 同时保留去尾数字形式，避免因命名惯例差异错过直接对应测试。
+                    without_version = token.rstrip("0123456789")
+                    if len(without_version) >= 3:
+                        tokens.add(without_version)
     if not tokens:
         return None
 
@@ -256,10 +263,31 @@ def _select_test_file(
         # 同分时优先更短、更具体的路径，最后用字符串顺序消除文件系统差异。
         return (exact_stem * 100 + matched * 10, -len(path.parts))
 
-    selected = max(test_files, key=score, default=None)
-    if selected is None or score(selected)[0] <= 0:
+    target = max(test_files, key=score, default=None)
+    if target is None or score(target)[0] <= 0:
         return None
-    return selected
+
+    def adjacent_score(path: Path) -> tuple[int, int, int, int]:
+        common_depth = 0
+        for left, right in zip(path.parts, target.parts):
+            if left != right:
+                break
+            common_depth += 1
+        relevance, compactness = score(path)
+        return (
+            int(path.parent == target.parent),
+            common_depth,
+            relevance,
+            compactness,
+        )
+
+    # 列表已按路径排序；max 在同分时保留第一个，因而跨文件系统仍可复现。
+    regression = max(
+        (path for path in test_files if path != target),
+        key=adjacent_score,
+        default=None,
+    )
+    return target, regression
 
 
 def _django_test_prefixes(source_paths: list[Path]) -> set[str]:
@@ -284,24 +312,44 @@ def _django_test_prefixes(source_paths: list[Path]) -> set[str]:
 
 def _pytest_commands(
     target: Path,
+    regression: Path | None,
 ) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
-    """为 pytest 仓库构造 fail-fast 目标命令与完整模块回归命令。"""
+    """为 pytest 仓库构造目标文件和不同相邻范围的两条命令。"""
+
+    regression_path = regression
+    if regression_path is None and target.parent != Path("."):
+        # 极小仓库只有一个测试文件时退回其目录；argv 仍与目标文件不同，并能覆盖
+        # 同目录 fixture/收集行为。仓库根目录不作为回退，避免意外跑全量测试。
+        regression_path = target.parent
+    if regression_path is None:
+        return None
 
     return (
         ("python", "-m", "pytest", "-x", target.as_posix()),
-        ("python", "-m", "pytest", target.as_posix()),
+        ("python", "-m", "pytest", regression_path.as_posix()),
     )
 
 
 def _django_commands(
     target: Path,
+    regression: Path | None,
 ) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
     """把 ``tests/`` 下路径转换成 Django 自带 runner 接受的 dotted label。"""
 
-    if not target.parts or target.parts[0] != "tests" or len(target.parts) < 3:
+    if not target.parts or target.parts[0] != "tests" or len(target.parts) < 2:
         return None
     relative = target.relative_to("tests").with_suffix("")
     target_label = ".".join(relative.parts)
+    if len(relative.parts) >= 2:
+        regression_label = relative.parts[0]
+    elif regression is not None and regression.parts[:1] == ("tests",):
+        # 少数 Django 根级测试（如 tests/test_sqlite.py）没有 app 可扩大；此时
+        # 使用规划器选出的另一个测试模块，仍保证两条命令覆盖不同范围。
+        regression_label = ".".join(
+            regression.relative_to("tests").with_suffix("").parts
+        )
+    else:
+        return None
     return (
         (
             "python",
@@ -311,7 +359,7 @@ def _django_commands(
             "--verbosity",
             "0",
         ),
-        ("python", "tests/runtests.py", target_label, "--verbosity", "0"),
+        ("python", "tests/runtests.py", regression_label, "--verbosity", "0"),
     )
 
 

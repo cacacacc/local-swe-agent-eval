@@ -151,8 +151,14 @@ class VisibleTestSandbox:
         instance_id: str,
         base_commit: str,
         command: Sequence[str],
+        apply_patch: bool = True,
     ) -> VisibleTestResult:
-        """在隔离镜像中执行 argv；有 patch 时先应用，没有时测试原始基线。"""
+        """在隔离镜像中执行 argv，并由调用方决定是否应用候选 patch。
+
+        ``apply_patch=False`` 直接测试官方 instance 镜像中的基线 checkout，供父
+        进程与随后 patched 结果比较。两种运行使用完全相同的镜像、资源和 argv，
+        避免把宿主差异误认为补丁回归。
+        """
 
         repository_path = Path(repository).resolve()
         if not repository_path.is_dir():
@@ -163,7 +169,11 @@ class VisibleTestSandbox:
             raise TestSandboxError("test command must contain non-empty argv items")
 
         image = self.resolve_image(instance_id)
-        patch = self._collect_patch(repository_path, base_commit)
+        patch = (
+            self._collect_patch(repository_path, base_commit)
+            if apply_patch
+            else ""
+        )
         container_name = self._container_name(instance_id)
         # 唯一标记只在 git apply 成功之后、exec 测试之前输出。Docker 返回结果但
         # 缺少该标记时，调度器不能把镜像或补丁准备失败误算成真实测试执行。

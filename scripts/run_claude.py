@@ -164,12 +164,37 @@ def _should_run_verification(patch: str) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class ScheduledTestExecution:
-    """测试计划中一条带用途标签的真实 Docker 执行结果。"""
+    """同一测试 argv 在基线和候选 patch 上的成对 Docker 结果。"""
 
     label: str
     argv: tuple[str, ...]
+    baseline_result: VisibleTestResult | None = None
+    baseline_error: str | None = None
     result: VisibleTestResult | None = None
     error: str | None = None
+
+    @property
+    def comparison(self) -> str:
+        """按 pass/fail 转换分类；只有 baseline pass → patched fail 算新回归。"""
+
+        if (
+            self.baseline_error is not None
+            or self.error is not None
+            or self.baseline_result is None
+            or self.result is None
+            or not self.baseline_result.command_started
+            or not self.result.command_started
+        ):
+            return "comparison_unavailable"
+        baseline_passed = self.baseline_result.exit_code == 0
+        patched_passed = self.result.exit_code == 0
+        if baseline_passed and patched_passed:
+            return "both_passed"
+        if baseline_passed and not patched_passed:
+            return "new_regression"
+        if not baseline_passed and patched_passed:
+            return "fixed_baseline_failure"
+        return "baseline_failure_persists"
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,12 +220,22 @@ class ScheduledTestEvidence:
     def metrics(self) -> dict[str, int | bool]:
         """生成不会把文本提及误算为容器执行的指标。"""
 
-        executed = sum(
+        patched_executed = sum(
             item.result is not None and item.result.command_started
             for item in self.executions
         )
+        baseline_executed = sum(
+            item.baseline_result is not None
+            and item.baseline_result.command_started
+            for item in self.executions
+        )
         rejected = self.request.status == "rejected" or any(
-            item.error is not None
+            item.baseline_error is not None
+            or item.error is not None
+            or (
+                item.baseline_result is not None
+                and not item.baseline_result.command_started
+            )
             or (item.result is not None and not item.result.command_started)
             for item in self.executions
         )
@@ -209,23 +244,54 @@ class ScheduledTestEvidence:
             "tool_calls": 0,
             "host_test_calls": 0,
             "agent_test_command_calls": 0,
-            "visible_test_calls": executed,
+            # 旧指标继续只计算 patched 执行，保证与历史批次可比较；baseline
+            # 容器次数由独立字段记录，二者相加才是实际 Docker 测试次数。
+            "visible_test_calls": patched_executed,
             "visible_test_requests": int(self.request.requested),
             "visible_test_missing": int(self.request.status == "missing"),
             "visible_test_rejected": int(rejected),
             "visible_test_parent_generated": int(
                 self.request.origin == "parent" and self.request.accepted
             ),
-            "visible_test_executions": executed,
+            "visible_test_executions": patched_executed,
             "visible_test_passed": sum(
                 item.result is not None and item.result.exit_code == 0
                 and item.result.command_started
                 for item in self.executions
             ),
+            "visible_test_baseline_executions": baseline_executed,
+            "visible_test_baseline_passed": sum(
+                item.baseline_result is not None
+                and item.baseline_result.exit_code == 0
+                and item.baseline_result.command_started
+                for item in self.executions
+            ),
+            "visible_test_comparisons": sum(
+                item.comparison != "comparison_unavailable"
+                for item in self.executions
+            ),
+            "visible_test_new_regressions": sum(
+                item.comparison == "new_regression" for item in self.executions
+            ),
+            "visible_test_fixed_baseline_failures": sum(
+                item.comparison == "fixed_baseline_failure"
+                for item in self.executions
+            ),
+            "visible_test_unchanged_baseline_failures": sum(
+                item.comparison == "baseline_failure_persists"
+                for item in self.executions
+            ),
             "visible_test_timed_out": any(
-                item.result is not None
-                and item.result.command_started
-                and item.result.timed_out
+                (
+                    item.baseline_result is not None
+                    and item.baseline_result.command_started
+                    and item.baseline_result.timed_out
+                )
+                or (
+                    item.result is not None
+                    and item.result.command_started
+                    and item.result.timed_out
+                )
                 for item in self.executions
             ),
             "timed_out": False,
@@ -247,22 +313,44 @@ class ScheduledTestEvidence:
             return f"The submitted test plan was rejected: {self.request.error}"
         blocks: list[str] = []
         for execution in self.executions:
-            command = " ".join(execution.argv)
-            if execution.error is not None:
-                blocks.append(
-                    f"[{execution.label}] `{command}` could not run: {execution.error}"
+            comparison = execution.comparison
+            block = [
+                f"[{execution.label}] argv: {list(execution.argv)!r}",
+                f"Comparison: {comparison}",
+            ]
+            if execution.baseline_error is not None:
+                block.append(f"Baseline could not run: {execution.baseline_error}")
+            elif execution.baseline_result is not None:
+                block.extend(
+                    (
+                        "Baseline (unmodified image):",
+                        f"Command started: {execution.baseline_result.command_started}",
+                        f"Exit code: {execution.baseline_result.exit_code}",
+                        f"Timed out: {execution.baseline_result.timed_out}",
+                        "Output:",
+                        # 两条命令各有 baseline/patched 输出；再次按单块限长，避免
+                        # 总证据截断时恰好丢掉位于中间的 patched target traceback。
+                        truncate_output(
+                            execution.baseline_result.output,
+                            2400,
+                        ).rstrip(),
+                    )
                 )
-                continue
-            assert execution.result is not None
-            blocks.append(
-                f"[{execution.label}] argv: {list(execution.argv)!r}\n"
-                f"Docker image: {execution.result.image}\n"
-                f"Command started: {execution.result.command_started}\n"
-                f"Exit code: {execution.result.exit_code}\n"
-                f"Timed out: {execution.result.timed_out}\n"
-                "Output:\n"
-                f"{execution.result.output.rstrip()}"
-            )
+            if execution.error is not None:
+                block.append(f"Patched run could not run: {execution.error}")
+            elif execution.result is not None:
+                block.extend(
+                    (
+                        "Patched candidate:",
+                        f"Docker image: {execution.result.image}",
+                        f"Command started: {execution.result.command_started}",
+                        f"Exit code: {execution.result.exit_code}",
+                        f"Timed out: {execution.result.timed_out}",
+                        "Output:",
+                        truncate_output(execution.result.output, 2400).rstrip(),
+                    )
+                )
+            blocks.append("\n".join(block))
         return "\n\n".join(blocks)
 
 
@@ -274,28 +362,48 @@ def _execute_scheduled_test(
     sandbox: VisibleTestSandbox,
     request: TestPlanRequest | None = None,
 ) -> ScheduledTestEvidence:
-    """消费或复用双命令计划，并分别在一次性 Docker 容器中执行。"""
+    """对双命令分别运行基线与 patched 容器，形成可比较证据。"""
 
     request = consume_test_plan(repository) if request is None else request
     if not request.accepted:
         return ScheduledTestEvidence(request=request)
     executions: list[ScheduledTestExecution] = []
     for label, argv in request.commands:
+        baseline_result: VisibleTestResult | None = None
+        baseline_error: str | None = None
         try:
-            result = sandbox.run(
+            baseline_result = sandbox.run(
                 repository,
                 instance_id=task.instance_id,
                 base_commit=workspace_base_commit,
                 command=argv,
+                apply_patch=False,
             )
         except (TestSandboxError, ValueError) as error:
-            executions.append(
-                ScheduledTestExecution(label=label, argv=argv, error=str(error))
+            baseline_error = str(error)
+
+        patched_result: VisibleTestResult | None = None
+        patched_error: str | None = None
+        try:
+            patched_result = sandbox.run(
+                repository,
+                instance_id=task.instance_id,
+                base_commit=workspace_base_commit,
+                command=argv,
+                apply_patch=True,
             )
-        else:
-            executions.append(
-                ScheduledTestExecution(label=label, argv=argv, result=result)
+        except (TestSandboxError, ValueError) as error:
+            patched_error = str(error)
+        executions.append(
+            ScheduledTestExecution(
+                label=label,
+                argv=argv,
+                baseline_result=baseline_result,
+                baseline_error=baseline_error,
+                result=patched_result,
+                error=patched_error,
             )
+        )
     return ScheduledTestEvidence(request=request, executions=tuple(executions))
 
 
@@ -309,6 +417,18 @@ def _scheduled_test_result(evidence: ScheduledTestEvidence) -> ClaudeCodeResult:
             {
                 "label": execution.label,
                 "argv": list(execution.argv),
+                "comparison": execution.comparison,
+                "baseline_error": execution.baseline_error,
+                "baseline_exit_code": (
+                    execution.baseline_result.exit_code
+                    if execution.baseline_result is not None
+                    else None
+                ),
+                "baseline_command_started": (
+                    execution.baseline_result.command_started
+                    if execution.baseline_result is not None
+                    else False
+                ),
                 "error": execution.error,
                 "exit_code": (
                     execution.result.exit_code

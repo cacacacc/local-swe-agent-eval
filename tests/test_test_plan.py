@@ -105,6 +105,8 @@ def test_parent_generates_pytest_plan_from_modified_source(tmp_path: Path) -> No
     target = tmp_path / "testing" / "test_reports.py"
     target.parent.mkdir(parents=True)
     target.write_text("def test_report(): pass\n", encoding="utf-8")
+    regression = tmp_path / "testing" / "test_terminal.py"
+    regression.write_text("def test_terminal(): pass\n", encoding="utf-8")
     patch = (
         "diff --git a/src/_pytest/reports.py b/src/_pytest/reports.py\n"
         "--- a/src/_pytest/reports.py\n+++ b/src/_pytest/reports.py\n"
@@ -123,7 +125,7 @@ def test_parent_generates_pytest_plan_from_modified_source(tmp_path: Path) -> No
         "python", "-m", "pytest", "-x", "testing/test_reports.py"
     )
     assert request.regression_argv == (
-        "python", "-m", "pytest", "testing/test_reports.py"
+        "python", "-m", "pytest", "testing/test_terminal.py"
     )
 
 
@@ -156,10 +158,33 @@ def test_parent_uses_django_runner_and_dotted_labels(tmp_path: Path) -> None:
     assert request.regression_argv == (
         "python",
         "tests/runtests.py",
-        "forms_tests.tests.test_forms",
+        "forms_tests",
         "--verbosity",
         "0",
     )
+
+
+def test_parent_adapts_django_root_test_to_distinct_neighbor(tmp_path: Path) -> None:
+    """Django 根级测试没有 app 时也必须选择另一个模块作为相邻回归。"""
+
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_sqlite.py").write_text("", encoding="utf-8")
+    (tests / "test_runner.py").write_text("", encoding="utf-8")
+    request = generate_repository_test_plan(
+        tmp_path,
+        repo="django/django",
+        patch=(
+            "diff --git a/django/db/backends/sqlite3/base.py "
+            "b/django/db/backends/sqlite3/base.py\n"
+            "--- a/django/db/backends/sqlite3/base.py\n"
+            "+++ b/django/db/backends/sqlite3/base.py\n"
+            "@@ -1 +1 @@\n-old\n+new\n"
+        ),
+    )
+
+    assert request.target_argv[2] == "test_sqlite"
+    assert request.regression_argv[2] == "test_runner"
 
 
 def test_parent_missing_plan_is_diagnostic_for_unmatched_patch(tmp_path: Path) -> None:

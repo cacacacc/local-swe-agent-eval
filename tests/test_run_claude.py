@@ -141,7 +141,15 @@ def test_scheduler_metrics_require_a_real_sandbox_result(
     class FakeSandbox:
         """记录 argv 并模拟一次成功的 Docker 测试。"""
 
-        def run(self, repository, *, instance_id, base_commit, command):
+        def run(
+            self,
+            repository,
+            *,
+            instance_id,
+            base_commit,
+            command,
+            apply_patch,
+        ):
             assert repository == tmp_path
             assert instance_id == "owner__repo-7"
             assert base_commit == "a" * 40
@@ -171,9 +179,69 @@ def test_scheduler_metrics_require_a_real_sandbox_result(
     assert evidence.metrics()["visible_test_requests"] == 1
     assert evidence.metrics()["visible_test_executions"] == 2
     assert evidence.metrics()["visible_test_passed"] == 2
+    assert evidence.metrics()["visible_test_baseline_executions"] == 2
+    assert evidence.metrics()["visible_test_baseline_passed"] == 2
+    assert evidence.metrics()["visible_test_comparisons"] == 2
+    assert evidence.metrics()["visible_test_new_regressions"] == 0
     assert evidence.metrics()["visible_test_rejected"] == 0
     assert evidence.metrics()["visible_test_parent_generated"] == 1
     assert evidence.ready_for_verification is True
+
+
+def test_scheduler_marks_only_baseline_pass_to_patched_fail_as_regression(
+    tmp_path: Path,
+) -> None:
+    """基线已有失败不能误报成补丁回归，只有 pass→fail 才增加回归指标。"""
+
+    request = StructuredTestPlanRequest(
+        status="generated",
+        target_argv=("python", "-m", "pytest", "tests/test_target.py"),
+        regression_argv=("python", "-m", "pytest", "tests/test_neighbor.py"),
+        origin="parent",
+    )
+
+    class FakeSandbox:
+        """目标命令产生新失败，相邻命令在基线和 patch 上都保持失败。"""
+
+        def run(
+            self,
+            repository,
+            *,
+            instance_id,
+            base_commit,
+            command,
+            apply_patch,
+        ):
+            is_target = command == request.target_argv
+            exit_code = 0 if is_target and not apply_patch else 1
+            return VisibleTestResult(
+                exit_code=exit_code,
+                output="passed\n" if exit_code == 0 else "failed\n",
+                image="swebench/example:latest",
+                timed_out=False,
+                command_started=True,
+            )
+
+    task = SWEbenchTask(
+        instance_id="owner__repo-comparison",
+        repo="owner/repo",
+        base_commit="b" * 40,
+        problem_statement="Fix it.",
+    )
+    evidence = _execute_scheduled_test(
+        tmp_path,
+        task=task,
+        workspace_base_commit="a" * 40,
+        sandbox=FakeSandbox(),
+        request=request,
+    )
+
+    metrics = evidence.metrics()
+    assert metrics["visible_test_comparisons"] == 2
+    assert metrics["visible_test_new_regressions"] == 1
+    assert metrics["visible_test_unchanged_baseline_failures"] == 1
+    assert "Comparison: new_regression" in evidence.prompt_text()
+    assert "Comparison: baseline_failure_persists" in evidence.prompt_text()
 
 
 def test_missing_plan_is_counted_and_blocks_verification() -> None:
@@ -209,7 +277,15 @@ def test_scheduler_rejects_container_result_before_test_command_started(
     class FakeSandbox:
         """模拟容器已创建但测试命令尚未启动就失败的结果。"""
 
-        def run(self, repository, *, instance_id, base_commit, command):
+        def run(
+            self,
+            repository,
+            *,
+            instance_id,
+            base_commit,
+            command,
+            apply_patch,
+        ):
             return VisibleTestResult(
                 exit_code=1,
                 output="error: patch failed\n",

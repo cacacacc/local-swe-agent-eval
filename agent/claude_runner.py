@@ -63,6 +63,12 @@ def combine_phase_results(
     total_visible_test_parent_generated = 0
     total_visible_test_executions = 0
     total_visible_test_passed = 0
+    total_visible_test_baseline_executions = 0
+    total_visible_test_baseline_passed = 0
+    total_visible_test_comparisons = 0
+    total_visible_test_new_regressions = 0
+    total_visible_test_fixed_baseline_failures = 0
+    total_visible_test_unchanged_baseline_failures = 0
     total_visible_test_timed_out = 0
 
     for phase_name, result in phases:
@@ -111,6 +117,24 @@ def combine_phase_results(
         total_visible_test_passed += int(
             result.metrics.get("visible_test_passed", 0)
         )
+        total_visible_test_baseline_executions += int(
+            result.metrics.get("visible_test_baseline_executions", 0)
+        )
+        total_visible_test_baseline_passed += int(
+            result.metrics.get("visible_test_baseline_passed", 0)
+        )
+        total_visible_test_comparisons += int(
+            result.metrics.get("visible_test_comparisons", 0)
+        )
+        total_visible_test_new_regressions += int(
+            result.metrics.get("visible_test_new_regressions", 0)
+        )
+        total_visible_test_fixed_baseline_failures += int(
+            result.metrics.get("visible_test_fixed_baseline_failures", 0)
+        )
+        total_visible_test_unchanged_baseline_failures += int(
+            result.metrics.get("visible_test_unchanged_baseline_failures", 0)
+        )
         total_visible_test_timed_out += int(
             bool(result.metrics.get("visible_test_timed_out", False))
         )
@@ -132,6 +156,16 @@ def combine_phase_results(
         "visible_test_parent_generated": total_visible_test_parent_generated,
         "visible_test_executions": total_visible_test_executions,
         "visible_test_passed": total_visible_test_passed,
+        "visible_test_baseline_executions": total_visible_test_baseline_executions,
+        "visible_test_baseline_passed": total_visible_test_baseline_passed,
+        "visible_test_comparisons": total_visible_test_comparisons,
+        "visible_test_new_regressions": total_visible_test_new_regressions,
+        "visible_test_fixed_baseline_failures": (
+            total_visible_test_fixed_baseline_failures
+        ),
+        "visible_test_unchanged_baseline_failures": (
+            total_visible_test_unchanged_baseline_failures
+        ),
         "visible_test_timed_out": total_visible_test_timed_out,
         "agent_test_command_calls": total_agent_test_commands,
         "host_test_calls": total_host_test_calls,
@@ -450,6 +484,12 @@ class ClaudeCodeRunner:
             "visible_test_parent_generated": 0,
             "visible_test_executions": 0,
             "visible_test_passed": 0,
+            "visible_test_baseline_executions": 0,
+            "visible_test_baseline_passed": 0,
+            "visible_test_comparisons": 0,
+            "visible_test_new_regressions": 0,
+            "visible_test_fixed_baseline_failures": 0,
+            "visible_test_unchanged_baseline_failures": 0,
             "visible_test_timed_out": False,
             "agent_test_command_calls": agent_test_command_calls,
             "host_test_calls": host_test_calls,

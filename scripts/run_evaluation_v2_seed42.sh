@@ -7,9 +7,9 @@
 #   ./scripts/run_evaluation_v2_seed42.sh 20
 #   ./scripts/run_evaluation_v2_seed42.sh 30
 #
-# 入口直接使用项目的 .venv Python，因此调用者无需提前激活虚拟环境。
-# 正式运行前会检查本机依赖，确保 Docker、Ollama 或 SWE-bench 问题不会在
-# 创建批次产物后才暴露。脚本只负责检查，不会安装软件或修改主机设置。
+# 入口会把项目的 .venv 放到 PATH 最前面，因此调用者无需提前激活虚拟环境。
+# 正式运行前会按需启动 Docker Desktop 和 Ollama，并等待服务真正可用；脚本
+# 不会安装软件，也不会修改 Docker Desktop 的 WSL Integration 等主机设置。
 #
 # 可通过环境变量覆盖本机相关路径或运行标识：
 #   BATCH_ID                批次 ID；默认包含所选题数
@@ -44,31 +44,105 @@ fail() {
     exit 1
 }
 
+ollama_ready() {
+    # 使用项目 Python 探测 API，避免要求宿主机额外安装 curl。
+    "${PYTHON_BIN}" -c '
+import sys
+import urllib.request
+
+base_url = sys.argv[1].rstrip("/")
+with urllib.request.urlopen(f"{base_url}/api/tags", timeout=3) as response:
+    if response.status != 200:
+        raise SystemExit(1)
+' "${LOCAL_MODEL_BASE_URL}" >/dev/null 2>&1
+}
+
+wait_for_docker() {
+    # Docker Desktop 启动通常需要数十秒；同时检查命令与 daemon，才能覆盖
+    # WSL Integration 尚未挂载客户端以及 daemon 尚未就绪两种状态。
+    local attempt
+    for ((attempt = 1; attempt <= 45; attempt++)); do
+        if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 2
+    done
+    return 1
+}
+
+wait_for_ollama() {
+    local attempt
+    for ((attempt = 1; attempt <= 30; attempt++)); do
+        if ollama_ready; then
+            return 0
+        fi
+        sleep 2
+    done
+    return 1
+}
+
+start_docker_if_needed() {
+    if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+        return
+    fi
+
+    printf 'Docker 尚未就绪，正在启动 Docker Desktop...\n'
+    if command -v powershell.exe >/dev/null 2>&1; then
+        # WSL 无法直接管理 Windows 服务；通过 Windows 启动已安装的 Desktop，
+        # 随后仍以 docker info 为准等待，而不是假定进程出现即代表可用。
+        powershell.exe -NoProfile -NonInteractive -Command \
+            'Start-Process "$Env:ProgramFiles\Docker\Docker\Docker Desktop.exe"' \
+            >/dev/null 2>&1 || true
+    fi
+
+    if ! wait_for_docker; then
+        cat >&2 <<'EOF'
+启动检查失败：Docker Desktop 启动后仍无法访问 Docker daemon。
+
+请确认 Windows 已安装 Docker Desktop，并在以下位置启用当前发行版：
+  Settings -> Resources -> WSL Integration
+EOF
+        exit 1
+    fi
+    printf 'Docker 已就绪。\n'
+}
+
+start_ollama_if_needed() {
+    if ollama_ready; then
+        return
+    fi
+
+    printf 'Ollama 尚未就绪，正在启动服务...\n'
+    if command -v ollama >/dev/null 2>&1; then
+        # 日志放在 /tmp，避免把宿主服务日志写进实验仓库或提交到 Git。
+        nohup ollama serve >/tmp/local-swe-agent-eval-ollama.log 2>&1 &
+    elif command -v powershell.exe >/dev/null 2>&1; then
+        powershell.exe -NoProfile -NonInteractive -Command \
+            'Start-Process -WindowStyle Hidden ollama -ArgumentList "serve"' \
+            >/dev/null 2>&1 || true
+    else
+        fail "找不到 ollama 或 powershell.exe，无法自动启动 Ollama。"
+    fi
+
+    if ! wait_for_ollama; then
+        fail "自动启动 Ollama 后仍无法访问 ${LOCAL_MODEL_BASE_URL}；请检查 Ollama 安装和服务日志。"
+    fi
+    printf 'Ollama 已就绪。\n'
+}
+
 if [[ ! -x "${PYTHON_BIN}" ]]; then
     fail "找不到项目虚拟环境 ${PYTHON_BIN}，请先创建并安装项目依赖。"
 fi
+
+# Bash 脚本不能修改调用它的父 shell，但把 .venv/bin 放到当前脚本 PATH 的
+# 最前面与激活环境对本次评测的效果一致，子进程调用 `python` 时也不会失效。
+export PATH="${PROJECT_ROOT}/.venv/bin:${PATH}"
 
 if [[ ! -f "${CONFIG_PATH}" || ! -f "${TASKS_PATH}" ]]; then
     fail "${TASK_COUNT} 题配置或准备后的任务文件不存在，请先完成数据准备。"
 fi
 
-if ! command -v docker >/dev/null 2>&1; then
-    cat >&2 <<'EOF'
-启动检查失败：当前 WSL 中找不到 docker 命令。
-
-请在 Windows 的 Docker Desktop 中打开：
-  Settings -> Resources -> WSL Integration
-然后启用当前发行版，点击 Apply & Restart。
-回到 WSL 后先运行 `docker version` 确认客户端和服务端均可访问。
-EOF
-    exit 1
-fi
-
-# `docker` 命令存在并不代表 daemon 可用；Docker Desktop 未启动或 WSL
-# integration 尚未生效时，必须在下载镜像之前给出清晰错误。
-if ! docker info >/dev/null 2>&1; then
-    fail "Docker daemon 不可访问；请启动 Docker Desktop，并确认 WSL Integration 已启用。"
-fi
+start_docker_if_needed
 
 if ! command -v claude >/dev/null 2>&1; then
     fail "找不到 claude 命令；请先安装 Claude Code，并确认它位于 PATH。"
@@ -78,19 +152,7 @@ if [[ ! -x "${SWEBENCH_ROOT}/.venv/bin/swebench" ]]; then
     fail "找不到 ${SWEBENCH_ROOT}/.venv/bin/swebench，请检查 SWEBENCH_ROOT 或安装 SWE-bench。"
 fi
 
-# 使用 Python 标准库探测 Ollama，避免额外依赖 curl。这里只访问 loopback
-# 服务，不进行外网请求，也不负责替用户启动或修改模型服务。
-if ! "${PYTHON_BIN}" -c '
-import sys
-import urllib.request
-
-base_url = sys.argv[1].rstrip("/")
-with urllib.request.urlopen(f"{base_url}/api/tags", timeout=3) as response:
-    if response.status != 200:
-        raise SystemExit(1)
-' "${LOCAL_MODEL_BASE_URL}" >/dev/null 2>&1; then
-    fail "无法访问 ${LOCAL_MODEL_BASE_URL}；请先启动 Ollama，并确认 qwen3.5:9b 已安装。"
-fi
+start_ollama_if_needed
 
 printf '启动检查通过，开始运行 %s 题批次：%s\n' "${TASK_COUNT}" "${BATCH_ID}"
 

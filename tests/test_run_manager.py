@@ -61,6 +61,52 @@ def test_collect_patch_includes_agent_commits_and_untracked_files(tmp_path: Path
     assert "+assert True" in patch
 
 
+def test_collect_patch_excludes_generated_environments_but_keeps_source(
+    tmp_path: Path,
+) -> None:
+    """任务内虚拟环境和缓存不能污染 prediction，真实源码修改仍必须保留。"""
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    run_git(repository, "init")
+    run_git(repository, "config", "user.name", "Run Manager Test")
+    run_git(repository, "config", "user.email", "run-manager@example.invalid")
+    source = repository / "module.py"
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    run_git(repository, "add", "module.py")
+    run_git(repository, "commit", "-m", "base")
+    base_commit = run_git(repository, "rev-parse", "HEAD")
+
+    task = SWEbenchTask(
+        instance_id="owner__repo-artifacts",
+        repo="owner/repo",
+        base_commit=base_commit,
+        problem_statement="Fix it.",
+    )
+    session = RunManager(tmp_path / "runs").start(
+        task,
+        phase="dev",
+        agent="claude-code",
+        model="qwen3.5:9b",
+        prompt="prompt\n",
+    )
+
+    source.write_text("VALUE = 2\n", encoding="utf-8")
+    generated = repository / "test_env" / "lib" / "site-packages"
+    generated.mkdir(parents=True)
+    (generated / "dependency.py").write_text("GENERATED = True\n", encoding="utf-8")
+    cache = repository / "__pycache__"
+    cache.mkdir()
+    (cache / "module.pyc").write_bytes(b"compiled")
+
+    patch = session.collect_patch(repository)
+
+    assert "module.py" in patch
+    assert "+VALUE = 2" in patch
+    assert "test_env" not in patch
+    assert "__pycache__" not in patch
+
+
 def test_finalize_classifies_timeout_and_counts_changed_lines(tmp_path: Path) -> None:
     """退出码 124 必须归类为 timeout，且补丁规模不能统计 diff header。"""
 

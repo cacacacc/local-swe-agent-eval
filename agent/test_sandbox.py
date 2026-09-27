@@ -15,6 +15,8 @@ import tempfile
 import uuid
 from typing import Sequence
 
+from tracking.run_manager import patch_pathspecs
+
 
 class TestSandboxError(RuntimeError):
     """当镜像缺失、Git patch 无法生成或 Docker 无法启动时抛出。"""
@@ -249,7 +251,16 @@ class VisibleTestSandbox:
         """收集 committed、tracked 与 untracked 修改；基线测试允许空 patch。"""
 
         add = subprocess.run(
-            ["git", "-C", str(repository), "add", "--intent-to-add", "--all"],
+            [
+                "git",
+                "-C",
+                str(repository),
+                "add",
+                "--intent-to-add",
+                "--all",
+                "--",
+                *patch_pathspecs(),
+            ],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -268,6 +279,7 @@ class VisibleTestSandbox:
                 "--no-ext-diff",
                 base_commit,
                 "--",
+                *patch_pathspecs(),
             ],
             capture_output=True,
             text=True,

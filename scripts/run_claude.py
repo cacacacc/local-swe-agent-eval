@@ -21,6 +21,7 @@ from agent.claude_runner import (
 from agent.prompt_builder import (
     PromptBuilder,
     build_implementation_phase_prompt,
+    build_recovery_implementation_prompt,
     build_verification_phase_prompt,
 )
 from agent.test_plan import (
@@ -464,30 +465,71 @@ def run_claude_task(
             # 父进程根据仓库布局与候选 patch 确定性生成。
             consume_test_plan(repository)
             candidate_patch = session.collect_patch(repository)
-            candidate_patch_for_prompt = truncate_output(
-                candidate_patch,
-                config.agent.max_tool_output_chars,
-            )
-            parent_request = generate_repository_test_plan(
-                repository,
-                repo=task.repo,
-                patch=candidate_patch,
-            )
-            initial_evidence = _execute_scheduled_test(
-                repository,
-                task=task,
-                workspace_base_commit=patch_base_commit,
-                sandbox=test_sandbox,
-                request=parent_request,
-            )
-            phases.append(
-                ("scheduled_test_initial", _scheduled_test_result(initial_evidence))
-            )
             if not _should_run_verification(candidate_patch):
-                # Verification 只要求存在候选 patch；测试计划和 Docker 结果均为
-                # 可选证据。空 patch 没有可审查内容，因此保留实现阶段结果。
+                # 空 patch 无法进入 Verification，但其预留 turns 不能白白浪费。
+                # 使用全新上下文和可用 Bash 做一次 Recovery Implementation；
+                # 这仍保持每题 30+10 的固定模型预算，不额外增加实验计算量。
+                recovery_prompt = build_recovery_implementation_prompt(
+                    prompt,
+                    recovery_turns=config.agent.verification_turns,
+                    max_file_read_lines=config.agent.max_file_read_lines,
+                    max_tool_output_chars=config.agent.max_tool_output_chars,
+                )
+                recovery_result = _runner(
+                    config,
+                    turns=config.agent.verification_turns,
+                    timeout_seconds=verification_timeout,
+                    base_url=base_url,
+                ).run(repository, recovery_prompt)
+                phases.append(("recovery_implementation", recovery_result))
+
+                consume_test_plan(repository)
+                recovered_patch = session.collect_patch(repository)
+                recovery_request = generate_repository_test_plan(
+                    repository,
+                    repo=task.repo,
+                    patch=recovered_patch,
+                )
+                recovery_evidence = _execute_scheduled_test(
+                    repository,
+                    task=task,
+                    workspace_base_commit=patch_base_commit,
+                    sandbox=test_sandbox,
+                    request=recovery_request,
+                )
+                phases.append(
+                    (
+                        "scheduled_test_recovery",
+                        _scheduled_test_result(recovery_evidence),
+                    )
+                )
                 result = combine_phase_results(tuple(phases))
+                # 末尾测试 phase 只保存证据，不能掩盖 Recovery CLI 自身的失败；
+                # 首轮 Implementation 的失败则允许被成功 Recovery 覆盖。
+                result = replace(result, exit_code=recovery_result.exit_code)
             else:
+                candidate_patch_for_prompt = truncate_output(
+                    candidate_patch,
+                    config.agent.max_tool_output_chars,
+                )
+                parent_request = generate_repository_test_plan(
+                    repository,
+                    repo=task.repo,
+                    patch=candidate_patch,
+                )
+                initial_evidence = _execute_scheduled_test(
+                    repository,
+                    task=task,
+                    workspace_base_commit=patch_base_commit,
+                    sandbox=test_sandbox,
+                    request=parent_request,
+                )
+                phases.append(
+                    (
+                        "scheduled_test_initial",
+                        _scheduled_test_result(initial_evidence),
+                    )
+                )
                 verification_prompt = build_verification_phase_prompt(
                     prompt,
                     verification_turns=config.agent.verification_turns,

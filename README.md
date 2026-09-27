@@ -180,8 +180,8 @@ harness log, and `resolved_count / resolved_rate` under
 
 For the fixed, mutually non-overlapping 15-, 20-, and 30-task seed-42 evaluations, the
 repository also provides a local one-command launcher. It selects the project
-virtual environment itself and checks Docker, Claude Code, Ollama, and
-SWE-bench before creating batch output:
+virtual environment itself, starts Docker Desktop and Ollama when necessary,
+and checks Claude Code and SWE-bench before creating batch output:
 
 ```bash
 ./scripts/run_evaluation_v2_seed42.sh 15
@@ -191,7 +191,8 @@ SWE-bench before creating batch output:
 
 Docker Desktop's WSL integration must still be enabled from Docker Desktop on
 Windows; a Linux process inside WSL cannot grant that host-side integration.
-The launcher reports the exact setting to change when the Docker CLI is absent.
+The launcher can start the installed Windows applications, but it reports the
+exact setting to change if WSL still cannot reach the Docker daemon.
 
 ## Phase 5: bounded two-session agent architecture
 
@@ -210,6 +211,10 @@ Claude Code sessions, with deterministic parent-owned test planning between them
    Every non-empty patch enters the 10-turn verification session; missing plans,
    runner errors, and failing tests are recorded and injected as evidence instead
    of acting as hard gates.
+4. If implementation produces no usable patch, the otherwise-unused 10
+   verification turns become a fresh recovery implementation session with Bash
+   enabled. This keeps the 40-turn budget fixed while giving early termination a
+   second chance to modify existing source.
 
 Starting a new session prevents implementation history and failed automatic
 compaction from consuming the verification context. The v2 prompt also limits
@@ -226,9 +231,11 @@ never applies the SWE-bench hidden `test_patch` or runs the official evaluation
 script during solving. Required images must be pulled during environment
 preparation; the wrapper never pulls implicitly.
 
-An empty diff can no longer be reported as a completed agent run. The runner
-records a `patch_validation` event, per-phase metrics, test-attempt evidence,
-and Claude Code's structured terminal reason.
+An empty diff can no longer be reported as a completed agent run. Generated
+virtual environments and caches are excluded from both visible-test and final
+patches without deleting the worktree evidence. The runner records a
+`patch_validation` event, per-phase metrics, test-attempt evidence, and Claude
+Code's structured terminal reason.
 
 Validate and run the new Dev architecture with a new run ID:
 

@@ -10,6 +10,7 @@ from agent.prompt_builder import (
     PromptBuilder,
     PromptTemplateError,
     build_implementation_phase_prompt,
+    build_recovery_implementation_prompt,
     build_verification_phase_prompt,
 )
 from benchmark.task import SWEbenchTask
@@ -184,6 +185,12 @@ def test_phase_prompts_reanchor_task_and_enforce_delivery_boundaries() -> None:
         candidate_patch="diff --git a/a.py b/a.py\n-old\n+new\n",
         scheduled_test_evidence="Exit code: 1\nFAILED expected value",
     )
+    recovery = build_recovery_implementation_prompt(
+        base,
+        recovery_turns=10,
+        max_file_read_lines=200,
+        max_tool_output_chars=12000,
+    )
 
     assert base.strip() in implementation
     assert "non-empty candidate patch" in implementation
@@ -198,6 +205,11 @@ def test_phase_prompts_reanchor_task_and_enforce_delivery_boundaries() -> None:
     assert "Bash is disabled" in verification
     assert "missing plan" in verification
     assert "hidden SWE-bench tests" in verification
+    assert base.strip() in recovery
+    assert "empty-patch recovery implementation" in recovery
+    assert "at most 10 turns" in recovery
+    assert "Modify existing product source" in recovery
+    assert "do not run tests" in recovery
 
 
 def test_dev_config_cannot_be_used_as_formal_evaluation() -> None:

@@ -144,3 +144,36 @@ def build_verification_phase_prompt(
         "- Do not inspect or run hidden SWE-bench tests; use only repository-visible tests "
         "and reproductions derived from the problem statement.\n"
     )
+
+
+def build_recovery_implementation_prompt(
+    base_prompt: str,
+    *,
+    recovery_turns: int,
+    max_file_read_lines: int,
+    max_tool_output_chars: int,
+) -> str:
+    """为空补丁构造一次独立、可使用工具的限时恢复实现会话。
+
+    Recovery 只复用原本预留给 Verification、但因没有候选补丁而无法使用的
+    turns，因此不会扩大单题模型预算。新会话明确要求从已有问题描述直接交付最小
+    源码修改，避免再次陷入宽泛调查或只留下复现文件。
+    """
+
+    return (
+        f"{base_prompt.rstrip()}\n\n"
+        "Current phase: empty-patch recovery implementation\n"
+        "- The previous implementation session ended without a usable patch. Do not "
+        "repeat broad exploration.\n"
+        f"- You have at most {recovery_turns} turns to make a minimal concrete source "
+        "change that addresses the issue.\n"
+        "- Use targeted Read, Grep, Glob, and Bash inspection as needed, but do not run "
+        "tests or package installers on the host; the parent scheduler runs tests.\n"
+        "- Modify existing product source. A reproduction script, generated environment, "
+        "test-only change, explanation, or empty working tree is not a fix.\n"
+        "- Do not create a Git commit or `.agent-test-plan.json`.\n"
+        f"- Read at most {max_file_read_lines} source lines in one tool call.\n"
+        f"- Keep each command output below about {max_tool_output_chars} characters.\n"
+        "- Stop investigating once the likely defect is identified and leave the best "
+        "concrete patch in the working tree before this phase ends.\n"
+    )

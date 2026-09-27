@@ -24,6 +24,28 @@ class RunArtifactError(RuntimeError):
 # instance ID 来自外部数据集，必须先转换为安全的单层目录名。
 _SAFE_PATH_COMPONENT = re.compile(r"[^A-Za-z0-9_.-]+")
 
+# 这些目录只包含 Agent 在任务 worktree 中临时创建的解释器环境或缓存，把它们
+# 写入 prediction 会产生数万行无意义 diff，甚至掩盖真正源码修改。使用 Git
+# pathspec 排除而不删除文件，既保留失败现场，也避免把运行产物送入官方评测。
+_PATCH_EXCLUDE_PATHS = (
+    ":(exclude,glob)**/.venv/**",
+    ":(exclude,glob)**/venv/**",
+    ":(exclude,glob)**/env/**",
+    ":(exclude,glob)**/test_env/**",
+    ":(exclude,glob)**/.tox/**",
+    ":(exclude,glob)**/.nox/**",
+    ":(exclude,glob)**/__pycache__/**",
+    ":(exclude,glob)**/.pytest_cache/**",
+    ":(exclude,glob)**/.mypy_cache/**",
+    ":(exclude,glob)**/*.pyc",
+)
+
+
+def patch_pathspecs() -> tuple[str, ...]:
+    """返回 patch 收集的稳定 Git pathspec，供保存与 Docker 测试共用。"""
+
+    return (".", *_PATCH_EXCLUDE_PATHS)
+
 
 def _utc_now() -> str:
     """生成带时区的 UTC 时间戳，避免不同机器本地时区造成歧义。"""
@@ -62,7 +84,14 @@ class RunSession:
         """
 
         repository_path = Path(repository).resolve()
-        self._run_git(repository_path, "add", "--intent-to-add", "--all")
+        self._run_git(
+            repository_path,
+            "add",
+            "--intent-to-add",
+            "--all",
+            "--",
+            *patch_pathspecs(),
+        )
         return self._run_git(
             repository_path,
             "diff",
@@ -70,6 +99,7 @@ class RunSession:
             "--no-ext-diff",
             self._patch_base_commit,
             "--",
+            *patch_pathspecs(),
         )
 
     def finalize(

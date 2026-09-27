@@ -11,6 +11,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import sys
 from typing import Any, Mapping, Sequence
 from urllib.error import URLError
 from urllib.parse import urlparse
@@ -77,7 +78,11 @@ class RuntimeFingerprintCollector:
                 ["docker", "version", "--format", "{{.Client.Version}}/{{.Server.Version}}"]
             ),
             "python_version": self._run(
-                ["python", "-c", "import platform; print(platform.python_version())"]
+                [
+                    sys.executable,
+                    "-c",
+                    "import platform; print(platform.python_version())",
+                ]
             ),
             "model": self._ollama_model(),
         }

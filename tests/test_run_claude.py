@@ -328,3 +328,99 @@ def test_nonempty_patch_reaches_verification_when_parent_plan_is_missing(
     assert "verification" in result["metrics"]["phases"]
     assert "test_protocol_gate" not in result["metrics"]["phases"]
     assert result["metrics"]["visible_test_missing"] == 2
+
+
+def test_empty_patch_reuses_verification_budget_for_recovery(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """首轮空 patch 应启动可编辑的 Recovery，而不是浪费预留的模型 turns。"""
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    source = repository / "src" / "widget.py"
+    source.parent.mkdir()
+    source.write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(repository), "add", "src/widget.py"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "base",
+        ],
+        check=True,
+    )
+    base_commit = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    calls: list[str] = []
+
+    class FakeAgent:
+        """首轮不修改文件，Recovery 会话交付一个既有源码修改。"""
+
+        def run(self, worktree, prompt):
+            if "empty-patch recovery implementation" in prompt:
+                calls.append("recovery")
+                source.write_text("value = 2\n", encoding="utf-8")
+            elif "Current phase: verification" in prompt:
+                calls.append("verification")
+            else:
+                calls.append("implementation")
+            return _result()
+
+    class FakeSandbox:
+        """仓库没有测试文件，Recovery 后只应记录缺失计划。"""
+
+        def __init__(self, **kwargs):
+            pass
+
+        def resolve_image(self, instance_id):
+            return "swebench/example:latest"
+
+        def image_digest(self, image):
+            return "sha256:test"
+
+        def run(self, *args, **kwargs):
+            raise AssertionError("missing parent plan must not invent a Docker command")
+
+    monkeypatch.setattr("scripts.run_claude._runner", lambda *args, **kwargs: FakeAgent())
+    monkeypatch.setattr("scripts.run_claude.VisibleTestSandbox", FakeSandbox)
+    monkeypatch.setattr(
+        "scripts.run_claude.RuntimeFingerprintCollector.collect",
+        lambda self: {"schema_version": 1},
+    )
+
+    task = SWEbenchTask(
+        instance_id="owner__project-recovery",
+        repo="owner/project",
+        base_commit=base_commit,
+        problem_statement="Fix widget behavior.",
+    )
+    run_path = run_claude_task(
+        task,
+        repository,
+        ExperimentConfig.load(PROJECT_ROOT / "configs" / "dev_v2.yaml"),
+        tmp_path / "runs",
+        base_url="http://localhost:11434",
+        workspace_base_commit=base_commit,
+    )
+
+    result = json.loads((run_path / "result.json").read_text(encoding="utf-8"))
+    assert calls == ["implementation", "recovery"]
+    assert result["run_status"] == "completed"
+    assert result["patch_generated"] is True
+    assert "recovery_implementation" in result["metrics"]["phases"]
+    assert "scheduled_test_recovery" in result["metrics"]["phases"]
+    assert "verification" not in result["metrics"]["phases"]
+    assert result["metrics"]["visible_test_missing"] == 1

@@ -76,18 +76,21 @@ def import_official_evaluation(
     ambiguous_ids = _id_set(report, "ambiguous_failure_ids")
     empty_patch_ids = _id_set(report, "empty_patch_ids")
 
-    # resolved 与 unresolved 是主要判定；其余集合保留更具体的失败原因，便于报告分类。
+    # resolved 与 unresolved 是正式测试判定，优先级高于 harness 的附加诊断集合。
+    # 同一题可能同时位于 unresolved_ids 与 ambiguous_failure_ids（例如日志启发式
+    # 误报 no_tests_collected，但 report.json 已记录 FAIL_TO_PASS）；此时必须保留
+    # “测试已运行但未解决”的事实，不能降级成 evaluation_error。
     if instance_id in resolved_ids:
         status = "resolved"
         resolved = True
     elif instance_id in empty_patch_ids:
         status = "invalid_patch"
         resolved = False
-    elif instance_id in incomplete_ids | error_ids | infra_ids | ambiguous_ids:
-        status = "evaluation_error"
-        resolved = False
     elif instance_id in unresolved_ids:
         status = "unresolved"
+        resolved = False
+    elif instance_id in incomplete_ids | error_ids | infra_ids | ambiguous_ids:
+        status = "evaluation_error"
         resolved = False
     else:
         raise EvaluationImportError(

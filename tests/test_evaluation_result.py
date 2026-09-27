@@ -89,3 +89,31 @@ def test_import_refuses_to_overwrite_official_result(tmp_path: Path) -> None:
 
     with pytest.raises(EvaluationImportError, match="refusing to overwrite"):
         import_official_evaluation(run_path, report_path, **arguments)
+
+
+def test_unresolved_test_result_takes_priority_over_ambiguous_diagnostic(
+    tmp_path: Path,
+) -> None:
+    """真实测试失败与启发式诊断重叠时必须归为 unresolved，防止误报评测错误。"""
+
+    run_path, report_path, _ = make_run_and_report(tmp_path)
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    instance_id = "owner__repo-1"
+    report["resolved_ids"] = []
+    report["unresolved_ids"] = [instance_id]
+    report["ambiguous_failure_ids"] = [instance_id]
+    report["failure_reasons"] = {instance_id: "no_tests_collected"}
+    write_json(report_path, report)
+
+    destination = import_official_evaluation(
+        run_path,
+        report_path,
+        harness_run_id="dev-official-overlap",
+        dataset="verified",
+    )
+
+    official = json.loads(destination.read_text(encoding="utf-8"))[
+        "official_evaluation"
+    ]
+    assert official["status"] == "unresolved"
+    assert official["resolved"] is False

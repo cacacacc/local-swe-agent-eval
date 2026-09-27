@@ -1,6 +1,8 @@
 """验证分阶段 Agent 的交付物门禁和失败分类。"""
 
+import json
 from pathlib import Path
+import subprocess
 
 from agent.claude_runner import ClaudeCodeResult
 from agent.test_plan import TestPlanRequest as StructuredTestPlanRequest
@@ -11,6 +13,8 @@ from scripts.run_claude import (
     ScheduledTestEvidence,
     _apply_patch_gate,
     _execute_scheduled_test,
+    _should_run_verification,
+    run_claude_task,
 )
 
 
@@ -125,11 +129,12 @@ def test_scheduler_metrics_require_a_real_sandbox_result(
     """只有沙箱返回结构化结果后，execution 和 passed 指标才能增加。"""
 
     request = StructuredTestPlanRequest(
-        status="accepted",
+        status="generated",
         target_argv=(
             "python", "-m", "pytest", "tests/test_one.py::test_bug"
         ),
         regression_argv=("python", "-m", "pytest", "tests/test_one.py"),
+        origin="parent",
     )
     monkeypatch.setattr("scripts.run_claude.consume_test_plan", lambda _: request)
 
@@ -167,11 +172,12 @@ def test_scheduler_metrics_require_a_real_sandbox_result(
     assert evidence.metrics()["visible_test_executions"] == 2
     assert evidence.metrics()["visible_test_passed"] == 2
     assert evidence.metrics()["visible_test_rejected"] == 0
+    assert evidence.metrics()["visible_test_parent_generated"] == 1
     assert evidence.ready_for_verification is True
 
 
 def test_missing_plan_is_counted_and_blocks_verification() -> None:
-    """缺失计划必须形成显式指标，且不能被当作可进入 verification 的证据。"""
+    """缺失计划必须形成显式指标，但不再决定是否进入 Verification。"""
 
     evidence = ScheduledTestEvidence(
         request=StructuredTestPlanRequest(status="missing")
@@ -180,6 +186,13 @@ def test_missing_plan_is_counted_and_blocks_verification() -> None:
     assert evidence.metrics()["visible_test_missing"] == 1
     assert evidence.metrics()["visible_test_executions"] == 0
     assert evidence.ready_for_verification is False
+
+
+def test_nonempty_patch_enters_verification_without_test_plan() -> None:
+    """测试计划缺失时，非空 patch 仍必须进入独立 Verification 会话。"""
+
+    assert _should_run_verification("diff --git a/a.py b/a.py\n+new\n") is True
+    assert _should_run_verification("\n\t") is False
 
 
 def test_scheduler_rejects_container_result_before_test_command_started(
@@ -224,3 +237,94 @@ def test_scheduler_rejects_container_result_before_test_command_started(
     assert metrics["visible_test_timed_out"] is False
     assert metrics["visible_test_rejected"] == 1
     assert evidence.ready_for_verification is False
+
+
+def test_nonempty_patch_reaches_verification_when_parent_plan_is_missing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """集成保护：父进程找不到测试时，非空 patch 仍必须启动 Verification。"""
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    source = repository / "src" / "widget.py"
+    source.parent.mkdir()
+    source.write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(repository), "add", "src/widget.py"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "base",
+        ],
+        check=True,
+    )
+    base_commit = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    calls: list[str] = []
+
+    class FakeAgent:
+        """第一次产生 patch，第二次证明 Verification 实际启动。"""
+
+        def run(self, worktree, prompt):
+            phase = "verification" if "Current phase: verification" in prompt else "implementation"
+            calls.append(phase)
+            if phase == "implementation":
+                source.write_text("value = 2\n", encoding="utf-8")
+            return _result()
+
+    class FakeSandbox:
+        """本例没有可映射测试，因此 Docker run 不应被调用。"""
+
+        def __init__(self, **kwargs):
+            pass
+
+        def resolve_image(self, instance_id):
+            return "swebench/example:latest"
+
+        def image_digest(self, image):
+            return "sha256:test"
+
+        def run(self, *args, **kwargs):
+            raise AssertionError("missing parent plan must not invent a Docker command")
+
+    monkeypatch.setattr("scripts.run_claude._runner", lambda *args, **kwargs: FakeAgent())
+    monkeypatch.setattr("scripts.run_claude.VisibleTestSandbox", FakeSandbox)
+    monkeypatch.setattr(
+        "scripts.run_claude.RuntimeFingerprintCollector.collect",
+        lambda self: {"schema_version": 1},
+    )
+
+    task = SWEbenchTask(
+        instance_id="owner__project-1",
+        repo="owner/project",
+        base_commit=base_commit,
+        problem_statement="Fix widget behavior.",
+    )
+    run_path = run_claude_task(
+        task,
+        repository,
+        ExperimentConfig.load(PROJECT_ROOT / "configs" / "dev_v2.yaml"),
+        tmp_path / "runs",
+        base_url="http://localhost:11434",
+        workspace_base_commit=base_commit,
+    )
+
+    result = json.loads((run_path / "result.json").read_text(encoding="utf-8"))
+    assert calls == ["implementation", "verification"]
+    assert "verification" in result["metrics"]["phases"]
+    assert "test_protocol_gate" not in result["metrics"]["phases"]
+    assert result["metrics"]["visible_test_missing"] == 2

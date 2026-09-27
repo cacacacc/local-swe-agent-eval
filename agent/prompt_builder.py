@@ -70,7 +70,7 @@ def build_implementation_phase_prompt(
     max_file_read_lines: int,
     max_tool_output_chars: int,
 ) -> str:
-    """为实现阶段追加补丁、测试计划交付点和上下文预算护栏。
+    """为实现阶段追加补丁交付点和上下文预算护栏。
 
     Claude Code 暂不提供可靠的逐次 Read/Bash 输出硬上限，因此这里把限制写成
     可审计的阶段协议。真实测试统一由父进程在候选补丁产生后调度，Implementation
@@ -89,57 +89,11 @@ def build_implementation_phase_prompt(
         "- Before assuming how an internal API works, find an existing repository usage.\n"
         "- Do not run pytest, tox, project test scripts, or package installers directly "
         "on the host. The parent scheduler owns test execution after this phase.\n"
-        "- Before finishing, use Write to create `.agent-test-plan.json` with exactly "
-        "`target_argv` and `regression_argv`. The first command targets the bug or a "
-        "focused reproduction; the second runs the nearest existing test module or "
-        "suite for regression coverage. Both values are argv arrays, never shell command "
-        "strings. Example: `"
-        "{"
-        "\"target_argv\":[\"python\",\"-m\",\"pytest\",\"tests/test_one.py::test_bug\"],"
-        "\"regression_argv\":[\"python\",\"-m\",\"pytest\",\"tests/test_one.py\"]}`. "
-        "The control file is consumed and excluded from the patch.\n"
+        "- Do not create `.agent-test-plan.json`; the parent scheduler selects visible "
+        "test commands deterministically from the repository and candidate patch.\n"
         f"- A fresh verification session owns the final {verification_turns} turns, so "
         "leave the working tree with your best concrete patch even if local dependencies "
         "prevent tests from running.\n"
-    )
-
-
-def build_test_planning_phase_prompt(
-    base_prompt: str,
-    *,
-    planning_turns: int,
-    max_file_read_lines: int,
-    candidate_patch: str,
-    previous_plan_error: str,
-) -> str:
-    """构造只负责交付两条测试 argv 的短会话 Prompt。"""
-
-    return (
-        f"{base_prompt.rstrip()}\n\n"
-        "Current phase: mandatory visible-test planning\n"
-        f"- You have at most {planning_turns} turns. Do not modify product or test source.\n"
-        "- Bash is disabled. Use Read, Glob, and Grep only to locate tests.\n"
-        "- Your only deliverable is `.agent-test-plan.json`; create it with Write even "
-        "if it does not exist.\n"
-        "- The JSON object must contain exactly `target_argv` and `regression_argv`. "
-        "Each value is a non-empty argv string array, not a shell command.\n"
-        "- Example: `"
-        "{"
-        "\"target_argv\":[\"python\",\"-m\",\"pytest\",\"tests/test_one.py::test_bug\"],"
-        "\"regression_argv\":[\"python\",\"-m\",\"pytest\",\"tests/test_one.py\"]}`.\n"
-        "- `target_argv` must run the smallest repository-visible reproduction or focused "
-        "test relevant to the reported bug.\n"
-        "- `regression_argv` must be a different, broader command that runs the nearest "
-        "existing test module or suite, so adjacent behavior is checked too.\n"
-        "- Do not use Git, Docker, package installers, network tools, pipes, redirects, "
-        "or shell operators.\n"
-        f"- Read at most {max_file_read_lines} lines per tool call.\n"
-        f"Previous submission status: {previous_plan_error}\n"
-        "Candidate patch:\n"
-        "<candidate_patch>\n"
-        f"{candidate_patch.rstrip()}\n"
-        "</candidate_patch>\n"
-        "Finish immediately after writing the valid control file.\n"
     )
 
 
@@ -176,14 +130,15 @@ def build_verification_phase_prompt(
         "- Do not create another Git commit.\n"
         "- Bash is disabled in this phase. Do not attempt pytest, package installation, "
         "Git commands, or any host process; use Read and Edit to repair the files.\n"
-        "- Treat the actual traceback or assertion as authoritative and repair the patch.\n"
+        "- If scheduler-owned tests ran, treat their traceback or assertion as evidence. "
+        "A missing plan, runner error, or nonzero exit is diagnostic information, not a "
+        "reason to abandon the non-empty patch.\n"
         "- Search for an existing API usage before accepting unfamiliar calling syntax.\n"
         f"- Read at most {max_file_read_lines} source lines in one tool call.\n"
         f"- Keep each command output below about {max_tool_output_chars} characters; "
         "show only the first relevant failure and a short tail.\n"
-        "- The parent scheduler automatically reruns both accepted argv commands. Only "
-        "if a test target must change, use Write to create `.agent-test-plan.json` with "
-        "new `target_argv` and `regression_argv` arrays. Never use a shell command string.\n"
+        "- The parent scheduler regenerates and reruns repository-adapted commands after "
+        "this phase. Do not create or replace a test-plan control file.\n"
         "- Finish after inspecting every changed source file relevant to the candidate. A "
         "generic response or empty patch is a failure.\n"
         "- Do not inspect or run hidden SWE-bench tests; use only repository-visible tests "

@@ -149,6 +149,7 @@ def test_summary_counts_turns_tools_and_final_usage_without_double_counting() ->
         "visible_test_requests": 0,
         "visible_test_missing": 0,
         "visible_test_rejected": 0,
+        "visible_test_parent_generated": 0,
         "visible_test_executions": 0,
         "visible_test_passed": 0,
         "visible_test_timed_out": False,
@@ -222,6 +223,7 @@ def test_combine_phase_results_uses_verification_exit_and_sums_metrics() -> None
     assert combined.metrics["tool_calls"] == 15
     assert combined.metrics["visible_test_calls"] == 0
     assert combined.metrics["visible_test_executions"] == 0
+    assert combined.metrics["visible_test_parent_generated"] == 0
     assert combined.metrics["host_test_calls"] == 0
     assert combined.metrics["token_usage"] == {
         "input_tokens": 140,

@@ -1,9 +1,9 @@
-"""读取并校验 Agent 交给调度器的结构化可见测试计划。
+"""读取旧 Agent 计划，并由父进程生成仓库适配的可见测试计划。
 
-模型不得自行拼接或执行宿主测试命令。实现/修复会话只可在仓库根目录写入
-``.agent-test-plan.json``。计划必须分别声明目标测试和相邻回归测试的 argv，
-调度器依次把两条命令传给无网络 Docker 沙箱。计划文件在读取后立即删除，
-因此不会污染最终补丁。
+模型不得自行拼接或执行宿主测试命令。父进程根据仓库布局和 patch 生成目标测试
+与相邻回归测试 argv，再依次交给无网络 Docker 沙箱。``consume_test_plan`` 仅为
+兼容和清理旧会话可能遗留的 ``.agent-test-plan.json``；其中命令不再控制执行，
+控制文件在读取后立即删除，因此不会污染最终补丁。
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import re
 import shutil
 from typing import Any
 
@@ -41,12 +42,13 @@ class TestPlanRequest:
     target_argv: tuple[str, ...] = ()
     regression_argv: tuple[str, ...] = ()
     error: str | None = None
+    origin: str = "agent"
 
     @property
     def accepted(self) -> bool:
         """仅当结构与安全边界全部通过时返回 ``True``。"""
 
-        return self.status == "accepted"
+        return self.status in {"accepted", "generated"}
 
     @property
     def requested(self) -> bool:
@@ -108,6 +110,209 @@ def consume_test_plan(repository: Path | str) -> TestPlanRequest:
         )
     finally:
         _remove_control_path(plan_path)
+
+
+def generate_repository_test_plan(
+    repository: Path | str,
+    *,
+    repo: str,
+    patch: str,
+) -> TestPlanRequest:
+    """根据仓库类型、修改路径和现有测试布局确定性生成两条测试命令。
+
+    生成器只选择任务仓库中已经存在的测试文件，绝不读取 SWE-bench 隐藏
+    ``test_patch``。目标测试取与修改源码文件名最接近的现有测试模块并采用
+    fail-fast；回归测试运行该完整模块，避免把顶层 ``tests/`` 全量套件重复运行。
+    Django 使用项目自己的 ``tests/runtests.py``，其余
+    SWE-bench Python 仓库使用 pytest。无法找到可信测试时返回 ``missing``，
+    调用方仍应把这一事实交给 Verification，而不能把它当作硬门禁。
+    """
+
+    repository_path = Path(repository).resolve()
+    changed_paths, new_paths = _patch_paths(patch)
+    source_paths = [path for path in changed_paths if path not in new_paths]
+    if not source_paths:
+        return TestPlanRequest(
+            status="missing",
+            error="parent planner found no modified existing source path",
+            origin="parent",
+        )
+
+    test_files = _repository_test_files(repository_path, repo)
+    target = _select_test_file(test_files, source_paths, repo=repo)
+    if target is None:
+        return TestPlanRequest(
+            status="missing",
+            error=f"parent planner found no repository-visible test for {repo}",
+            origin="parent",
+        )
+
+    if repo == "django/django":
+        commands = _django_commands(target)
+    else:
+        commands = _pytest_commands(target)
+    if commands is None:
+        return TestPlanRequest(
+            status="missing",
+            error=f"parent planner could not adapt test path {target.as_posix()}",
+            origin="parent",
+        )
+    target_argv, regression_argv = commands
+    return TestPlanRequest(
+        status="generated",
+        target_argv=target_argv,
+        regression_argv=regression_argv,
+        origin="parent",
+    )
+
+
+def _patch_paths(patch: str) -> tuple[list[Path], set[Path]]:
+    """提取补丁中的目标路径，并标记本轮新建文件供计划器排除。"""
+
+    changed: list[Path] = []
+    newly_created: set[Path] = set()
+    for section in re.split(r"(?=^diff --git )", patch, flags=re.MULTILINE):
+        match = re.match(r"diff --git a/(.+?) b/(.+?)\n", section)
+        if match is None:
+            continue
+        path = Path(match.group(2))
+        changed.append(path)
+        if "new file mode " in section:
+            newly_created.add(path)
+    return changed, newly_created
+
+
+def _repository_test_files(repository: Path, repo: str) -> list[Path]:
+    """枚举受支持仓库的既有 Python 测试，保持排序以保证可复现。"""
+
+    roots = ("tests",) if repo == "django/django" else ("tests", "testing")
+    candidates: set[Path] = set()
+    for root_name in roots:
+        root = repository / root_name
+        if not root.is_dir():
+            continue
+        for path in root.rglob("*.py"):
+            if path.is_file() and (
+                path.name.startswith("test_")
+                or path.name.endswith("_test.py")
+                or root_name == "testing"
+            ):
+                candidates.add(path.relative_to(repository))
+    # Astropy、scikit-learn、xarray、SymPy 等把测试放在源码包内部。
+    if not candidates:
+        for path in repository.rglob("test_*.py"):
+            if path.is_file() and ".git" not in path.parts:
+                candidates.add(path.relative_to(repository))
+    return sorted(candidates, key=lambda path: path.as_posix())
+
+
+def _select_test_file(
+    test_files: list[Path],
+    source_paths: list[Path],
+    *,
+    repo: str,
+) -> Path | None:
+    """按修改路径 token 给测试文件打分，选择稳定且最邻近的模块。"""
+
+    ignored = {
+        "__init__",
+        "base",
+        "common",
+        "core",
+        "lib",
+        "main",
+        "models",
+        "src",
+        "test",
+        "tests",
+        "testing",
+        "utils",
+    }
+    tokens: set[str] = set()
+    for source in source_paths:
+        # 首段通常只是顶层包名（astropy、sklearn、sphinx 等），保留它会让几乎
+        # 所有测试同分并退化成字典序选择，因此只使用更具体的内部路径。
+        for part in source.with_suffix("").parts[1:]:
+            for token in re.findall(r"[a-z0-9]+", part.lower()):
+                if len(token) >= 3 and token not in ignored:
+                    tokens.add(token)
+    if not tokens:
+        return None
+
+    if repo == "django/django":
+        preferred = _django_test_prefixes(source_paths)
+        preferred_files = [
+            path
+            for path in test_files
+            if any(prefix in path.parts for prefix in preferred)
+        ]
+        if preferred_files:
+            test_files = preferred_files
+
+    def score(path: Path) -> tuple[int, int]:
+        text = path.with_suffix("").as_posix().lower()
+        matched = sum(1 for token in tokens if token in text)
+        exact_stem = int(any(path.stem == f"test_{token}" for token in tokens))
+        # 同分时优先更短、更具体的路径，最后用字符串顺序消除文件系统差异。
+        return (exact_stem * 100 + matched * 10, -len(path.parts))
+
+    selected = max(test_files, key=score, default=None)
+    if selected is None or score(selected)[0] <= 0:
+        return None
+    return selected
+
+
+def _django_test_prefixes(source_paths: list[Path]) -> set[str]:
+    """把 Django 源码子系统映射到测试 app，避免仅凭通用文件名误选模块。"""
+
+    mappings = {
+        ("django", "forms"): "forms_tests",
+        ("django", "template"): "template_tests",
+        ("django", "db", "migrations"): "migrations",
+        ("django", "db", "models", "fields"): "model_fields",
+        ("django", "contrib", "auth"): "auth_tests",
+        ("django", "contrib", "admin"): "admin_views",
+    }
+    prefixes: set[str] = set()
+    for source in source_paths:
+        parts = source.parts
+        for prefix, test_app in mappings.items():
+            if parts[: len(prefix)] == prefix:
+                prefixes.add(test_app)
+    return prefixes
+
+
+def _pytest_commands(
+    target: Path,
+) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+    """为 pytest 仓库构造 fail-fast 目标命令与完整模块回归命令。"""
+
+    return (
+        ("python", "-m", "pytest", "-x", target.as_posix()),
+        ("python", "-m", "pytest", target.as_posix()),
+    )
+
+
+def _django_commands(
+    target: Path,
+) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+    """把 ``tests/`` 下路径转换成 Django 自带 runner 接受的 dotted label。"""
+
+    if not target.parts or target.parts[0] != "tests" or len(target.parts) < 3:
+        return None
+    relative = target.relative_to("tests").with_suffix("")
+    target_label = ".".join(relative.parts)
+    return (
+        (
+            "python",
+            "tests/runtests.py",
+            target_label,
+            "--failfast",
+            "--verbosity",
+            "0",
+        ),
+        ("python", "tests/runtests.py", target_label, "--verbosity", "0"),
+    )
 
 
 def _remove_control_path(path: Path) -> None:

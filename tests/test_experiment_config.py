@@ -10,7 +10,6 @@ from agent.prompt_builder import (
     PromptBuilder,
     PromptTemplateError,
     build_implementation_phase_prompt,
-    build_test_planning_phase_prompt,
     build_verification_phase_prompt,
 )
 from benchmark.task import SWEbenchTask
@@ -91,17 +90,17 @@ def test_config_rejects_network_during_formal_solving(tmp_path) -> None:
         destination.unlink(missing_ok=True)
 
 
-def test_verification_requires_reserved_test_planner(tmp_path) -> None:
-    """启用 verification 时不得省略 planner，否则缺失计划会再次被静默跳过。"""
+def test_model_test_planning_turns_are_rejected(tmp_path) -> None:
+    """父进程接管测试计划后，不得再为独立模型 planner 预留 turns。"""
 
     raw = yaml.safe_load(
         (PROJECT_ROOT / "configs" / "dev_v2.yaml").read_text(encoding="utf-8")
     )
-    raw["agent"]["test_planning_turns"] = 0
+    raw["agent"]["test_planning_turns"] = 4
     destination = PROJECT_ROOT / "configs" / "temporary-no-planner-test.yaml"
     try:
         destination.write_text(yaml.safe_dump(raw), encoding="utf-8")
-        with pytest.raises(ConfigurationError, match="verification requires"):
+        with pytest.raises(ConfigurationError, match="parent-generated"):
             ExperimentConfig.load(destination)
     finally:
         destination.unlink(missing_ok=True)
@@ -122,9 +121,9 @@ def test_dev_v2_reserves_an_independent_verification_session() -> None:
 
     assert config.experiment.phase == "dev"
     assert config.experiment.configuration_frozen is False
-    assert config.agent.max_turns == 44
+    assert config.agent.max_turns == 40
     assert config.agent.verification_turns == 10
-    assert config.agent.test_planning_turns == 4
+    assert config.agent.test_planning_turns == 0
     assert config.agent.max_file_read_lines == 200
     assert config.agent.max_tool_output_chars == 12000
     assert config.agent.visible_test_sandbox is True
@@ -145,9 +144,9 @@ def test_evaluation_v2_is_frozen_as_a_separate_ablation() -> None:
     assert ablation.experiment.phase == "evaluation"
     assert ablation.experiment.name.endswith("evaluation-v2")
     assert ablation.fingerprint != baseline.fingerprint
-    assert ablation.agent.max_turns == 44
+    assert ablation.agent.max_turns == 40
     assert ablation.agent.verification_turns == 10
-    assert ablation.agent.test_planning_turns == 4
+    assert ablation.agent.test_planning_turns == 0
     assert ablation.agent.visible_test_sandbox is True
 
 
@@ -177,13 +176,6 @@ def test_phase_prompts_reanchor_task_and_enforce_delivery_boundaries() -> None:
         max_file_read_lines=200,
         max_tool_output_chars=12000,
     )
-    planning = build_test_planning_phase_prompt(
-        base,
-        planning_turns=4,
-        max_file_read_lines=200,
-        candidate_patch="diff --git a/a.py b/a.py\n-old\n+new\n",
-        previous_plan_error="missing",
-    )
     verification = build_verification_phase_prompt(
         base,
         verification_turns=10,
@@ -198,14 +190,13 @@ def test_phase_prompts_reanchor_task_and_enforce_delivery_boundaries() -> None:
     assert "at most 200 source lines" in implementation
     assert ".agent-test-plan.json" in implementation
     assert "parent scheduler owns test execution" in implementation
-    assert "target_argv" in planning and "regression_argv" in planning
-    assert "Your only deliverable" in planning
-    assert "Bash is disabled" in planning
+    assert "Do not create `.agent-test-plan.json`" in implementation
     assert base.strip() in verification
     assert "Candidate patch collected relative" in verification
     assert "diff --git a/a.py b/a.py" in verification
     assert "FAILED expected value" in verification
     assert "Bash is disabled" in verification
+    assert "missing plan" in verification
     assert "hidden SWE-bench tests" in verification
 
 

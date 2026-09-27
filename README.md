@@ -193,22 +193,23 @@ Docker Desktop's WSL integration must still be enabled from Docker Desktop on
 Windows; a Linux process inside WSL cannot grant that host-side integration.
 The launcher reports the exact setting to change when the Docker CLI is absent.
 
-## Phase 5: bounded three-phase agent architecture
+## Phase 5: bounded two-session agent architecture
 
 The completed ten-task evaluation remains the immutable baseline represented by
 `configs/evaluation.yaml`. Architecture experiments use `configs/dev_v2.yaml`
 and must not replace the baseline result.
 
-Dev v2 gives the same local model a 44-turn hard limit split across three fresh
-Claude Code sessions:
+Dev v2 gives the same local model a 40-turn hard limit split across two fresh
+Claude Code sessions, with deterministic parent-owned test planning between them:
 
 1. The implementation session receives 30 turns to investigate the issue and
-   produce a candidate patch plus a target/regression test plan.
-2. If implementation does not submit a valid test plan, a Bash-free 4-turn
-   planning session must write separate target and adjacent-regression argv.
-3. The parent runs both commands in cached, network-free Docker containers. The
-   10-turn verification session starts only after both commands really execute,
-   then receives their exit codes and output before repairing the patch.
+   produce a candidate patch.
+2. The parent maps modified source paths to existing repository tests, selecting
+   Django's own runner or pytest without asking another model session.
+3. The parent attempts both commands in cached, network-free Docker containers.
+   Every non-empty patch enters the 10-turn verification session; missing plans,
+   runner errors, and failing tests are recorded and injected as evidence instead
+   of acting as hard gates.
 
 Starting a new session prevents implementation history and failed automatic
 compaction from consuming the verification context. The v2 prompt also limits
@@ -255,15 +256,16 @@ architecture. New runs use four additional code-enforced boundaries:
 1. Agent repositories contain one isolated baseline commit and no remote. The
    upstream commit hash remains in metadata, while patch collection compares
    against the new workspace baseline.
-2. The implementation session may write a temporary `.agent-test-plan.json`
-   containing `target_argv` and `regression_argv`. Missing or invalid plans
-   trigger a separate Bash-free planner; another failure stops before
-   verification instead of silently continuing.
-3. The parent executes both argv arrays in the cached, network-free SWE-bench
-   image. Verification receives real exit codes and bounded output, has Bash
-   disabled at the Claude CLI boundary, and may repair files with Read/Edit.
-   The scheduler then reruns both commands.
-4. Parent-owned tests use scheduler events:
+2. The parent derives target and adjacent-regression commands from the repository
+   and changed source paths. A stale model-created control file is consumed only
+   for audit and never controls execution.
+3. The parent attempts both argv arrays in the cached, network-free SWE-bench
+   image. Every non-empty patch reaches Verification, which receives available
+   exit codes and bounded output with Bash disabled. Missing or failed tests remain
+   metrics rather than protocol failures, and the scheduler regenerates commands
+   from the final patch before rerunning them.
+4. Parent-owned tests use scheduler events, including
+   `visible_test_parent_generated`:
    `visible_test_requests`, `visible_test_missing`, `visible_test_rejected`,
    `visible_test_executions`, `visible_test_passed`, and
    `visible_test_timed_out`. `visible_test_calls` remains a compatibility alias

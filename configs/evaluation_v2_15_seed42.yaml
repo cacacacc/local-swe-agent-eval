@@ -13,7 +13,7 @@ dataset:
   split: test
   tasks_file: experiments/evaluation_tasks_15_seed42.json
 
-# 保持与十题 v2 相同模型，并采用 30+4+10 强制测试规划预算。
+# 保持与十题 v2 相同模型，采用 30+10 双会话预算；测试计划由父进程生成。
 model:
   runtime: ollama
   name: qwen3.5:9b
@@ -23,9 +23,9 @@ model:
 agent:
   framework: claude-code
   timeout_seconds: 5400
-  max_turns: 44
+  max_turns: 40
   verification_turns: 10
-  test_planning_turns: 4
+  test_planning_turns: 0
   max_file_read_lines: 200
   max_tool_output_chars: 12000
   visible_test_sandbox: true

@@ -13,8 +13,8 @@ dataset:
   split: test
   tasks_file: experiments/evaluation_tasks_30_seed42.json
 
-# 保持 8/20 实验使用的三阶段协议：30 turns 实现、4 turns 测试规划、
-# 10 turns 验证；Implementation 阶段不运行额外的前置测试。
+# 新协议保留 30 turns 实现和 10 turns 验证；父进程按仓库生成测试命令，
+# 缺失或失败只形成证据，不再阻断非空 patch 进入 Verification。
 model:
   runtime: ollama
   name: qwen3.5:9b
@@ -24,9 +24,9 @@ model:
 agent:
   framework: claude-code
   timeout_seconds: 5400
-  max_turns: 44
+  max_turns: 40
   verification_turns: 10
-  test_planning_turns: 4
+  test_planning_turns: 0
   max_file_read_lines: 200
   max_tool_output_chars: 12000
   visible_test_sandbox: true

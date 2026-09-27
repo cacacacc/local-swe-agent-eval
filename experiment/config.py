@@ -358,11 +358,10 @@ class ExperimentConfig:
                 minimum=0,
             ),
         )
-        reserved_turns = agent.verification_turns + agent.test_planning_turns
+        reserved_turns = agent.verification_turns
         if reserved_turns >= agent.max_turns:
             raise ConfigurationError(
-                "agent verification and test planning turns must leave at least one "
-                "implementation turn"
+                "agent verification turns must leave at least one implementation turn"
             )
         if agent.verification_turns and (
             agent.max_file_read_lines <= 0 or agent.max_tool_output_chars <= 0
@@ -375,16 +374,13 @@ class ExperimentConfig:
             raise ConfigurationError(
                 "visible test sandbox requires positive visible_test_timeout_seconds"
             )
-        if agent.test_planning_turns and not agent.visible_test_sandbox:
+        if agent.test_planning_turns:
             raise ConfigurationError(
-                "test planning turns require the visible test sandbox"
+                "agent.test_planning_turns must be 0; test plans are parent-generated"
             )
-        if agent.verification_turns and (
-            not agent.visible_test_sandbox or agent.test_planning_turns <= 0
-        ):
+        if agent.verification_turns and not agent.visible_test_sandbox:
             raise ConfigurationError(
-                "verification requires visible_test_sandbox and positive "
-                "test_planning_turns"
+                "verification requires visible_test_sandbox"
             )
 
         # 环境准备可以联网下载依赖；正式求解必须离线以降低答案泄漏风险。
@@ -517,7 +513,6 @@ class ExperimentConfig:
             "implementation_turns": (
                 self.agent.max_turns
                 - self.agent.verification_turns
-                - self.agent.test_planning_turns
             ),
             "max_file_read_lines": self.agent.max_file_read_lines,
             "max_tool_output_chars": self.agent.max_tool_output_chars,

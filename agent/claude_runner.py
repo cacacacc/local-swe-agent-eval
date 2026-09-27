@@ -60,6 +60,7 @@ def combine_phase_results(
     total_visible_test_requests = 0
     total_visible_test_missing = 0
     total_visible_test_rejected = 0
+    total_visible_test_parent_generated = 0
     total_visible_test_executions = 0
     total_visible_test_passed = 0
     total_visible_test_timed_out = 0
@@ -101,6 +102,9 @@ def combine_phase_results(
         total_visible_test_rejected += int(
             result.metrics.get("visible_test_rejected", 0)
         )
+        total_visible_test_parent_generated += int(
+            result.metrics.get("visible_test_parent_generated", 0)
+        )
         total_visible_test_executions += int(
             result.metrics.get("visible_test_executions", 0)
         )
@@ -125,6 +129,7 @@ def combine_phase_results(
         "visible_test_requests": total_visible_test_requests,
         "visible_test_missing": total_visible_test_missing,
         "visible_test_rejected": total_visible_test_rejected,
+        "visible_test_parent_generated": total_visible_test_parent_generated,
         "visible_test_executions": total_visible_test_executions,
         "visible_test_passed": total_visible_test_passed,
         "visible_test_timed_out": total_visible_test_timed_out,
@@ -442,6 +447,7 @@ class ClaudeCodeRunner:
             "visible_test_requests": 0,
             "visible_test_missing": 0,
             "visible_test_rejected": 0,
+            "visible_test_parent_generated": 0,
             "visible_test_executions": 0,
             "visible_test_passed": 0,
             "visible_test_timed_out": False,

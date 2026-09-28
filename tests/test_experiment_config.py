@@ -10,6 +10,7 @@ from agent.prompt_builder import (
     PromptBuilder,
     PromptTemplateError,
     build_implementation_phase_prompt,
+    build_recovery_edit_gate_prompt,
     build_recovery_implementation_prompt,
     build_verification_phase_prompt,
 )
@@ -184,6 +185,13 @@ def test_phase_prompts_reanchor_task_and_enforce_delivery_boundaries() -> None:
         max_tool_output_chars=12000,
         candidate_patch="diff --git a/a.py b/a.py\n-old\n+new\n",
         scheduled_test_evidence="Exit code: 1\nFAILED expected value",
+        focused_new_regression=True,
+    )
+    edit_gate = build_recovery_edit_gate_prompt(
+        base,
+        recovery_turns=2,
+        implementation_handoff="Likely defect in src/example.py.",
+        source_context="File: src/example.py\n1: old_value = 1",
     )
     recovery = build_recovery_implementation_prompt(
         base,
@@ -207,17 +215,23 @@ def test_phase_prompts_reanchor_task_and_enforce_delivery_boundaries() -> None:
     assert "diff --git a/a.py b/a.py" in verification
     assert "FAILED expected value" in verification
     assert "Bash is disabled" in verification
+    assert "Focused repair mode" in verification
+    assert "Only Read and Edit are available" in verification
     assert "missing plan" in verification
     assert "hidden SWE-bench tests" in verification
     assert base.strip() in recovery
-    assert "empty-patch recovery implementation" in recovery
+    assert "empty-patch recovery fallback" in recovery
     assert "at most 10 turns" in recovery
     assert "reason=max_turns" in recovery
     assert "file_path=src/example.py" in recovery
     assert "Bash is disabled" in recovery
-    assert "first Edit no later than the fourth tool call" in recovery
+    assert "earlier gate already enforced an immediate Edit" in recovery
     assert "Modify existing product source" in recovery
     assert "do not run tests" in recovery
+    assert base.strip() in edit_gate
+    assert "mandatory Edit gate" in edit_gate
+    assert "first tool call must be Edit" in edit_gate
+    assert "old_value = 1" in edit_gate
 
 
 def test_dev_config_cannot_be_used_as_formal_evaluation() -> None:

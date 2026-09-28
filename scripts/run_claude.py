@@ -21,6 +21,7 @@ from agent.claude_runner import (
 from agent.prompt_builder import (
     PromptBuilder,
     build_implementation_phase_prompt,
+    build_recovery_edit_gate_prompt,
     build_recovery_implementation_prompt,
     build_verification_phase_prompt,
 )
@@ -78,8 +79,9 @@ def _runner(
     timeout_seconds: int,
     base_url: str,
     allow_bash: bool = True,
+    available_tools: Sequence[str] | None = None,
 ) -> ClaudeCodeRunner:
-    """按阶段预算构造 Claude Code；受限阶段可在 CLI 层禁用 Bash。"""
+    """按阶段预算构造 Claude Code，并传递 CLI 工具黑白名单。"""
 
     return ClaudeCodeRunner(
         model=config.model.name,
@@ -89,6 +91,7 @@ def _runner(
         max_output_tokens=config.model.max_output_tokens,
         base_url=base_url,
         allow_bash=allow_bash,
+        available_tools=available_tools,
     )
 
 
@@ -250,6 +253,87 @@ def _summarize_recovery_tool_call(name: str, tool_input: Mapping[str, Any]) -> s
     return f"{name}: {', '.join(parts)}" if parts else name
 
 
+def _build_recovery_source_context(
+    result: ClaudeCodeResult,
+    repository: Path,
+    *,
+    maximum_chars: int,
+) -> str:
+    """按最近 Read 参数从 worktree 提取受限源码片段，供强制 Edit 使用。
+
+    父进程重新读取文件，而不是复制任意 ``tool_result``，因此只会交接仓库内、
+    后缀受信任的现有源码。最多选择两个最近读取位置且每处不超过 80 行，既为
+    Edit 提供精确 old text，也避免把首轮的大段输出重新塞进上下文。
+    """
+
+    root = repository.resolve()
+    requests: list[tuple[Path, int, int]] = []
+    for event in result.events:
+        if event.get("event_type") != "assistant":
+            continue
+        details = event.get("details")
+        message = details.get("message") if isinstance(details, Mapping) else None
+        content = message.get("content") if isinstance(message, Mapping) else None
+        if not isinstance(content, Sequence) or isinstance(content, (str, bytes)):
+            continue
+        for block in content:
+            if not isinstance(block, Mapping) or block.get("type") != "tool_use":
+                continue
+            if block.get("name") != "Read":
+                continue
+            tool_input = block.get("input")
+            if not isinstance(tool_input, Mapping):
+                continue
+            raw_path = tool_input.get("file_path")
+            if not isinstance(raw_path, str):
+                continue
+            candidate = Path(raw_path)
+            if not candidate.is_absolute():
+                candidate = root / candidate
+            candidate = candidate.resolve()
+            try:
+                candidate.relative_to(root)
+            except ValueError:
+                continue
+            if (
+                candidate.suffix.lower() not in _SOURCE_SUFFIXES
+                or not candidate.is_file()
+            ):
+                continue
+            raw_offset = tool_input.get("offset", 1)
+            raw_limit = tool_input.get("limit", 80)
+            offset = raw_offset if isinstance(raw_offset, int) else 1
+            limit = raw_limit if isinstance(raw_limit, int) else 80
+            requests.append((candidate, max(1, offset), max(1, min(80, limit))))
+
+    selected: list[tuple[Path, int, int]] = []
+    seen: set[tuple[Path, int, int]] = set()
+    for request in reversed(requests):
+        if request in seen:
+            continue
+        selected.append(request)
+        seen.add(request)
+        if len(selected) == 2:
+            break
+
+    blocks: list[str] = []
+    for path, offset, limit in reversed(selected):
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeError):
+            continue
+        start = min(offset - 1, len(lines))
+        excerpt = lines[start : start + limit]
+        numbered = "\n".join(
+            f"{line_number}: {line}"
+            for line_number, line in enumerate(excerpt, start=start + 1)
+        )
+        blocks.append(f"File: {path.relative_to(root)}\n{numbered}")
+    if not blocks:
+        return ""
+    return truncate_output("\n\n".join(blocks), maximum_chars)
+
+
 @dataclass(frozen=True, slots=True)
 class ScheduledTestExecution:
     """同一测试 argv 在基线和候选 patch 上的成对 Docker 结果。"""
@@ -303,6 +387,15 @@ class ScheduledTestEvidence:
                 execution.result is not None and execution.result.command_started
                 for execution in self.executions
             )
+        )
+
+    @property
+    def has_new_regression(self) -> bool:
+        """返回是否存在基线通过、候选失败的确定性新增回归。"""
+
+        return any(
+            execution.comparison == "new_regression"
+            for execution in self.executions
         )
 
     def metrics(self) -> dict[str, int | bool]:
@@ -440,6 +533,30 @@ class ScheduledTestEvidence:
                 )
             blocks.append("\n".join(block))
         return "\n\n".join(blocks)
+
+    def repair_prompt_text(self) -> str:
+        """新增回归时只交接第一条确定失败，避免无关测试稀释修复注意力。"""
+
+        for execution in self.executions:
+            if execution.comparison == "new_regression":
+                focused = ScheduledTestEvidence(
+                    request=self.request,
+                    executions=(execution,),
+                )
+                return focused.prompt_text()
+        return self.prompt_text()
+
+
+def _verification_policy(
+    evidence: ScheduledTestEvidence,
+) -> tuple[str, tuple[str, ...] | None]:
+    """根据真实回归证据选择 Verification phase 名称和 CLI 工具白名单。"""
+
+    if evidence.has_new_regression:
+        # 白名单比逐个禁用更稳健：即使 Claude Code 新增内置工具，聚焦模式仍然
+        # 只能 Read 失败位置并 Edit 既有文件，不能重新搜索或委派子代理。
+        return "verification_regression_repair", ("Read", "Edit")
+    return "verification", None
 
 
 def _execute_scheduled_test(
@@ -675,8 +792,8 @@ def run_claude_task(
             candidate_patch = session.collect_patch(repository)
             if not _should_run_verification(candidate_patch):
                 # 空 patch 无法进入 Verification，但其预留 turns 不能白白浪费。
-                # Recovery 使用首轮公开轨迹的短交接，并在 CLI 层禁用 Bash，迫使
-                # 小模型把有限 turns 用于源码修改而不是重复环境探测。
+                # 先用两 turns 的 Edit-only gate 强制尝试源码修改；只有 gate 没有
+                # 形成产品源码 patch 时，才把剩余预算交给可读取的 fallback。
                 recovery_handoff = _build_recovery_handoff(
                     implementation_result,
                     maximum_chars=min(
@@ -684,21 +801,63 @@ def run_claude_task(
                         6000,
                     ),
                 )
-                recovery_prompt = build_recovery_implementation_prompt(
-                    prompt,
-                    recovery_turns=config.agent.verification_turns,
-                    max_file_read_lines=config.agent.max_file_read_lines,
-                    max_tool_output_chars=config.agent.max_tool_output_chars,
-                    implementation_handoff=recovery_handoff,
+                source_context = _build_recovery_source_context(
+                    implementation_result,
+                    repository,
+                    maximum_chars=min(
+                        config.agent.max_tool_output_chars,
+                        5000,
+                    ),
                 )
-                recovery_result = _runner(
+                edit_gate_turns = min(2, config.agent.verification_turns)
+                fallback_turns = config.agent.verification_turns - edit_gate_turns
+                edit_gate_timeout = max(
+                    1,
+                    verification_timeout
+                    * edit_gate_turns
+                    // config.agent.verification_turns,
+                )
+                edit_gate_prompt = build_recovery_edit_gate_prompt(
+                    prompt,
+                    recovery_turns=edit_gate_turns,
+                    implementation_handoff=recovery_handoff,
+                    source_context=source_context,
+                )
+                edit_gate_result = _runner(
                     config,
-                    turns=config.agent.verification_turns,
-                    timeout_seconds=verification_timeout,
+                    turns=edit_gate_turns,
+                    timeout_seconds=edit_gate_timeout,
                     base_url=base_url,
                     allow_bash=False,
-                ).run(repository, recovery_prompt)
-                phases.append(("recovery_implementation", recovery_result))
+                    available_tools=("Edit",),
+                ).run(repository, edit_gate_prompt)
+                phases.append(("recovery_edit_gate", edit_gate_result))
+
+                recovered_patch = session.collect_patch(repository)
+                recovery_result = edit_gate_result
+                if (
+                    not _patch_modifies_existing_source(recovered_patch)
+                    and fallback_turns > 0
+                ):
+                    fallback_prompt = build_recovery_implementation_prompt(
+                        prompt,
+                        recovery_turns=fallback_turns,
+                        max_file_read_lines=config.agent.max_file_read_lines,
+                        max_tool_output_chars=config.agent.max_tool_output_chars,
+                        implementation_handoff=recovery_handoff,
+                    )
+                    fallback_result = _runner(
+                        config,
+                        turns=fallback_turns,
+                        timeout_seconds=max(
+                            1,
+                            verification_timeout - edit_gate_timeout,
+                        ),
+                        base_url=base_url,
+                        allow_bash=False,
+                    ).run(repository, fallback_prompt)
+                    phases.append(("recovery_fallback", fallback_result))
+                    recovery_result = fallback_result
 
                 consume_test_plan(repository)
                 recovered_patch = session.collect_patch(repository)
@@ -754,20 +913,26 @@ def run_claude_task(
                     max_tool_output_chars=config.agent.max_tool_output_chars,
                     candidate_patch=candidate_patch_for_prompt,
                     scheduled_test_evidence=truncate_output(
-                        initial_evidence.prompt_text(),
+                        initial_evidence.repair_prompt_text(),
                         config.agent.max_tool_output_chars,
                     ),
+                    focused_new_regression=initial_evidence.has_new_regression,
+                )
+                verification_phase, verification_available_tools = (
+                    _verification_policy(initial_evidence)
                 )
                 # 只要候选 patch 非空就启动验证。Bash 在 CLI 层禁用，避免模型因
-                # 父进程测试缺失或失败而回退到宿主环境自行执行。
+                # 父进程测试缺失或失败而回退到宿主环境自行执行；发现新增回归时
+                # 同时禁用 Grep/Glob，把会话限制在失败证据和已修改文件内。
                 verification_result = _runner(
                     config,
                     turns=config.agent.verification_turns,
                     timeout_seconds=verification_timeout,
                     base_url=base_url,
                     allow_bash=False,
+                    available_tools=verification_available_tools,
                 ).run(repository, verification_prompt)
-                phases.append(("verification", verification_result))
+                phases.append((verification_phase, verification_result))
 
                 # 验证阶段无权替换命令；父进程根据修复后的最终 patch 重新生成，
                 # 保证命令始终与实际修改路径一致且不依赖模型控制文件。

@@ -13,6 +13,7 @@
 #
 # 可通过环境变量覆盖本机相关路径或运行标识：
 #   BATCH_ID                批次 ID；默认包含所选题数
+#   RESUME_BATCH            设为 1 时继续已有 BATCH_ID，跳过已完整落盘的题目
 #   SWEBENCH_ROOT           SWE-bench 仓库；默认 $HOME/src/SWE-bench
 #   LOCAL_MODEL_BASE_URL    Ollama 地址；默认 http://localhost:11434
 
@@ -37,6 +38,16 @@ TASKS_PATH="${PROJECT_ROOT}/prepared/evaluation_tasks_${TASK_COUNT}_seed42.jsonl
 SWEBENCH_ROOT="${SWEBENCH_ROOT:-${HOME}/src/SWE-bench}"
 BATCH_ID="${BATCH_ID:-evaluation-v2-qwen35-${TASK_COUNT}-seed42}"
 LOCAL_MODEL_BASE_URL="${LOCAL_MODEL_BASE_URL:-http://localhost:11434}"
+RESUME_BATCH="${RESUME_BATCH:-0}"
+
+case "${RESUME_BATCH}" in
+    0) RESUME_ARGS=() ;;
+    1) RESUME_ARGS=(--resume) ;;
+    *)
+        printf 'RESUME_BATCH 只允许为 0 或 1，当前值：%s\n' "${RESUME_BATCH}" >&2
+        exit 2
+        ;;
+esac
 
 fail() {
     # 所有预检错误采用统一格式，并保证失败时不会继续创建实验目录。
@@ -168,4 +179,5 @@ exec "${PYTHON_BIN}" -m scripts.run_batch \
     --swebench-root "${SWEBENCH_ROOT}" \
     --base-url "${LOCAL_MODEL_BASE_URL}" \
     --expected-tasks "${TASK_COUNT}" \
+    "${RESUME_ARGS[@]}" \
     --allow-network-preparation

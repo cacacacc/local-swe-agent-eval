@@ -13,8 +13,10 @@ from scripts.run_claude import (
     ScheduledTestEvidence,
     _apply_patch_gate,
     _build_recovery_handoff,
+    _build_recovery_source_context,
     _execute_scheduled_test,
     _should_run_verification,
+    _verification_policy,
     run_claude_task,
 )
 
@@ -120,6 +122,64 @@ def test_recovery_handoff_keeps_visible_findings_without_tool_results() -> None:
     assert "secret result" not in handoff
     assert "raw log" not in handoff
     assert "tool output" not in handoff
+
+
+def test_recovery_source_context_reads_only_recent_repository_source(
+    tmp_path: Path,
+) -> None:
+    """强制 Edit 上下文只能包含仓库内最近读取的受信任源码片段。"""
+
+    source = tmp_path / "src" / "parser.py"
+    source.parent.mkdir()
+    source.write_text("first = 1\nsecond = 2\nthird = 3\n", encoding="utf-8")
+    outside = tmp_path.parent / "outside.py"
+    implementation = ClaudeCodeResult(
+        exit_code=1,
+        agent_log="",
+        test_output="",
+        events=(
+            {
+                "event_type": "assistant",
+                "details": {
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "name": "Read",
+                                "input": {
+                                    "file_path": str(outside),
+                                    "offset": 1,
+                                    "limit": 20,
+                                },
+                            },
+                            {
+                                "type": "tool_use",
+                                "name": "Read",
+                                "input": {
+                                    "file_path": str(source),
+                                    "offset": 2,
+                                    "limit": 2,
+                                },
+                            },
+                        ]
+                    }
+                },
+            },
+        ),
+        timed_out=False,
+        metrics={},
+    )
+
+    context = _build_recovery_source_context(
+        implementation,
+        tmp_path,
+        maximum_chars=1000,
+    )
+
+    assert "File: src/parser.py" in context
+    assert "2: second = 2" in context
+    assert "3: third = 3" in context
+    assert "outside.py" not in context
 
 
 def test_patch_gate_records_test_evidence_without_overriding_cli_failure() -> None:
@@ -247,6 +307,8 @@ def test_scheduler_metrics_require_a_real_sandbox_result(
     assert evidence.metrics()["visible_test_rejected"] == 0
     assert evidence.metrics()["visible_test_parent_generated"] == 1
     assert evidence.ready_for_verification is True
+    assert evidence.has_new_regression is False
+    assert _verification_policy(evidence) == ("verification", None)
 
 
 def test_scheduler_marks_only_baseline_pass_to_patched_fail_as_regression(
@@ -301,8 +363,15 @@ def test_scheduler_marks_only_baseline_pass_to_patched_fail_as_regression(
     assert metrics["visible_test_comparisons"] == 2
     assert metrics["visible_test_new_regressions"] == 1
     assert metrics["visible_test_unchanged_baseline_failures"] == 1
+    assert evidence.has_new_regression is True
+    assert _verification_policy(evidence) == (
+        "verification_regression_repair",
+        ("Read", "Edit"),
+    )
     assert "Comparison: new_regression" in evidence.prompt_text()
     assert "Comparison: baseline_failure_persists" in evidence.prompt_text()
+    assert "Comparison: new_regression" in evidence.repair_prompt_text()
+    assert "Comparison: baseline_failure_persists" not in evidence.repair_prompt_text()
 
 
 def test_missing_plan_is_counted_and_blocks_verification() -> None:
@@ -564,9 +633,118 @@ def test_empty_patch_reuses_verification_budget_for_recovery(
     assert calls == ["implementation", "recovery"]
     assert "allow_bash" not in runner_options[0]
     assert runner_options[1]["allow_bash"] is False
+    assert runner_options[1]["available_tools"] == ("Edit",)
+    assert runner_options[1]["turns"] == 2
     assert result["run_status"] == "completed"
     assert result["patch_generated"] is True
-    assert "recovery_implementation" in result["metrics"]["phases"]
+    assert "recovery_edit_gate" in result["metrics"]["phases"]
+    assert "recovery_fallback" not in result["metrics"]["phases"]
     assert "scheduled_test_recovery" in result["metrics"]["phases"]
     assert "verification" not in result["metrics"]["phases"]
     assert result["metrics"]["visible_test_missing"] == 1
+
+
+def test_recovery_fallback_uses_only_budget_left_after_edit_gate(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """强制 Edit 未产出 patch 时，fallback 只能使用 Recovery 的剩余 turns。"""
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    source = repository / "src" / "widget.py"
+    source.parent.mkdir()
+    source.write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(repository), "add", "src/widget.py"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "base",
+        ],
+        check=True,
+    )
+    base_commit = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    calls: list[str] = []
+    runner_options: list[dict[str, object]] = []
+
+    class FakeAgent:
+        """Edit gate 不落盘，fallback 使用剩余预算完成修改。"""
+
+        def run(self, worktree, prompt):
+            if "empty-patch recovery fallback" in prompt:
+                calls.append("fallback")
+                source.write_text("value = 2\n", encoding="utf-8")
+            elif "mandatory Edit gate" in prompt:
+                calls.append("gate")
+            else:
+                calls.append("implementation")
+            return _result()
+
+    class FakeSandbox:
+        """本例只验证阶段预算，不执行缺失的仓库测试。"""
+
+        def __init__(self, **kwargs):
+            pass
+
+        def resolve_image(self, instance_id):
+            return "swebench/example:latest"
+
+        def image_digest(self, image):
+            return "sha256:test"
+
+        def run(self, *args, **kwargs):
+            raise AssertionError("missing parent plan must not run Docker")
+
+    def fake_runner(*args, **kwargs):
+        """记录 gate/fallback 的 turns 与硬工具门禁。"""
+
+        runner_options.append(dict(kwargs))
+        return FakeAgent()
+
+    monkeypatch.setattr("scripts.run_claude._runner", fake_runner)
+    monkeypatch.setattr("scripts.run_claude.VisibleTestSandbox", FakeSandbox)
+    monkeypatch.setattr(
+        "scripts.run_claude.RuntimeFingerprintCollector.collect",
+        lambda self: {"schema_version": 1},
+    )
+    task = SWEbenchTask(
+        instance_id="owner__project-recovery-fallback",
+        repo="owner/project",
+        base_commit=base_commit,
+        problem_statement="Fix widget behavior.",
+    )
+
+    run_path = run_claude_task(
+        task,
+        repository,
+        ExperimentConfig.load(PROJECT_ROOT / "configs" / "dev_v2.yaml"),
+        tmp_path / "runs",
+        base_url="http://localhost:11434",
+        workspace_base_commit=base_commit,
+    )
+
+    result = json.loads((run_path / "result.json").read_text(encoding="utf-8"))
+    assert calls == ["implementation", "gate", "fallback"]
+    assert runner_options[1]["turns"] == 2
+    assert runner_options[2]["turns"] == 8
+    assert runner_options[1]["allow_bash"] is False
+    assert runner_options[2]["allow_bash"] is False
+    assert runner_options[1]["available_tools"] == ("Edit",)
+    assert "available_tools" not in runner_options[2]
+    assert "recovery_edit_gate" in result["metrics"]["phases"]
+    assert "recovery_fallback" in result["metrics"]["phases"]
+    assert result["patch_generated"] is True

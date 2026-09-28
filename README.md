@@ -189,6 +189,19 @@ and checks Claude Code and SWE-bench before creating batch output:
 ./scripts/run_evaluation_v2_seed42.sh 30
 ```
 
+The batch can be paused with `Ctrl-C`. To continue from the first task that was
+not fully recorded, reuse the exact same batch ID and set `RESUME_BATCH=1`:
+
+```bash
+BATCH_ID=evaluation-v2-qwen35-30-recovery-handoff-v1 \
+RESUME_BATCH=1 \
+./scripts/run_evaluation_v2_seed42.sh 30
+```
+
+Resume validates the config fingerprint, model, frozen task order, and completed
+artifacts before skipping work. An interrupted in-progress task is rerun under a
+new retry run ID, preserving its partial directory for diagnosis.
+
 Docker Desktop's WSL integration must still be enabled from Docker Desktop on
 Windows; a Linux process inside WSL cannot grant that host-side integration.
 The launcher can start the installed Windows applications, but it reports the
@@ -214,11 +227,16 @@ Claude Code sessions, with deterministic parent-owned test planning between them
    unchanged baseline failures remain diagnostic context.
    Every non-empty patch enters the 10-turn verification session; missing plans,
    runner errors, and failing tests are recorded and injected as evidence instead
-   of acting as hard gates.
+   of acting as hard gates. When a `new_regression` exists, Verification receives
+   only the first proven regression and the candidate patch, and Claude Code's
+   tool whitelist is reduced to `Read,Edit`.
 4. If implementation produces no usable patch, the otherwise-unused 10
-   verification turns become a fresh recovery implementation session with Bash
-   enabled. This keeps the 40-turn budget fixed while giving early termination a
-   second chance to modify existing source.
+   verification turns become Recovery. Its first two turns are a mandatory Edit
+   gate where `Edit` is the only available tool and the parent supplies bounded
+   excerpts from the most recently read source files. If no existing-source patch
+   appears, the remaining eight turns run a no-Bash fallback with targeted read
+   tools. This keeps the 40-turn budget fixed while making an early Edit attempt a
+   process constraint rather than a prompt suggestion.
 
 Starting a new session prevents implementation history and failed automatic
 compaction from consuming the verification context. The v2 prompt also limits
@@ -274,9 +292,11 @@ architecture. New runs use four additional code-enforced boundaries:
 3. The parent runs both argv arrays against the unchanged baseline and candidate
    patch in the cached, network-free SWE-bench image. Every non-empty patch reaches
    Verification, which receives the comparison classifications and bounded output
-   with Bash disabled. Missing or failed tests remain metrics rather than protocol
-   failures, and the scheduler regenerates commands from the final patch before
-   rerunning them.
+   with Bash disabled. A proven `new_regression` selects the separate
+   `verification_regression_repair` phase, passes only its first failure, and
+   exposes only `Read,Edit`. Missing or failed tests remain metrics rather than
+   protocol failures, and the scheduler regenerates commands from the final patch
+   before rerunning them.
 4. Parent-owned tests use scheduler events, including
    `visible_test_parent_generated`:
    `visible_test_requests`, `visible_test_missing`, `visible_test_rejected`,

@@ -261,8 +261,9 @@ class ClaudeCodeRunner:
         base_url: str = "http://localhost:11434",
         executable: str = "claude",
         allow_bash: bool = True,
+        available_tools: Sequence[str] | None = None,
     ) -> None:
-        """验证实验上限和 Ollama endpoint，拒绝把请求发往远程主机。"""
+        """验证实验上限、工具门禁和 endpoint，拒绝远程模型服务。"""
 
         if (
             timeout_seconds <= 0
@@ -293,6 +294,12 @@ class ClaudeCodeRunner:
         self.base_url = base_url.rstrip("/")
         self.executable = executable
         self.allow_bash = allow_bash
+        # 白名单只由父进程固定策略传入；保持首次出现顺序便于审计 CLI 命令。
+        self.available_tools = (
+            tuple(dict.fromkeys(available_tools))
+            if available_tools is not None
+            else None
+        )
 
     def command(self, prompt: str) -> list[str]:
         """构造无 shell 插值的固定命令，避免题目文本被解释为命令。"""
@@ -302,7 +309,8 @@ class ClaudeCodeRunner:
             # Verification/Recovery 只允许内置读写工具；真正的测试由父进程在
             # Docker 中执行，CLI 级禁用比 Prompt 软约束更能阻止宿主命令。
             disallowed_tools.append("Bash")
-        return [
+        disallowed_tools = list(dict.fromkeys(disallowed_tools))
+        command = [
             self.executable,
             "--print",
             # prompt 紧跟固定元数参数，不能放在可变长的 --disallowed-tools
@@ -316,14 +324,23 @@ class ClaudeCodeRunner:
             self.model,
             "--max-turns",
             str(self.max_turns),
-            "--permission-mode",
-            "bypassPermissions",
-            "--no-session-persistence",
-            "--no-chrome",
-            "--disable-slash-commands",
-            "--disallowed-tools",
-            *disallowed_tools,
         ]
+        if self.available_tools is not None:
+            # ``--tools`` 是真正的可用工具白名单。使用单个逗号分隔参数，避免其
+            # 可变长解析吞掉后续固定 CLI 选项。
+            command.extend(("--tools", ",".join(self.available_tools)))
+        command.extend(
+            (
+                "--permission-mode",
+                "bypassPermissions",
+                "--no-session-persistence",
+                "--no-chrome",
+                "--disable-slash-commands",
+                "--disallowed-tools",
+                *disallowed_tools,
+            )
+        )
+        return command
 
     def environment(self, source: Mapping[str, str] | None = None) -> dict[str, str]:
         """生成最小化云凭据且限制常见外联路径的子进程环境。"""

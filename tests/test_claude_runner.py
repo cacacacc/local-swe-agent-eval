@@ -261,6 +261,26 @@ def test_verification_runner_disables_bash_at_cli_boundary() -> None:
     assert "Bash" in command[command.index("--disallowed-tools") + 1 :]
 
 
+def test_runner_can_expose_only_edit_for_recovery_gate() -> None:
+    """Recovery Edit gate 必须通过 CLI 白名单只暴露 Edit 工具。"""
+
+    runner = ClaudeCodeRunner(
+        model="qwen3.5:9b",
+        timeout_seconds=60,
+        max_turns=2,
+        context_length=32768,
+        max_output_tokens=8192,
+        allow_bash=False,
+        available_tools=("Edit",),
+    )
+
+    command = runner.command("Edit now")
+    available = command[command.index("--tools") + 1]
+
+    assert available == "Edit"
+    assert "Bash" in command[command.index("--disallowed-tools") + 1 :]
+
+
 def test_reading_visible_test_script_is_not_counted_as_execution() -> None:
     """读取调度脚本只是探索行为，不能增加任何测试调用指标。"""
 

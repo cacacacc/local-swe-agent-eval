@@ -105,8 +105,9 @@ def build_verification_phase_prompt(
     max_tool_output_chars: int,
     candidate_patch: str = "",
     scheduled_test_evidence: str = "",
+    focused_new_regression: bool = False,
 ) -> str:
-    """注入候选补丁和调度测试证据，构造无 Bash 的修复会话 Prompt。"""
+    """注入候选补丁和测试证据，按是否产生新回归构造修复 Prompt。"""
     patch_block = (
         "Candidate patch collected relative to the task base commit\n"
         "<candidate_patch>\n"
@@ -119,12 +120,30 @@ def build_verification_phase_prompt(
         f"{scheduled_test_evidence.rstrip()}\n"
         "</visible_test_evidence>\n"
     )
+    focus_block = ""
+    if focused_new_regression:
+        focus_block = (
+            "Focused repair mode: the scheduler proved at least one new_regression.\n"
+            "- Only Read and Edit are available. Work only from the failing command/"
+            "output, candidate diff, and files already named there.\n"
+            "- Treat the first new_regression as the primary defect. Read only the "
+            "smallest relevant region, then Edit the existing source immediately.\n"
+            "- Do not redesign the solution or investigate unrelated APIs. Prefer "
+            "reverting the offending hunk if a narrow repair is uncertain.\n"
+        )
+    api_instruction = (
+        "- Do not search for other API usages in focused repair mode; the failing "
+        "evidence and changed files are the complete scope.\n"
+        if focused_new_regression
+        else "- Search for an existing API usage before accepting unfamiliar calling syntax.\n"
+    )
     return (
         f"{base_prompt.rstrip()}\n\n"
         "Current phase: verification and repair\n"
         f"- You have at most {verification_turns} turns. Do not restart broad exploration.\n"
         f"{patch_block}"
         f"{test_block}"
+        f"{focus_block}"
         "- The patch above is authoritative even if plain `git diff` is empty because an "
         "earlier agent may have committed it. Do not inspect Git history.\n"
         "- Do not create another Git commit.\n"
@@ -136,7 +155,7 @@ def build_verification_phase_prompt(
         "evidence, not a reason by itself to rewrite or abandon the patch.\n"
         "- A missing plan or runner error remains diagnostic information, not a reason to "
         "abandon the non-empty patch.\n"
-        "- Search for an existing API usage before accepting unfamiliar calling syntax.\n"
+        f"{api_instruction}"
         f"- Read at most {max_file_read_lines} source lines in one tool call.\n"
         f"- Keep each command output below about {max_tool_output_chars} characters; "
         "show only the first relevant failure and a short tail.\n"
@@ -149,6 +168,40 @@ def build_verification_phase_prompt(
     )
 
 
+def build_recovery_edit_gate_prompt(
+    base_prompt: str,
+    *,
+    recovery_turns: int,
+    implementation_handoff: str,
+    source_context: str,
+) -> str:
+    """构造 Recovery 的强制 Edit 阶段，配合 CLI 仅开放 Edit 工具。
+
+    此阶段位于任何新的探索之前。父进程提供 Implementation 已定位的公开结论和
+    源码片段，模型必须直接尝试修改；Read/Grep/Glob/Bash/Write 均由 CLI 禁用，
+    因而“尽早 Edit”不再只是可以被忽略的自然语言建议。
+    """
+
+    handoff = implementation_handoff.strip() or "No visible diagnosis was recorded."
+    context = source_context.strip() or "No safe source excerpt was available."
+    return (
+        f"{base_prompt.rstrip()}\n\n"
+        "Current phase: empty-patch recovery implementation — mandatory Edit gate\n"
+        f"- You have at most {recovery_turns} turns. Your first tool call must be Edit.\n"
+        "- Edit is the only filesystem tool available. Read, Grep, Glob, Bash, Write, "
+        "and subagents are disabled by the parent process.\n"
+        "- Use the handoff and exact source excerpts below to make the smallest plausible "
+        "change to existing product source now. Do not respond with an explanation only.\n"
+        "<implementation_handoff>\n"
+        f"{handoff}\n"
+        "</implementation_handoff>\n"
+        "<source_context>\n"
+        f"{context}\n"
+        "</source_context>\n"
+        "- Do not create a Git commit, test file, reproduction file, or control file.\n"
+    )
+
+
 def build_recovery_implementation_prompt(
     base_prompt: str,
     *,
@@ -157,11 +210,12 @@ def build_recovery_implementation_prompt(
     max_tool_output_chars: int,
     implementation_handoff: str = "",
 ) -> str:
-    """为空补丁构造带可见交接信息、禁止 Bash 的限时恢复实现会话。
+    """为强制 Edit 未产出源码 patch 的情况构造受限 fallback 会话。
 
     Recovery 只复用原本预留给 Verification、但因没有候选补丁而无法使用的
     turns，因此不会扩大单题模型预算。上一阶段只交接可见结论和工具调用摘要，
-    不传递 thinking 或大段工具输出；新会话必须尽早 Edit，避免再次陷入宽泛调查。
+    不传递 thinking 或大段工具输出。由于前置 gate 已真实尝试 Edit，本阶段只允许
+    使用剩余预算做最小范围的补充读取，再交付源码修改。
     """
 
     handoff = implementation_handoff.strip() or (
@@ -170,19 +224,19 @@ def build_recovery_implementation_prompt(
 
     return (
         f"{base_prompt.rstrip()}\n\n"
-        "Current phase: empty-patch recovery implementation\n"
+        "Current phase: empty-patch recovery fallback\n"
         "Visible handoff from the previous implementation session\n"
         "<implementation_handoff>\n"
         f"{handoff}\n"
         "</implementation_handoff>\n"
-        "- The previous implementation session ended without a usable patch. Do not "
+        "- The mandatory Edit gate did not produce an existing-source patch. Do not "
         "repeat searches or file reads already summarized in the handoff.\n"
         f"- You have at most {recovery_turns} turns to make a minimal concrete source "
         "change that addresses the issue.\n"
         "- Bash is disabled in this phase. Use only targeted Read, Grep, and Glob for "
         "inspection; do not run tests or package installers.\n"
-        "- Make the first Edit no later than the fourth tool call: use at most three "
-        "read-only Read, Grep, or Glob calls before editing existing product source.\n"
+        "- The earlier gate already enforced an immediate Edit attempt. Use the remaining "
+        "calls only to correct that attempt, then Edit existing product source.\n"
         "- Modify existing product source. A reproduction script, generated environment, "
         "test-only change, explanation, or empty working tree is not a fix.\n"
         "- Do not create a Git commit or `.agent-test-plan.json`.\n"

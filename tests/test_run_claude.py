@@ -11,10 +11,12 @@ from benchmark.task import SWEbenchTask
 from experiment.config import ExperimentConfig
 from scripts.run_claude import (
     ScheduledTestEvidence,
+    _TaskBudget,
     _apply_patch_gate,
     _build_recovery_handoff,
     _build_recovery_source_context,
     _execute_scheduled_test,
+    _scheduled_test_result,
     _should_run_verification,
     _verification_policy,
     run_claude_task,
@@ -240,6 +242,8 @@ def test_v2_config_keeps_scheduler_resource_limits() -> None:
     config = ExperimentConfig.load(PROJECT_ROOT / "configs" / "dev_v2.yaml")
     assert config.agent.visible_test_sandbox is True
     assert config.agent.visible_test_timeout_seconds == 900
+    assert config.agent.visible_regression_test_timeout_seconds == 300
+    assert config.agent.task_timeout_seconds == 1800
     assert config.agent.max_tool_output_chars == 12000
 
 
@@ -309,6 +313,278 @@ def test_scheduler_metrics_require_a_real_sandbox_result(
     assert evidence.ready_for_verification is True
     assert evidence.has_new_regression is False
     assert _verification_policy(evidence) == ("verification", None)
+
+
+def test_scheduler_reuses_unchanged_successful_results_and_records_metrics(
+    tmp_path: Path,
+) -> None:
+    """Final 阶段应复用稳定 baseline 和未变的成功 candidate，并把命中写入指标。"""
+
+    request = StructuredTestPlanRequest(
+        status="generated",
+        target_argv=("python", "-m", "pytest", "tests/test_target.py"),
+        regression_argv=("python", "-m", "pytest", "tests/test_neighbor.py"),
+        origin="parent",
+    )
+    calls: list[tuple[tuple[str, ...], bool, float]] = []
+
+    class FakeSandbox:
+        """返回带耗时的成功结果，供测试确认第二阶段没有再次启动容器。"""
+
+        timeout_seconds = 900
+
+        def run(
+            self,
+            repository,
+            *,
+            instance_id,
+            base_commit,
+            command,
+            apply_patch,
+            timeout_seconds,
+        ):
+            calls.append((tuple(command), apply_patch, timeout_seconds))
+            return VisibleTestResult(
+                exit_code=0,
+                output="passed\n",
+                image="swebench/example:latest",
+                timed_out=False,
+                command_started=True,
+                duration_seconds=2.5,
+            )
+
+    task = SWEbenchTask(
+        instance_id="owner__repo-cache",
+        repo="owner/repo",
+        base_commit="b" * 40,
+        problem_statement="Fix it.",
+    )
+    cache = {}
+    arguments = {
+        "task": task,
+        "workspace_base_commit": "a" * 40,
+        "sandbox": FakeSandbox(),
+        "request": request,
+        "candidate_patch": "diff --git a/a.py b/a.py\n-old\n+new\n",
+        "cache": cache,
+        "target_timeout_seconds": 900,
+        "regression_timeout_seconds": 300,
+    }
+
+    initial = _execute_scheduled_test(tmp_path, **arguments)
+    final = _execute_scheduled_test(tmp_path, **arguments)
+
+    assert len(calls) == 4
+    assert {timeout for _, _, timeout in calls} == {300, 900}
+    assert initial.metrics()["duration_seconds"] == 10.0
+    assert initial.metrics()["cache_hit"] is False
+    assert final.metrics()["duration_seconds"] == 0.0
+    assert final.metrics()["cache_hit"] is True
+    assert final.metrics()["visible_test_executions"] == 0
+    assert final.metrics()["visible_test_baseline_executions"] == 0
+    assert all(
+        result.cache_hit
+        for execution in final.executions
+        for result in (execution.baseline_result, execution.result)
+    )
+
+
+def test_scheduler_reruns_failed_candidate_but_reuses_baseline(
+    tmp_path: Path,
+) -> None:
+    """候选失败不得被缓存掩盖，Final 仍需重跑 candidate 以容忍偶发故障。"""
+
+    request = StructuredTestPlanRequest(
+        status="generated",
+        target_argv=("python", "-m", "pytest", "tests/test_target.py"),
+        regression_argv=("python", "-m", "pytest", "tests/test_neighbor.py"),
+        origin="parent",
+    )
+    calls: list[bool] = []
+
+    class FakeSandbox:
+        """所有 candidate 都失败，用调用次数证明它没有被复用。"""
+
+        timeout_seconds = 900
+
+        def run(self, repository, *, apply_patch, **kwargs):
+            calls.append(apply_patch)
+            return VisibleTestResult(
+                exit_code=1 if apply_patch else 0,
+                output="failed\n" if apply_patch else "passed\n",
+                image="swebench/example:latest",
+                timed_out=False,
+                command_started=True,
+                duration_seconds=1.0,
+            )
+
+    task = SWEbenchTask(
+        instance_id="owner__repo-failed-cache",
+        repo="owner/repo",
+        base_commit="b" * 40,
+        problem_statement="Fix it.",
+    )
+    cache = {}
+    arguments = {
+        "task": task,
+        "workspace_base_commit": "a" * 40,
+        "sandbox": FakeSandbox(),
+        "request": request,
+        "candidate_patch": "same patch",
+        "cache": cache,
+        "target_timeout_seconds": 900,
+        "regression_timeout_seconds": 300,
+    }
+
+    _execute_scheduled_test(tmp_path, **arguments)
+    final = _execute_scheduled_test(tmp_path, **arguments)
+
+    assert calls.count(False) == 2
+    assert calls.count(True) == 4
+    assert all(execution.baseline_result.cache_hit for execution in final.executions)
+    assert all(not execution.result.cache_hit for execution in final.executions)
+
+
+def test_scheduler_records_exhausted_task_budget_without_starting_docker(
+    tmp_path: Path,
+) -> None:
+    """总预算已耗尽时不得再启动容器，并应在事件和指标中明确记录原因。"""
+
+    request = StructuredTestPlanRequest(
+        status="generated",
+        target_argv=("python", "-m", "pytest", "tests/test_target.py"),
+        regression_argv=("python", "-m", "pytest", "tests/test_neighbor.py"),
+        origin="parent",
+    )
+
+    class FakeSandbox:
+        """预算门禁应在触达沙箱前结束调度。"""
+
+        timeout_seconds = 900
+
+        def run(self, *args, **kwargs):
+            raise AssertionError("exhausted task budget must not start Docker")
+
+    task = SWEbenchTask(
+        instance_id="owner__repo-budget",
+        repo="owner/repo",
+        base_commit="b" * 40,
+        problem_statement="Fix it.",
+    )
+    evidence = _execute_scheduled_test(
+        tmp_path,
+        task=task,
+        workspace_base_commit="a" * 40,
+        sandbox=FakeSandbox(),
+        request=request,
+        candidate_patch="patch",
+        cache={},
+        target_timeout_seconds=900,
+        regression_timeout_seconds=300,
+        task_budget=_TaskBudget(deadline_monotonic=0.0),
+    )
+    phase = _scheduled_test_result(evidence)
+
+    assert evidence.task_budget_exhausted is True
+    assert evidence.metrics()["task_budget_exhausted"] is True
+    assert phase.events[0]["details"]["task_budget_exhausted"] is True
+    assert all(
+        execution.baseline_result is None and execution.result is None
+        for execution in evidence.executions
+    )
+
+
+def test_run_task_preserves_artifacts_when_total_budget_is_already_exhausted(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """单题硬截止应生成 timeout 产物和五项指标，而不是抛异常丢失运行目录。"""
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    source = repository / "widget.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(repository), "add", "widget.py"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "base",
+        ],
+        check=True,
+    )
+    base_commit = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    class FakeSandbox:
+        """预算在 Agent 前耗尽，本测试只需要完成镜像元数据预检。"""
+
+        def __init__(self, **kwargs):
+            pass
+
+        def resolve_image(self, instance_id):
+            return "swebench/example:latest"
+
+        def image_digest(self, image):
+            return "sha256:test"
+
+    monkeypatch.setattr("scripts.run_claude.VisibleTestSandbox", FakeSandbox)
+    monkeypatch.setattr(
+        "scripts.run_claude.RuntimeFingerprintCollector.collect",
+        lambda self: {"schema_version": 1},
+    )
+    monkeypatch.setattr(
+        _TaskBudget,
+        "start",
+        classmethod(lambda cls, timeout_seconds: cls(deadline_monotonic=0.0)),
+    )
+    monkeypatch.setattr(
+        "scripts.run_claude._runner",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("expired budget must not start Claude Code")
+        ),
+    )
+    task = SWEbenchTask(
+        instance_id="owner__repo-budget-integration",
+        repo="owner/repo",
+        base_commit=base_commit,
+        problem_statement="Fix it.",
+    )
+
+    run_path = run_claude_task(
+        task,
+        repository,
+        ExperimentConfig.load(PROJECT_ROOT / "configs" / "dev_v2.yaml"),
+        tmp_path / "runs",
+        base_url="http://localhost:11434",
+        workspace_base_commit=base_commit,
+    )
+    result = json.loads((run_path / "result.json").read_text(encoding="utf-8"))
+    trajectory = json.loads(
+        (run_path / "trajectory.json").read_text(encoding="utf-8")
+    )
+
+    assert result["run_status"] == "timeout"
+    assert result["agent_exit_code"] == 124
+    assert result["metrics"]["duration_seconds"] == 0.0
+    assert result["metrics"]["cache_hit"] is False
+    assert result["metrics"]["baseline_timed_out"] is False
+    assert result["metrics"]["candidate_timed_out"] is False
+    assert result["metrics"]["task_budget_exhausted"] is True
+    assert trajectory["events"][-2]["event_type"] == "task_budget_exhausted"
+    assert trajectory["events"][-1]["event_type"] == "patch_validation"
 
 
 def test_scheduler_marks_only_baseline_pass_to_patched_fail_as_regression(

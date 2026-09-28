@@ -46,7 +46,9 @@ PYTHON_BIN="${PROJECT_ROOT}/.venv/bin/python"
 CONFIG_PATH="${PROJECT_ROOT}/configs/evaluation_v2_${TASK_COUNT}_seed${TASK_SEED}.yaml"
 TASKS_PATH="${PROJECT_ROOT}/prepared/evaluation_tasks_${TASK_COUNT}_seed${TASK_SEED}.jsonl"
 SWEBENCH_ROOT="${SWEBENCH_ROOT:-${HOME}/src/SWE-bench}"
-BATCH_ID="${BATCH_ID:-evaluation-v2-qwen35-${TASK_COUNT}-seed${TASK_SEED}}"
+# 新的缓存/总预算协议会改变 config fingerprint，默认批次名必须与旧结果隔离；
+# 显式设置 BATCH_ID 时仍尊重调用者的实验命名。
+BATCH_ID="${BATCH_ID:-evaluation-v2-qwen35-${TASK_COUNT}-seed${TASK_SEED}-budget-cache-v1}"
 LOCAL_MODEL_BASE_URL="${LOCAL_MODEL_BASE_URL:-http://localhost:11434}"
 RESUME_BATCH="${RESUME_BATCH:-0}"
 

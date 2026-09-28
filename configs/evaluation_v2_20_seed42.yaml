@@ -23,6 +23,7 @@ model:
 agent:
   framework: claude-code
   timeout_seconds: 5400
+  task_timeout_seconds: 1800
   max_turns: 40
   verification_turns: 10
   test_planning_turns: 0
@@ -30,6 +31,7 @@ agent:
   max_tool_output_chars: 12000
   visible_test_sandbox: true
   visible_test_timeout_seconds: 900
+  visible_regression_test_timeout_seconds: 300
   prompt_template: prompts/swe_agent_prompt_v2.txt
 
 network:

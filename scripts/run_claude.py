@@ -9,9 +9,11 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+import hashlib
 from pathlib import Path
 import re
-from typing import Any, Mapping, Sequence
+import time
+from typing import Any, Mapping, MutableMapping, Sequence
 
 from agent.claude_runner import (
     ClaudeCodeResult,
@@ -72,11 +74,57 @@ _SOURCE_SUFFIXES = {
 }
 
 
+class TaskBudgetExhausted(RuntimeError):
+    """单题总墙钟预算耗尽；调用方仍需保存已经形成的 patch 和轨迹。"""
+
+
+@dataclass(frozen=True, slots=True)
+class _TaskBudget:
+    """用单调时钟把分散的模型与 Docker 超时约束在同一截止时间内。"""
+
+    deadline_monotonic: float | None
+
+    @classmethod
+    def start(cls, timeout_seconds: int) -> "_TaskBudget":
+        """从当前时刻启动预算；0 是旧配置使用的兼容关闭值。"""
+
+        deadline = (
+            time.monotonic() + timeout_seconds if timeout_seconds > 0 else None
+        )
+        return cls(deadline_monotonic=deadline)
+
+    def limit(self, requested_seconds: float) -> float:
+        """返回不越过总截止时间的子阶段预算，耗尽时立即中止调度。"""
+
+        if requested_seconds <= 0:
+            raise ValueError("requested timeout must be positive")
+        if self.deadline_monotonic is None:
+            return requested_seconds
+        remaining = self.deadline_monotonic - time.monotonic()
+        if remaining <= 0:
+            raise TaskBudgetExhausted("task wall-clock budget exhausted")
+        # subprocess 接受浮点秒；保留毫秒级余量可避免不足一秒时人为再放宽一秒。
+        return min(requested_seconds, max(0.001, remaining))
+
+    def ensure_remaining(self) -> None:
+        """阶段结束后阻止下一个模型或 Docker 进程越过单题截止时间。"""
+
+        if (
+            self.deadline_monotonic is not None
+            and time.monotonic() >= self.deadline_monotonic
+        ):
+            raise TaskBudgetExhausted("task wall-clock budget exhausted")
+
+
+_TestCacheKey = tuple[str, str, tuple[str, ...], str, float]
+_TestResultCache = MutableMapping[_TestCacheKey, VisibleTestResult]
+
+
 def _runner(
     config: ExperimentConfig,
     *,
     turns: int,
-    timeout_seconds: int,
+    timeout_seconds: float,
     base_url: str,
     allow_bash: bool = True,
     available_tools: Sequence[str] | None = None,
@@ -375,6 +423,7 @@ class ScheduledTestEvidence:
 
     request: TestPlanRequest
     executions: tuple[ScheduledTestExecution, ...] = ()
+    task_budget_exhausted: bool = False
 
     @property
     def ready_for_verification(self) -> bool:
@@ -398,16 +447,19 @@ class ScheduledTestEvidence:
             for execution in self.executions
         )
 
-    def metrics(self) -> dict[str, int | bool]:
+    def metrics(self) -> dict[str, Any]:
         """生成不会把文本提及误算为容器执行的指标。"""
 
         patched_executed = sum(
-            item.result is not None and item.result.command_started
+            item.result is not None
+            and item.result.command_started
+            and not item.result.cache_hit
             for item in self.executions
         )
         baseline_executed = sum(
             item.baseline_result is not None
             and item.baseline_result.command_started
+            and not item.baseline_result.cache_hit
             for item in self.executions
         )
         rejected = self.request.status == "rejected" or any(
@@ -437,7 +489,7 @@ class ScheduledTestEvidence:
             "visible_test_executions": patched_executed,
             "visible_test_passed": sum(
                 item.result is not None and item.result.exit_code == 0
-                and item.result.command_started
+                and item.result.command_started and not item.result.cache_hit
                 for item in self.executions
             ),
             "visible_test_baseline_executions": baseline_executed,
@@ -445,6 +497,7 @@ class ScheduledTestEvidence:
                 item.baseline_result is not None
                 and item.baseline_result.exit_code == 0
                 and item.baseline_result.command_started
+                and not item.baseline_result.cache_hit
                 for item in self.executions
             ),
             "visible_test_comparisons": sum(
@@ -467,14 +520,44 @@ class ScheduledTestEvidence:
                     item.baseline_result is not None
                     and item.baseline_result.command_started
                     and item.baseline_result.timed_out
+                    and not item.baseline_result.cache_hit
                 )
                 or (
                     item.result is not None
                     and item.result.command_started
                     and item.result.timed_out
+                    and not item.result.cache_hit
                 )
                 for item in self.executions
             ),
+            "duration_seconds": round(
+                sum(
+                    result.duration_seconds
+                    for item in self.executions
+                    for result in (item.baseline_result, item.result)
+                    if result is not None
+                ),
+                6,
+            ),
+            "cache_hit": any(
+                result.cache_hit
+                for item in self.executions
+                for result in (item.baseline_result, item.result)
+                if result is not None
+            ),
+            "baseline_timed_out": any(
+                item.baseline_result is not None
+                and item.baseline_result.command_started
+                and item.baseline_result.timed_out
+                for item in self.executions
+            ),
+            "candidate_timed_out": any(
+                item.result is not None
+                and item.result.command_started
+                and item.result.timed_out
+                for item in self.executions
+            ),
+            "task_budget_exhausted": self.task_budget_exhausted,
             "timed_out": False,
             "token_usage": {},
         }
@@ -508,6 +591,8 @@ class ScheduledTestEvidence:
                         f"Command started: {execution.baseline_result.command_started}",
                         f"Exit code: {execution.baseline_result.exit_code}",
                         f"Timed out: {execution.baseline_result.timed_out}",
+                        f"Duration seconds: {execution.baseline_result.duration_seconds}",
+                        f"Cache hit: {execution.baseline_result.cache_hit}",
                         "Output:",
                         # 两条命令各有 baseline/patched 输出；再次按单块限长，避免
                         # 总证据截断时恰好丢掉位于中间的 patched target traceback。
@@ -527,6 +612,8 @@ class ScheduledTestEvidence:
                         f"Command started: {execution.result.command_started}",
                         f"Exit code: {execution.result.exit_code}",
                         f"Timed out: {execution.result.timed_out}",
+                        f"Duration seconds: {execution.result.duration_seconds}",
+                        f"Cache hit: {execution.result.cache_hit}",
                         "Output:",
                         truncate_output(execution.result.output, 2400).rstrip(),
                     )
@@ -566,39 +653,106 @@ def _execute_scheduled_test(
     workspace_base_commit: str,
     sandbox: VisibleTestSandbox,
     request: TestPlanRequest | None = None,
+    candidate_patch: str | None = None,
+    cache: _TestResultCache | None = None,
+    target_timeout_seconds: float | None = None,
+    regression_timeout_seconds: float | None = None,
+    task_budget: _TaskBudget | None = None,
 ) -> ScheduledTestEvidence:
-    """对双命令分别运行基线与 patched 容器，形成可比较证据。"""
+    """对双命令分别运行基线与 patched 容器，形成可比较证据。
+
+    baseline 使用空 patch 的稳定缓存键，因此 Initial/Final 不会重复运行。候选
+    结果只有在 patch 完全相同且上次真实通过时才复用；失败和超时仍会重跑，避免
+    把一次偶发 Docker 故障固化成最终证据。
+    """
 
     request = consume_test_plan(repository) if request is None else request
     if not request.accepted:
         return ScheduledTestEvidence(request=request)
+    if cache is not None and candidate_patch is None:
+        raise ValueError("candidate_patch is required when test cache is enabled")
+
+    patch_digest = hashlib.sha256((candidate_patch or "").encode("utf-8")).hexdigest()
+    baseline_digest = hashlib.sha256(b"").hexdigest()
+    budget_exhausted = False
     executions: list[ScheduledTestExecution] = []
     for label, argv in request.commands:
+        configured_timeout = (
+            regression_timeout_seconds
+            if label == "regression" and regression_timeout_seconds is not None
+            else target_timeout_seconds
+        )
+
+        def run_one(*, apply_patch: bool) -> VisibleTestResult:
+            """执行或复用单侧结果，同时把总预算收紧到本次子进程。"""
+
+            digest = patch_digest if apply_patch else baseline_digest
+            timeout_key = float(configured_timeout or 0.0)
+            key: _TestCacheKey = (
+                task.instance_id,
+                workspace_base_commit,
+                tuple(argv),
+                digest,
+                timeout_key,
+            )
+            cached = cache.get(key) if cache is not None else None
+            can_reuse = cached is not None and (
+                not apply_patch
+                or (
+                    cached.command_started
+                    and cached.exit_code == 0
+                    and not cached.timed_out
+                )
+            )
+            if can_reuse and cached is not None:
+                # duration_seconds 表示本阶段实际等待时间；历史耗时仍保留在首次
+                # scheduled phase，因此命中缓存时必须归零，避免汇总重复计费。
+                return replace(cached, duration_seconds=0.0, cache_hit=True)
+
+            timeout_override = configured_timeout
+            if task_budget is not None:
+                timeout_override = task_budget.limit(
+                    configured_timeout
+                    if configured_timeout is not None
+                    else sandbox.timeout_seconds
+                )
+            run_options: dict[str, Any] = {
+                "instance_id": task.instance_id,
+                "base_commit": workspace_base_commit,
+                "command": argv,
+                "apply_patch": apply_patch,
+            }
+            # 兼容只实现旧 run 签名的测试替身；真实调度传入配置后始终显式使用
+            # target/regression 各自的超时值。
+            if timeout_override is not None:
+                run_options["timeout_seconds"] = timeout_override
+            result = sandbox.run(repository, **run_options)
+            if cache is not None:
+                cache[key] = result
+            return result
+
         baseline_result: VisibleTestResult | None = None
         baseline_error: str | None = None
         try:
-            baseline_result = sandbox.run(
-                repository,
-                instance_id=task.instance_id,
-                base_commit=workspace_base_commit,
-                command=argv,
-                apply_patch=False,
-            )
+            baseline_result = run_one(apply_patch=False)
+        except TaskBudgetExhausted as error:
+            baseline_error = str(error)
+            budget_exhausted = True
         except (TestSandboxError, ValueError) as error:
             baseline_error = str(error)
 
         patched_result: VisibleTestResult | None = None
         patched_error: str | None = None
-        try:
-            patched_result = sandbox.run(
-                repository,
-                instance_id=task.instance_id,
-                base_commit=workspace_base_commit,
-                command=argv,
-                apply_patch=True,
-            )
-        except (TestSandboxError, ValueError) as error:
-            patched_error = str(error)
+        if budget_exhausted:
+            patched_error = "task wall-clock budget exhausted"
+        else:
+            try:
+                patched_result = run_one(apply_patch=True)
+            except TaskBudgetExhausted as error:
+                patched_error = str(error)
+                budget_exhausted = True
+            except (TestSandboxError, ValueError) as error:
+                patched_error = str(error)
         executions.append(
             ScheduledTestExecution(
                 label=label,
@@ -609,12 +763,17 @@ def _execute_scheduled_test(
                 error=patched_error,
             )
         )
-    return ScheduledTestEvidence(request=request, executions=tuple(executions))
+    return ScheduledTestEvidence(
+        request=request,
+        executions=tuple(executions),
+        task_budget_exhausted=budget_exhausted,
+    )
 
 
 def _scheduled_test_result(evidence: ScheduledTestEvidence) -> ClaudeCodeResult:
     """把调度器证据包装成 phase，使 trajectory、日志和汇总保持同一拓扑。"""
 
+    evidence_metrics = evidence.metrics()
     details: dict[str, Any] = {
         "request_status": evidence.request.status,
         "request_origin": evidence.request.origin,
@@ -631,6 +790,21 @@ def _scheduled_test_result(evidence: ScheduledTestEvidence) -> ClaudeCodeResult:
                 ),
                 "baseline_command_started": (
                     execution.baseline_result.command_started
+                    if execution.baseline_result is not None
+                    else False
+                ),
+                "baseline_timed_out": (
+                    execution.baseline_result.timed_out
+                    if execution.baseline_result is not None
+                    else False
+                ),
+                "baseline_duration_seconds": (
+                    execution.baseline_result.duration_seconds
+                    if execution.baseline_result is not None
+                    else 0.0
+                ),
+                "baseline_cache_hit": (
+                    execution.baseline_result.cache_hit
                     if execution.baseline_result is not None
                     else False
                 ),
@@ -653,10 +827,50 @@ def _scheduled_test_result(evidence: ScheduledTestEvidence) -> ClaudeCodeResult:
                     if execution.result is not None
                     else False
                 ),
+                "candidate_timed_out": (
+                    execution.result.timed_out
+                    if execution.result is not None
+                    else False
+                ),
+                "candidate_duration_seconds": (
+                    execution.result.duration_seconds
+                    if execution.result is not None
+                    else 0.0
+                ),
+                "candidate_cache_hit": (
+                    execution.result.cache_hit
+                    if execution.result is not None
+                    else False
+                ),
+                "duration_seconds": round(
+                    sum(
+                        result.duration_seconds
+                        for result in (
+                            execution.baseline_result,
+                            execution.result,
+                        )
+                        if result is not None
+                    ),
+                    6,
+                ),
+                "cache_hit": any(
+                    result.cache_hit
+                    for result in (
+                        execution.baseline_result,
+                        execution.result,
+                    )
+                    if result is not None
+                ),
+                "task_budget_exhausted": evidence.task_budget_exhausted,
             }
             for execution in evidence.executions
         ],
         "error": evidence.request.error,
+        "duration_seconds": evidence_metrics["duration_seconds"],
+        "cache_hit": evidence_metrics["cache_hit"],
+        "baseline_timed_out": evidence_metrics["baseline_timed_out"],
+        "candidate_timed_out": evidence_metrics["candidate_timed_out"],
+        "task_budget_exhausted": evidence.task_budget_exhausted,
     }
     text = evidence.prompt_text()
     return ClaudeCodeResult(
@@ -673,7 +887,49 @@ def _scheduled_test_result(evidence: ScheduledTestEvidence) -> ClaudeCodeResult:
             },
         ),
         timed_out=False,
-        metrics=evidence.metrics(),
+        metrics=evidence_metrics,
+    )
+
+
+def _task_budget_result(
+    phases: Sequence[tuple[str, ClaudeCodeResult]],
+) -> ClaudeCodeResult:
+    """把预算耗尽转换为可持久化结果，并保留此前所有阶段证据。"""
+
+    if phases:
+        combined = combine_phase_results(phases)
+    else:
+        combined = ClaudeCodeResult(
+            exit_code=124,
+            agent_log="",
+            test_output="",
+            events=(),
+            timed_out=True,
+            metrics={},
+        )
+    metrics = dict(combined.metrics)
+    metrics.setdefault("duration_seconds", 0.0)
+    metrics.setdefault("cache_hit", False)
+    metrics.setdefault("baseline_timed_out", False)
+    metrics.setdefault("candidate_timed_out", False)
+    metrics["task_budget_exhausted"] = True
+    metrics["timed_out"] = True
+    events = list(combined.events)
+    events.append(
+        {
+            "sequence": len(events) + 1,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "event_type": "task_budget_exhausted",
+            "details": {"task_budget_exhausted": True},
+        }
+    )
+    return replace(
+        combined,
+        exit_code=124,
+        agent_log=combined.agent_log + "\nTask wall-clock budget exhausted.\n",
+        events=tuple(events),
+        timed_out=True,
+        metrics=metrics,
     )
 
 
@@ -750,6 +1006,9 @@ def run_claude_task(
         configuration=configuration,
         patch_base_commit=patch_base_commit,
     )
+    task_budget = _TaskBudget.start(config.agent.task_timeout_seconds)
+    test_cache: dict[_TestCacheKey, VisibleTestResult] = {}
+    phases: list[tuple[str, ClaudeCodeResult]] = []
     try:
         if config.agent.verification_turns:
             implementation_turns = (
@@ -779,12 +1038,11 @@ def run_claude_task(
             implementation_result = _runner(
                 config,
                 turns=implementation_turns,
-                timeout_seconds=implementation_timeout,
+                timeout_seconds=task_budget.limit(implementation_timeout),
                 base_url=base_url,
             ).run(repository, implementation_prompt)
-            phases: list[tuple[str, ClaudeCodeResult]] = [
-                ("implementation", implementation_result)
-            ]
+            phases.append(("implementation", implementation_result))
+            task_budget.ensure_remaining()
 
             # 清理旧模型可能遗留的控制文件但绝不采用其中命令。实际测试计划只由
             # 父进程根据仓库布局与候选 patch 确定性生成。
@@ -827,12 +1085,13 @@ def run_claude_task(
                 edit_gate_result = _runner(
                     config,
                     turns=edit_gate_turns,
-                    timeout_seconds=edit_gate_timeout,
+                    timeout_seconds=task_budget.limit(edit_gate_timeout),
                     base_url=base_url,
                     allow_bash=False,
                     available_tools=("Read", "Edit"),
                 ).run(repository, edit_gate_prompt)
                 phases.append(("recovery_edit_gate", edit_gate_result))
+                task_budget.ensure_remaining()
 
                 recovered_patch = session.collect_patch(repository)
                 recovery_result = edit_gate_result
@@ -850,14 +1109,17 @@ def run_claude_task(
                     fallback_result = _runner(
                         config,
                         turns=fallback_turns,
-                        timeout_seconds=max(
-                            1,
-                            verification_timeout - edit_gate_timeout,
+                        timeout_seconds=task_budget.limit(
+                            max(
+                                1,
+                                verification_timeout - edit_gate_timeout,
+                            )
                         ),
                         base_url=base_url,
                         allow_bash=False,
                     ).run(repository, fallback_prompt)
                     phases.append(("recovery_fallback", fallback_result))
+                    task_budget.ensure_remaining()
                     recovery_result = fallback_result
 
                 consume_test_plan(repository)
@@ -873,6 +1135,15 @@ def run_claude_task(
                     workspace_base_commit=patch_base_commit,
                     sandbox=test_sandbox,
                     request=recovery_request,
+                    candidate_patch=recovered_patch,
+                    cache=test_cache,
+                    target_timeout_seconds=(
+                        config.agent.visible_test_timeout_seconds
+                    ),
+                    regression_timeout_seconds=(
+                        config.agent.visible_regression_test_timeout_seconds
+                    ),
+                    task_budget=task_budget,
                 )
                 phases.append(
                     (
@@ -880,6 +1151,7 @@ def run_claude_task(
                         _scheduled_test_result(recovery_evidence),
                     )
                 )
+                task_budget.ensure_remaining()
                 result = combine_phase_results(tuple(phases))
                 # 末尾测试 phase 只保存证据，不能掩盖 Recovery CLI 自身的失败；
                 # 首轮 Implementation 的失败则允许被成功 Recovery 覆盖。
@@ -900,6 +1172,15 @@ def run_claude_task(
                     workspace_base_commit=patch_base_commit,
                     sandbox=test_sandbox,
                     request=parent_request,
+                    candidate_patch=candidate_patch,
+                    cache=test_cache,
+                    target_timeout_seconds=(
+                        config.agent.visible_test_timeout_seconds
+                    ),
+                    regression_timeout_seconds=(
+                        config.agent.visible_regression_test_timeout_seconds
+                    ),
+                    task_budget=task_budget,
                 )
                 phases.append(
                     (
@@ -907,6 +1188,7 @@ def run_claude_task(
                         _scheduled_test_result(initial_evidence),
                     )
                 )
+                task_budget.ensure_remaining()
                 verification_prompt = build_verification_phase_prompt(
                     prompt,
                     verification_turns=config.agent.verification_turns,
@@ -928,12 +1210,13 @@ def run_claude_task(
                 verification_result = _runner(
                     config,
                     turns=config.agent.verification_turns,
-                    timeout_seconds=verification_timeout,
+                    timeout_seconds=task_budget.limit(verification_timeout),
                     base_url=base_url,
                     allow_bash=False,
                     available_tools=verification_available_tools,
                 ).run(repository, verification_prompt)
                 phases.append((verification_phase, verification_result))
+                task_budget.ensure_remaining()
 
                 # 验证阶段无权替换命令；父进程根据修复后的最终 patch 重新生成，
                 # 保证命令始终与实际修改路径一致且不依赖模型控制文件。
@@ -950,10 +1233,20 @@ def run_claude_task(
                     workspace_base_commit=patch_base_commit,
                     sandbox=test_sandbox,
                     request=final_request,
+                    candidate_patch=final_patch,
+                    cache=test_cache,
+                    target_timeout_seconds=(
+                        config.agent.visible_test_timeout_seconds
+                    ),
+                    regression_timeout_seconds=(
+                        config.agent.visible_regression_test_timeout_seconds
+                    ),
+                    task_budget=task_budget,
                 )
                 phases.append(
                     ("scheduled_test_final", _scheduled_test_result(final_evidence))
                 )
+                task_budget.ensure_remaining()
                 result = combine_phase_results(tuple(phases))
                 # 测试缺失、启动失败和非零退出码都只记录证据；模型会话状态仍由
                 # verification 决定，正确性最终只由官方 SWE-bench harness 裁决。
@@ -964,11 +1257,18 @@ def run_claude_task(
             result = _runner(
                 config,
                 turns=config.agent.max_turns,
-                timeout_seconds=config.agent.timeout_seconds,
+                timeout_seconds=task_budget.limit(config.agent.timeout_seconds),
                 base_url=base_url,
             ).run(repository, prompt)
+            phases.append(("implementation", result))
+            task_budget.ensure_remaining()
         patch = session.collect_patch(repository)
         result = _apply_patch_gate(result, patch)
+    except TaskBudgetExhausted:
+        # 总预算耗尽是预期的资源边界，不应走基础设施异常分支；保留已有 patch，
+        # 让官方 harness 仍能评价截止时间前已经完成的候选修复。
+        patch = session.collect_patch(repository)
+        result = _apply_patch_gate(_task_budget_result(phases), patch)
     except Exception as error:
         # 无论 Agent 还是 patch 收集失败，都要终结 metadata 的 running 状态，
         # 否则后续分析无法区分“仍在运行”和“基础设施异常退出”。

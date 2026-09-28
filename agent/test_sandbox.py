@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import time
 import uuid
 from typing import Sequence
 
@@ -24,13 +25,15 @@ class TestSandboxError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class VisibleTestResult:
-    """一次可见测试的启动证据、退出码、截断输出和实际镜像。"""
+    """一次可见测试的启动证据、耗时、缓存状态和实际镜像。"""
 
     exit_code: int
     output: str
     image: str
     timed_out: bool
     command_started: bool
+    duration_seconds: float = 0.0
+    cache_hit: bool = False
 
 
 def image_candidates(instance_id: str) -> tuple[str, str]:
@@ -152,12 +155,13 @@ class VisibleTestSandbox:
         base_commit: str,
         command: Sequence[str],
         apply_patch: bool = True,
+        timeout_seconds: float | None = None,
     ) -> VisibleTestResult:
         """在隔离镜像中执行 argv，并由调用方决定是否应用候选 patch。
 
         ``apply_patch=False`` 直接测试官方 instance 镜像中的基线 checkout，供父
-        进程与随后 patched 结果比较。两种运行使用完全相同的镜像、资源和 argv，
-        避免把宿主差异误认为补丁回归。
+        进程与随后 patched 结果比较。调用方可用 ``timeout_seconds`` 收紧单次命令
+        预算；省略时沿用沙箱默认值，且绝不允许覆盖值扩大默认安全边界。
         """
 
         repository_path = Path(repository).resolve()
@@ -167,6 +171,14 @@ class VisibleTestSandbox:
             raise TestSandboxError("base commit must be a 7-40 character Git hex id")
         if not command or any(not isinstance(item, str) or not item for item in command):
             raise TestSandboxError("test command must contain non-empty argv items")
+        if timeout_seconds is not None and timeout_seconds <= 0:
+            raise ValueError("test timeout override must be positive")
+
+        effective_timeout = min(
+            self.timeout_seconds,
+            timeout_seconds if timeout_seconds is not None else self.timeout_seconds,
+        )
+        started_monotonic = time.monotonic()
 
         image = self.resolve_image(instance_id)
         patch = (
@@ -221,7 +233,7 @@ class VisibleTestSandbox:
                     text=True,
                     encoding="utf-8",
                     errors="replace",
-                    timeout=self.timeout_seconds,
+                    timeout=effective_timeout,
                     check=False,
                 )
                 exit_code = completed.returncode
@@ -235,7 +247,7 @@ class VisibleTestSandbox:
                     if isinstance(partial, str)
                     else partial.decode("utf-8", errors="replace")
                 )
-                output += f"\nvisible test timed out after {self.timeout_seconds}s\n"
+                output += f"\nvisible test timed out after {effective_timeout:g}s\n"
             finally:
                 # timeout 时 docker 客户端可能先退出，必须按不可猜测的 UUID 名称清理
                 # 精确容器，防止后台测试继续占用内存和 CPU。
@@ -254,6 +266,8 @@ class VisibleTestSandbox:
             image=image,
             timed_out=timed_out,
             command_started=command_started,
+            duration_seconds=round(time.monotonic() - started_monotonic, 6),
+            cache_hit=False,
         )
 
     @staticmethod

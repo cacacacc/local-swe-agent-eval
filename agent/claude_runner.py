@@ -70,6 +70,11 @@ def combine_phase_results(
     total_visible_test_fixed_baseline_failures = 0
     total_visible_test_unchanged_baseline_failures = 0
     total_visible_test_timed_out = 0
+    total_visible_test_duration_seconds = 0.0
+    any_cache_hit = False
+    any_baseline_timed_out = False
+    any_candidate_timed_out = False
+    task_budget_exhausted = False
 
     for phase_name, result in phases:
         events.append(
@@ -138,6 +143,19 @@ def combine_phase_results(
         total_visible_test_timed_out += int(
             bool(result.metrics.get("visible_test_timed_out", False))
         )
+        total_visible_test_duration_seconds += float(
+            result.metrics.get("duration_seconds", 0.0)
+        )
+        any_cache_hit = any_cache_hit or bool(result.metrics.get("cache_hit", False))
+        any_baseline_timed_out = any_baseline_timed_out or bool(
+            result.metrics.get("baseline_timed_out", False)
+        )
+        any_candidate_timed_out = any_candidate_timed_out or bool(
+            result.metrics.get("candidate_timed_out", False)
+        )
+        task_budget_exhausted = task_budget_exhausted or bool(
+            result.metrics.get("task_budget_exhausted", False)
+        )
         usage = result.metrics.get("token_usage", {})
         if isinstance(usage, Mapping):
             for key, value in usage.items():
@@ -167,6 +185,13 @@ def combine_phase_results(
             total_visible_test_unchanged_baseline_failures
         ),
         "visible_test_timed_out": total_visible_test_timed_out,
+        # duration_seconds 只统计本轮实际等待 Docker 的时间；缓存命中返回 0，
+        # 单题完整墙钟仍以 metadata.runtime_seconds 为准。
+        "duration_seconds": round(total_visible_test_duration_seconds, 6),
+        "cache_hit": any_cache_hit,
+        "baseline_timed_out": any_baseline_timed_out,
+        "candidate_timed_out": any_candidate_timed_out,
+        "task_budget_exhausted": task_budget_exhausted,
         "agent_test_command_calls": total_agent_test_commands,
         "host_test_calls": total_host_test_calls,
         "timed_out": any(result.timed_out for _, result in phases),
@@ -254,7 +279,7 @@ class ClaudeCodeRunner:
         self,
         *,
         model: str,
-        timeout_seconds: int,
+        timeout_seconds: float,
         max_turns: int,
         context_length: int,
         max_output_tokens: int,
@@ -508,6 +533,11 @@ class ClaudeCodeRunner:
             "visible_test_fixed_baseline_failures": 0,
             "visible_test_unchanged_baseline_failures": 0,
             "visible_test_timed_out": False,
+            "duration_seconds": 0.0,
+            "cache_hit": False,
+            "baseline_timed_out": False,
+            "candidate_timed_out": False,
+            "task_budget_exhausted": False,
             "agent_test_command_calls": agent_test_command_calls,
             "host_test_calls": host_test_calls,
             "timed_out": timed_out,

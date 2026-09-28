@@ -265,6 +265,15 @@ never applies the SWE-bench hidden `test_patch` or runs the official evaluation
 script during solving. Required images must be pulled during environment
 preparation; the wrapper never pulls implicitly.
 
+New v2 runs also impose a 30-minute wall-clock budget across all model and Docker
+phases. Target tests retain the 900-second command timeout, while the broader
+regression command is limited to 300 seconds. Within one task, unchanged baseline
+results are always reused between Initial and Final. A candidate result is reused
+only when its patch hash is unchanged and the previous execution genuinely passed;
+failed or timed-out candidates are rerun so transient Docker failures are not
+silently frozen. Budget exhaustion preserves the patch produced so far for the
+official harness instead of discarding the task.
+
 An empty diff can no longer be reported as a completed agent run. Generated
 virtual environments and caches are excluded from both visible-test and final
 patches without deleting the worktree evidence. The runner records a
@@ -316,6 +325,10 @@ architecture. New runs use four additional code-enforced boundaries:
    `visible_test_timed_out`. `visible_test_calls` remains a compatibility alias
    for confirmed executions; model-issued test commands are recorded as
    `agent_test_command_calls` and `host_test_calls`.
+5. Test events additionally record `duration_seconds`, `cache_hit`,
+   `baseline_timed_out`, `candidate_timed_out`, and `task_budget_exhausted`.
+   Cached executions contribute zero duration in the later phase, while the full
+   single-task wall clock remains available as `metadata.runtime_seconds`.
 
 This hardening is a new experimental protocol. It must not be used to rewrite
 the original baseline or r2 results, even when the same task IDs are inspected

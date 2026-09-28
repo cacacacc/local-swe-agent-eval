@@ -25,6 +25,8 @@ model:
 agent:
   framework: claude-code
   timeout_seconds: 5400
+  # Dev 与正式 v2 使用相同的 30 分钟单题总墙钟边界。
+  task_timeout_seconds: 1800
   max_turns: 40
   verification_turns: 10
   test_planning_turns: 0
@@ -33,6 +35,8 @@ agent:
   # Agent 只能把自己的 patch 放进无网络官方镜像，不能接触 hidden test patch。
   visible_test_sandbox: true
   visible_test_timeout_seconds: 900
+  # 相邻回归通常比目标测试更宽，单独限制为 5 分钟。
+  visible_regression_test_timeout_seconds: 300
   prompt_template: prompts/swe_agent_prompt_v2.txt
 
 network:

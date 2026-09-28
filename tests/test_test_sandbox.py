@@ -117,6 +117,7 @@ def test_sandbox_applies_only_current_patch_and_disables_network(
     repository = tmp_path / "repo"
     repository.mkdir()
     calls: list[list[str]] = []
+    docker_timeouts: list[float] = []
 
     def fake_run(command, **kwargs):
         command = [str(item) for item in command]
@@ -133,6 +134,7 @@ def test_sandbox_applies_only_current_patch_and_disables_network(
                 stderr="",
             )
         if command[:2] == ["docker", "run"]:
+            docker_timeouts.append(kwargs["timeout"])
             shell_command = command[command.index("bash") + 2]
             marker = shell_command.split("printf '%s\\n' ", 1)[1].split(" &&", 1)[0]
             return subprocess.CompletedProcess(
@@ -151,6 +153,7 @@ def test_sandbox_applies_only_current_patch_and_disables_network(
         instance_id="owner__repo-7",
         base_commit="0123456789abcdef0123456789abcdef01234567",
         command=("python", "-m", "pytest", "tests/test_one.py"),
+        timeout_seconds=5,
     )
 
     docker_run = next(command for command in calls if command[:2] == ["docker", "run"])
@@ -163,6 +166,9 @@ def test_sandbox_applies_only_current_patch_and_disables_network(
     assert result.exit_code == 0
     assert result.command_started is True
     assert result.output == "1 passed\n"
+    assert result.duration_seconds >= 0
+    assert result.cache_hit is False
+    assert docker_timeouts == [5]
 
 
 def test_sandbox_does_not_count_patch_apply_failure_as_test_execution(

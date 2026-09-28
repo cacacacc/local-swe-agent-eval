@@ -130,6 +130,8 @@ def test_dev_v2_reserves_an_independent_verification_session() -> None:
     assert config.agent.max_tool_output_chars == 12000
     assert config.agent.visible_test_sandbox is True
     assert config.agent.visible_test_timeout_seconds == 900
+    assert config.agent.visible_regression_test_timeout_seconds == 300
+    assert config.agent.task_timeout_seconds == 1800
     baseline = ExperimentConfig.load(PROJECT_ROOT / "configs" / "evaluation.yaml")
     assert baseline.agent.max_turns == 30
     assert baseline.agent.verification_turns == 0
@@ -150,6 +152,8 @@ def test_evaluation_v2_is_frozen_as_a_separate_ablation() -> None:
     assert ablation.agent.verification_turns == 10
     assert ablation.agent.test_planning_turns == 0
     assert ablation.agent.visible_test_sandbox is True
+    assert ablation.agent.visible_regression_test_timeout_seconds == 300
+    assert ablation.agent.task_timeout_seconds == 1800
 
 
 @pytest.mark.parametrize("task_count", [15, 20, 30])
@@ -165,6 +169,8 @@ def test_extended_evaluation_v2_configs_are_frozen_and_sized(task_count: int) ->
     assert config.experiment.name.endswith(f"{task_count}-seed42")
     assert len(task_ids) == task_count
     assert len(set(task_ids)) == task_count
+    assert config.agent.task_timeout_seconds == 1800
+    assert config.agent.visible_regression_test_timeout_seconds == 300
 
 
 def test_seed43_tasks_are_frozen_and_disjoint_from_every_existing_set() -> None:
@@ -185,6 +191,8 @@ def test_seed43_tasks_are_frozen_and_disjoint_from_every_existing_set() -> None:
     assert config.experiment.name.endswith("30-seed43")
     assert len(task_ids) == len(set(task_ids)) == 30
     assert set(task_ids).isdisjoint(previous_ids)
+    assert config.agent.task_timeout_seconds == 1800
+    assert config.agent.visible_regression_test_timeout_seconds == 300
 
 
 def test_phase_prompts_reanchor_task_and_enforce_delivery_boundaries() -> None:

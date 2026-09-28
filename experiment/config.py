@@ -150,6 +150,8 @@ class AgentSettings:
     max_tool_output_chars: int
     visible_test_sandbox: bool
     visible_test_timeout_seconds: int
+    visible_regression_test_timeout_seconds: int
+    task_timeout_seconds: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,6 +307,8 @@ class ExperimentConfig:
                 "max_tool_output_chars",
                 "visible_test_sandbox",
                 "visible_test_timeout_seconds",
+                "visible_regression_test_timeout_seconds",
+                "task_timeout_seconds",
             },
         )
         framework = _string(agent_raw["framework"], "agent.framework")
@@ -357,6 +361,22 @@ class ExperimentConfig:
                 "agent.visible_test_timeout_seconds",
                 minimum=0,
             ),
+            # 旧配置未声明时沿用原来的统一测试超时，保证历史 fingerprint 对应的
+            # 运行语义不变；新 v2 配置显式缩短相邻回归测试的等待上限。
+            visible_regression_test_timeout_seconds=_integer(
+                agent_raw.get(
+                    "visible_regression_test_timeout_seconds",
+                    agent_raw.get("visible_test_timeout_seconds", 0),
+                ),
+                "agent.visible_regression_test_timeout_seconds",
+                minimum=0,
+            ),
+            # 0 仅为旧配置的兼容关闭值；新架构配置必须显式给出总墙钟预算。
+            task_timeout_seconds=_integer(
+                agent_raw.get("task_timeout_seconds", 0),
+                "agent.task_timeout_seconds",
+                minimum=0,
+            ),
         )
         reserved_turns = agent.verification_turns
         if reserved_turns >= agent.max_turns:
@@ -373,6 +393,14 @@ class ExperimentConfig:
         if agent.visible_test_sandbox and agent.visible_test_timeout_seconds <= 0:
             raise ConfigurationError(
                 "visible test sandbox requires positive visible_test_timeout_seconds"
+            )
+        if (
+            agent.visible_test_sandbox
+            and agent.visible_regression_test_timeout_seconds <= 0
+        ):
+            raise ConfigurationError(
+                "visible test sandbox requires positive "
+                "visible_regression_test_timeout_seconds"
             )
         if agent.test_planning_turns:
             raise ConfigurationError(
@@ -518,6 +546,10 @@ class ExperimentConfig:
             "max_tool_output_chars": self.agent.max_tool_output_chars,
             "visible_test_sandbox": self.agent.visible_test_sandbox,
             "visible_test_timeout_seconds": self.agent.visible_test_timeout_seconds,
+            "visible_regression_test_timeout_seconds": (
+                self.agent.visible_regression_test_timeout_seconds
+            ),
+            "task_timeout_seconds": self.agent.task_timeout_seconds,
             "network_during_solving": self.network.formal_solving,
             "evaluation_max_workers": self.evaluation.max_workers,
             "evaluation_cache_level": self.evaluation.cache_level,

@@ -633,7 +633,7 @@ def test_empty_patch_reuses_verification_budget_for_recovery(
     assert calls == ["implementation", "recovery"]
     assert "allow_bash" not in runner_options[0]
     assert runner_options[1]["allow_bash"] is False
-    assert runner_options[1]["available_tools"] == ("Edit",)
+    assert runner_options[1]["available_tools"] == ("Read", "Edit")
     assert runner_options[1]["turns"] == 2
     assert result["run_status"] == "completed"
     assert result["patch_generated"] is True
@@ -688,7 +688,7 @@ def test_recovery_fallback_uses_only_budget_left_after_edit_gate(
             if "empty-patch recovery fallback" in prompt:
                 calls.append("fallback")
                 source.write_text("value = 2\n", encoding="utf-8")
-            elif "mandatory Edit gate" in prompt:
+            elif "mandatory Read-Edit gate" in prompt:
                 calls.append("gate")
             else:
                 calls.append("implementation")
@@ -743,7 +743,7 @@ def test_recovery_fallback_uses_only_budget_left_after_edit_gate(
     assert runner_options[2]["turns"] == 8
     assert runner_options[1]["allow_bash"] is False
     assert runner_options[2]["allow_bash"] is False
-    assert runner_options[1]["available_tools"] == ("Edit",)
+    assert runner_options[1]["available_tools"] == ("Read", "Edit")
     assert "available_tools" not in runner_options[2]
     assert "recovery_edit_gate" in result["metrics"]["phases"]
     assert "recovery_fallback" in result["metrics"]["phases"]

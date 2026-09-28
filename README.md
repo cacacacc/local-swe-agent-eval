@@ -189,6 +189,18 @@ and checks Claude Code and SWE-bench before creating batch output:
 ./scripts/run_evaluation_v2_seed42.sh 30
 ```
 
+A second non-overlapping 30-task sample is frozen under seed 43. Its configuration,
+ID list, and safe agent snapshot are respectively:
+`configs/evaluation_v2_30_seed43.yaml`,
+`experiments/evaluation_tasks_30_seed43.json`, and
+`prepared/evaluation_tasks_30_seed43.jsonl`. It excludes all 78 instances used by
+the existing Dev and evaluation sets before sampling 30 of the remaining 422.
+Run it with the dedicated short launcher:
+
+```bash
+./scripts/run_evaluation_v2_seed43.sh
+```
+
 The batch can be paused with `Ctrl-C`. To continue from the first task that was
 not fully recorded, reuse the exact same batch ID and set `RESUME_BATCH=1`:
 
@@ -231,12 +243,12 @@ Claude Code sessions, with deterministic parent-owned test planning between them
    only the first proven regression and the candidate patch, and Claude Code's
    tool whitelist is reduced to `Read,Edit`.
 4. If implementation produces no usable patch, the otherwise-unused 10
-   verification turns become Recovery. Its first two turns are a mandatory Edit
-   gate where `Edit` is the only available tool and the parent supplies bounded
-   excerpts from the most recently read source files. If no existing-source patch
-   appears, the remaining eight turns run a no-Bash fallback with targeted read
-   tools. This keeps the 40-turn budget fixed while making an early Edit attempt a
-   process constraint rather than a prompt suggestion.
+   verification turns become Recovery. Its first two turns are a mandatory
+   Read→Edit gate where `Read,Edit` are the only available tools: the first turn
+   reads one handoff-selected source file to satisfy Claude Code's edit prerequisite,
+   and the second immediately edits that file. If no existing-source patch appears,
+   the remaining eight turns run a no-Bash fallback with targeted read tools. This
+   keeps the 40-turn budget fixed while preventing renewed broad exploration.
 
 Starting a new session prevents implementation history and failed automatic
 compaction from consuming the verification context. The v2 prompt also limits

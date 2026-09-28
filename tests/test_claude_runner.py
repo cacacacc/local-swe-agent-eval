@@ -261,8 +261,8 @@ def test_verification_runner_disables_bash_at_cli_boundary() -> None:
     assert "Bash" in command[command.index("--disallowed-tools") + 1 :]
 
 
-def test_runner_can_expose_only_edit_for_recovery_gate() -> None:
-    """Recovery Edit gate 必须通过 CLI 白名单只暴露 Edit 工具。"""
+def test_runner_can_expose_only_read_and_edit_for_recovery_gate() -> None:
+    """Recovery gate 必须通过 CLI 白名单只暴露有序读写所需的两个工具。"""
 
     runner = ClaudeCodeRunner(
         model="qwen3.5:9b",
@@ -271,13 +271,13 @@ def test_runner_can_expose_only_edit_for_recovery_gate() -> None:
         context_length=32768,
         max_output_tokens=8192,
         allow_bash=False,
-        available_tools=("Edit",),
+        available_tools=("Read", "Edit"),
     )
 
     command = runner.command("Edit now")
     available = command[command.index("--tools") + 1]
 
-    assert available == "Edit"
+    assert available == "Read,Edit"
     assert "Bash" in command[command.index("--disallowed-tools") + 1 :]
 
 

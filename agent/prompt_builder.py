@@ -175,23 +175,26 @@ def build_recovery_edit_gate_prompt(
     implementation_handoff: str,
     source_context: str,
 ) -> str:
-    """构造 Recovery 的强制 Edit 阶段，配合 CLI 仅开放 Edit 工具。
+    """构造 Recovery 的两步 Read→Edit 阶段，配合 CLI 仅开放这两个工具。
 
     此阶段位于任何新的探索之前。父进程提供 Implementation 已定位的公开结论和
-    源码片段，模型必须直接尝试修改；Read/Grep/Glob/Bash/Write 均由 CLI 禁用，
-    因而“尽早 Edit”不再只是可以被忽略的自然语言建议。
+    源码片段；模型先在同一会话 Read 目标文件以满足 Claude Code 的编辑前置条件，
+    下一 turn 必须 Edit。Grep/Glob/Bash/Write 和子代理均不会进入工具白名单。
     """
 
     handoff = implementation_handoff.strip() or "No visible diagnosis was recorded."
     context = source_context.strip() or "No safe source excerpt was available."
     return (
         f"{base_prompt.rstrip()}\n\n"
-        "Current phase: empty-patch recovery implementation — mandatory Edit gate\n"
-        f"- You have at most {recovery_turns} turns. Your first tool call must be Edit.\n"
-        "- Edit is the only filesystem tool available. Read, Grep, Glob, Bash, Write, "
-        "and subagents are disabled by the parent process.\n"
-        "- Use the handoff and exact source excerpts below to make the smallest plausible "
-        "change to existing product source now. Do not respond with an explanation only.\n"
+        "Current phase: empty-patch recovery implementation — mandatory Read-Edit gate\n"
+        f"- You have exactly two ordered actions within at most {recovery_turns} turns.\n"
+        "- Turn 1: call Read exactly once on the most relevant existing source file named "
+        "in the handoff or source context. Do not Edit before this Read.\n"
+        "- Turn 2: call Edit immediately on that same file. Do not call Read a second time.\n"
+        "- Read and Edit are the only available tools. Grep, Glob, Bash, Write, and "
+        "subagents are unavailable.\n"
+        "- Use the handoff and source excerpts below to make the smallest plausible "
+        "product-source change. Do not respond with an explanation only.\n"
         "<implementation_handoff>\n"
         f"{handoff}\n"
         "</implementation_handoff>\n"
@@ -229,7 +232,7 @@ def build_recovery_implementation_prompt(
         "<implementation_handoff>\n"
         f"{handoff}\n"
         "</implementation_handoff>\n"
-        "- The mandatory Edit gate did not produce an existing-source patch. Do not "
+        "- The mandatory Read-Edit gate did not produce an existing-source patch. Do not "
         "repeat searches or file reads already summarized in the handoff.\n"
         f"- You have at most {recovery_turns} turns to make a minimal concrete source "
         "change that addresses the issue.\n"

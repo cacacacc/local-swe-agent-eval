@@ -167,6 +167,26 @@ def test_extended_evaluation_v2_configs_are_frozen_and_sized(task_count: int) ->
     assert len(set(task_ids)) == task_count
 
 
+def test_seed43_tasks_are_frozen_and_disjoint_from_every_existing_set() -> None:
+    """新 30 题必须冻结且不复用仓库中任何既有 Dev/Evaluation instance。"""
+
+    config = ExperimentConfig.load(
+        PROJECT_ROOT / "configs" / "evaluation_v2_30_seed43.yaml"
+    )
+    task_ids = json.loads(config.tasks_path.read_text(encoding="utf-8"))
+    previous_ids: set[str] = set()
+    for path in sorted((PROJECT_ROOT / "experiments").glob("*tasks*.json")):
+        if path == config.tasks_path:
+            continue
+        previous_ids.update(json.loads(path.read_text(encoding="utf-8")))
+
+    config.require_frozen()
+    assert config.experiment.random_seed == 43
+    assert config.experiment.name.endswith("30-seed43")
+    assert len(task_ids) == len(set(task_ids)) == 30
+    assert set(task_ids).isdisjoint(previous_ids)
+
+
 def test_phase_prompts_reanchor_task_and_enforce_delivery_boundaries() -> None:
     """两个独立会话都必须携带原任务，且分别强调交付补丁和验证修复。"""
 
@@ -229,8 +249,9 @@ def test_phase_prompts_reanchor_task_and_enforce_delivery_boundaries() -> None:
     assert "Modify existing product source" in recovery
     assert "do not run tests" in recovery
     assert base.strip() in edit_gate
-    assert "mandatory Edit gate" in edit_gate
-    assert "first tool call must be Edit" in edit_gate
+    assert "mandatory Read-Edit gate" in edit_gate
+    assert "Turn 1: call Read exactly once" in edit_gate
+    assert "Turn 2: call Edit immediately" in edit_gate
     assert "old_value = 1" in edit_gate
 
 

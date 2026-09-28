@@ -792,8 +792,9 @@ def run_claude_task(
             candidate_patch = session.collect_patch(repository)
             if not _should_run_verification(candidate_patch):
                 # 空 patch 无法进入 Verification，但其预留 turns 不能白白浪费。
-                # 先用两 turns 的 Edit-only gate 强制尝试源码修改；只有 gate 没有
-                # 形成产品源码 patch 时，才把剩余预算交给可读取的 fallback。
+                # 先用两 turns 的 Read→Edit gate：第一 turn 满足 Claude Code 的
+                # 编辑前置读取，第二 turn 立即修改。只有未形成产品源码 patch 时，
+                # 才把剩余预算交给可探索的 fallback。
                 recovery_handoff = _build_recovery_handoff(
                     implementation_result,
                     maximum_chars=min(
@@ -829,7 +830,7 @@ def run_claude_task(
                     timeout_seconds=edit_gate_timeout,
                     base_url=base_url,
                     allow_bash=False,
-                    available_tools=("Edit",),
+                    available_tools=("Read", "Edit"),
                 ).run(repository, edit_gate_prompt)
                 phases.append(("recovery_edit_gate", edit_gate_result))
 

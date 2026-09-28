@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# 一键启动 evaluation v2 的 seed-42 固定题集。
+# 一键启动 evaluation v2 的固定题集；默认 seed 42，seed43 wrapper 会覆盖种子。
 #
 # 用法：
 #   ./scripts/run_evaluation_v2_seed42.sh 15
@@ -14,6 +14,7 @@
 # 可通过环境变量覆盖本机相关路径或运行标识：
 #   BATCH_ID                批次 ID；默认包含所选题数
 #   RESUME_BATCH            设为 1 时继续已有 BATCH_ID，跳过已完整落盘的题目
+#   TASK_SEED               内部题集种子；默认 42，当前还支持新的 30 题 seed 43
 #   SWEBENCH_ROOT           SWE-bench 仓库；默认 $HOME/src/SWE-bench
 #   LOCAL_MODEL_BASE_URL    Ollama 地址；默认 http://localhost:11434
 
@@ -29,14 +30,23 @@ case "${TASK_COUNT}" in
         ;;
 esac
 
+TASK_SEED="${TASK_SEED:-42}"
+case "${TASK_SEED}:${TASK_COUNT}" in
+    42:15|42:20|42:30|43:30) ;;
+    *)
+        printf '不支持的题集组合：seed=%s tasks=%s\n' "${TASK_SEED}" "${TASK_COUNT}" >&2
+        exit 2
+        ;;
+esac
+
 # 以脚本自身位置定位项目，避免要求用户从仓库根目录执行命令。
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 PYTHON_BIN="${PROJECT_ROOT}/.venv/bin/python"
-CONFIG_PATH="${PROJECT_ROOT}/configs/evaluation_v2_${TASK_COUNT}_seed42.yaml"
-TASKS_PATH="${PROJECT_ROOT}/prepared/evaluation_tasks_${TASK_COUNT}_seed42.jsonl"
+CONFIG_PATH="${PROJECT_ROOT}/configs/evaluation_v2_${TASK_COUNT}_seed${TASK_SEED}.yaml"
+TASKS_PATH="${PROJECT_ROOT}/prepared/evaluation_tasks_${TASK_COUNT}_seed${TASK_SEED}.jsonl"
 SWEBENCH_ROOT="${SWEBENCH_ROOT:-${HOME}/src/SWE-bench}"
-BATCH_ID="${BATCH_ID:-evaluation-v2-qwen35-${TASK_COUNT}-seed42}"
+BATCH_ID="${BATCH_ID:-evaluation-v2-qwen35-${TASK_COUNT}-seed${TASK_SEED}}"
 LOCAL_MODEL_BASE_URL="${LOCAL_MODEL_BASE_URL:-http://localhost:11434}"
 RESUME_BATCH="${RESUME_BATCH:-0}"
 

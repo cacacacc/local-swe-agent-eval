@@ -150,9 +150,10 @@ def build_verification_phase_prompt(
         "- Bash is disabled in this phase. Do not attempt pytest, package installation, "
         "Git commands, or any host process; use Read and Edit to repair the files.\n"
         "- The scheduler compares every command on the unmodified baseline and patched "
-        "candidate. Treat only `new_regression` (baseline passed, patched failed) as a "
-        "regression introduced by this patch. `baseline_failure_persists` is pre-existing "
-        "evidence, not a reason by itself to rewrite or abandon the patch.\n"
+        "candidate. `new_regression` means either baseline passed while candidate failed, "
+        "or the candidate added a parsed failing test ID on top of existing baseline "
+        "failures. `baseline_failure_persists` contains no newly observed failing ID and "
+        "is not a reason by itself to rewrite or abandon the patch.\n"
         "- A missing plan or runner error remains diagnostic information, not a reason to "
         "abandon the non-empty patch.\n"
         f"{api_instruction}"
@@ -212,6 +213,7 @@ def build_recovery_implementation_prompt(
     max_file_read_lines: int,
     max_tool_output_chars: int,
     implementation_handoff: str = "",
+    last_chance: bool = False,
 ) -> str:
     """为强制 Edit 未产出源码 patch 的情况构造受限 fallback 会话。
 
@@ -225,15 +227,28 @@ def build_recovery_implementation_prompt(
         "No usable visible finding was produced by the previous session."
     )
 
+    phase_name = (
+        "empty-patch recovery last chance"
+        if last_chance
+        else "empty-patch recovery fallback"
+    )
+    budget_note = (
+        "- Earlier Recovery stages still produced no source patch, so the turns reserved "
+        "for regression repair are being reused as a final implementation attempt.\n"
+        if last_chance
+        else ""
+    )
+
     return (
         f"{base_prompt.rstrip()}\n\n"
-        "Current phase: empty-patch recovery fallback\n"
+        f"Current phase: {phase_name}\n"
         "Visible handoff from the previous implementation session\n"
         "<implementation_handoff>\n"
         f"{handoff}\n"
         "</implementation_handoff>\n"
         "- The mandatory Read-Edit gate did not produce an existing-source patch. Do not "
         "repeat searches or file reads already summarized in the handoff.\n"
+        f"{budget_note}"
         f"- You have at most {recovery_turns} turns to make a minimal concrete source "
         "change that addresses the issue.\n"
         "- Bash is disabled in this phase. Use only targeted Read, Grep, and Glob for "

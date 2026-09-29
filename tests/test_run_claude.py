@@ -653,10 +653,10 @@ def test_run_task_preserves_artifacts_when_total_budget_is_already_exhausted(
     assert trajectory["events"][-1]["event_type"] == "patch_validation"
 
 
-def test_scheduler_marks_only_baseline_pass_to_patched_fail_as_regression(
+def test_scheduler_marks_pass_to_fail_and_failure_signature_delta_as_regression(
     tmp_path: Path,
 ) -> None:
-    """基线已有失败不能误报成补丁回归，只有 pass→fail 才增加回归指标。"""
+    """除 pass→fail 外，已有失败集合上新增测试 ID 也必须判为回归。"""
 
     request = StructuredTestPlanRequest(
         status="generated",
@@ -666,7 +666,7 @@ def test_scheduler_marks_only_baseline_pass_to_patched_fail_as_regression(
     )
 
     class FakeSandbox:
-        """目标命令产生新失败，相邻命令在基线和 patch 上都保持失败。"""
+        """目标命令 pass→fail，相邻命令在原失败上新增一个失败测试。"""
 
         def run(
             self,
@@ -679,9 +679,24 @@ def test_scheduler_marks_only_baseline_pass_to_patched_fail_as_regression(
         ):
             is_target = command == request.target_argv
             exit_code = 0 if is_target and not apply_patch else 1
+            if exit_code == 0:
+                output = "1 passed\n"
+            elif is_target:
+                output = (
+                    "FAILED tests/test_target.py::test_bug - AssertionError\n"
+                )
+            elif apply_patch:
+                output = (
+                    "FAILED tests/test_neighbor.py::test_existing - AssertionError\n"
+                    "FAILED tests/test_neighbor.py::test_added - AssertionError\n"
+                )
+            else:
+                output = (
+                    "FAILED tests/test_neighbor.py::test_existing - AssertionError\n"
+                )
             return VisibleTestResult(
                 exit_code=exit_code,
-                output="passed\n" if exit_code == 0 else "failed\n",
+                output=output,
                 image="swebench/example:latest",
                 timed_out=False,
                 command_started=True,
@@ -703,17 +718,19 @@ def test_scheduler_marks_only_baseline_pass_to_patched_fail_as_regression(
 
     metrics = evidence.metrics()
     assert metrics["visible_test_comparisons"] == 2
-    assert metrics["visible_test_new_regressions"] == 1
-    assert metrics["visible_test_unchanged_baseline_failures"] == 1
+    assert metrics["visible_test_new_regressions"] == 2
+    assert metrics["visible_test_unchanged_baseline_failures"] == 0
+    assert metrics["visible_test_new_failure_signatures"] == 2
     assert evidence.has_new_regression is True
     assert _verification_policy(evidence) == (
         "verification_regression_repair",
         ("Read", "Edit"),
     )
     assert "Comparison: new_regression" in evidence.prompt_text()
-    assert "Comparison: baseline_failure_persists" in evidence.prompt_text()
+    assert "tests/test_neighbor.py::test_added" in evidence.prompt_text()
     assert "Comparison: new_regression" in evidence.repair_prompt_text()
-    assert "Comparison: baseline_failure_persists" not in evidence.repair_prompt_text()
+    # 聚焦 prompt 按计划顺序只交接第一条新增回归，避免两份失败互相稀释。
+    assert "tests/test_target.py::test_bug" in evidence.repair_prompt_text()
 
 
 def test_missing_plan_is_counted_and_blocks_verification() -> None:
@@ -1082,11 +1099,153 @@ def test_recovery_fallback_uses_only_budget_left_after_edit_gate(
     result = json.loads((run_path / "result.json").read_text(encoding="utf-8"))
     assert calls == ["implementation", "gate", "fallback"]
     assert runner_options[1]["turns"] == 2
-    assert runner_options[2]["turns"] == 8
+    assert runner_options[2]["turns"] == 5
     assert runner_options[1]["allow_bash"] is False
     assert runner_options[2]["allow_bash"] is False
     assert runner_options[1]["available_tools"] == ("Read", "Edit")
     assert "available_tools" not in runner_options[2]
     assert "recovery_edit_gate" in result["metrics"]["phases"]
     assert "recovery_fallback" in result["metrics"]["phases"]
+    assert result["patch_generated"] is True
+
+
+def test_recovery_new_failure_signature_enters_focused_repair_and_retests(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Recovery 新增失败测试 ID 后必须用保留 turns 聚焦修复并再次调度测试。"""
+
+    repository = tmp_path / "repository"
+    source = repository / "src" / "widget.py"
+    target_test = repository / "tests" / "test_widget.py"
+    regression_test = repository / "tests" / "test_neighbor.py"
+    source.parent.mkdir(parents=True)
+    target_test.parent.mkdir(parents=True)
+    source.write_text("value = 1\n", encoding="utf-8")
+    target_test.write_text("def test_widget(): pass\n", encoding="utf-8")
+    regression_test.write_text("def test_neighbor(): pass\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "base",
+        ],
+        check=True,
+    )
+    base_commit = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    calls: list[str] = []
+    runner_options: list[dict[str, object]] = []
+
+    class FakeAgent:
+        """gate 先产生带回归的 patch，聚焦阶段再完成窄修复。"""
+
+        def run(self, worktree, prompt):
+            if "Focused repair mode" in prompt:
+                calls.append("repair")
+                source.write_text("value = 3\n", encoding="utf-8")
+            elif "mandatory Read-Edit gate" in prompt:
+                calls.append("gate")
+                source.write_text("value = 2\n", encoding="utf-8")
+            else:
+                calls.append("implementation")
+            return _result()
+
+    class FakeSandbox:
+        """模拟 baseline 已失败，而 gate patch 又新增一个失败测试。"""
+
+        timeout_seconds = 120
+
+        def __init__(self, **kwargs):
+            pass
+
+        def resolve_image(self, instance_id):
+            return "swebench/example:latest"
+
+        def image_digest(self, image):
+            return "sha256:test"
+
+        def run(
+            self,
+            repository,
+            *,
+            instance_id,
+            base_commit,
+            command,
+            apply_patch,
+            timeout_seconds,
+        ):
+            output = "FAILED tests/test_widget.py::test_existing - AssertionError\n"
+            if (
+                apply_patch
+                and command[-1] == "tests/test_widget.py"
+                and source.read_text(encoding="utf-8") == "value = 2\n"
+            ):
+                output += (
+                    "FAILED tests/test_widget.py::test_added - AssertionError\n"
+                )
+            return VisibleTestResult(
+                exit_code=1,
+                output=output,
+                image="swebench/example:latest",
+                timed_out=False,
+                command_started=True,
+            )
+
+    def fake_runner(*args, **kwargs):
+        """记录 Recovery 三段的 turns 和聚焦阶段工具白名单。"""
+
+        runner_options.append(dict(kwargs))
+        return FakeAgent()
+
+    monkeypatch.setattr("scripts.run_claude._runner", fake_runner)
+    monkeypatch.setattr("scripts.run_claude.VisibleTestSandbox", FakeSandbox)
+    monkeypatch.setattr(
+        "scripts.run_claude.RuntimeFingerprintCollector.collect",
+        lambda self: {"schema_version": 1},
+    )
+    task = SWEbenchTask(
+        instance_id="owner__project-recovery-regression",
+        repo="owner/project",
+        base_commit=base_commit,
+        problem_statement="Fix widget behavior.",
+    )
+
+    run_path = run_claude_task(
+        task,
+        repository,
+        ExperimentConfig.load(PROJECT_ROOT / "configs" / "dev_v2.yaml"),
+        tmp_path / "runs",
+        base_url="http://localhost:11434",
+        workspace_base_commit=base_commit,
+    )
+
+    result = json.loads((run_path / "result.json").read_text(encoding="utf-8"))
+    phases = result["metrics"]["phases"]
+    assert calls == ["implementation", "gate", "repair"]
+    assert runner_options[1]["turns"] == 2
+    assert runner_options[2]["turns"] == 3
+    assert runner_options[2]["allow_bash"] is False
+    assert runner_options[2]["available_tools"] == ("Read", "Edit")
+    assert "scheduled_test_recovery" in phases
+    assert "recovery_regression_repair" in phases
+    assert "scheduled_test_recovery_final" in phases
+    assert phases["scheduled_test_recovery"]["visible_test_new_regressions"] == 1
+    assert (
+        phases["scheduled_test_recovery_final"]["visible_test_new_regressions"]
+        == 0
+    )
     assert result["patch_generated"] is True

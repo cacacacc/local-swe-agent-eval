@@ -64,6 +64,10 @@ def combine_phase_results(
     total_visible_test_executions = 0
     total_visible_test_valid_executions = 0
     total_visible_test_infrastructure_errors = 0
+    total_visible_test_baseline_failure_signatures = 0
+    total_visible_test_candidate_failure_signatures = 0
+    total_visible_test_new_failure_signatures = 0
+    total_visible_test_outcome_parser_failures = 0
     total_visible_test_passed = 0
     total_visible_test_baseline_executions = 0
     total_visible_test_baseline_passed = 0
@@ -128,6 +132,18 @@ def combine_phase_results(
         total_visible_test_infrastructure_errors += int(
             result.metrics.get("visible_test_infrastructure_errors", 0)
         )
+        total_visible_test_baseline_failure_signatures += int(
+            result.metrics.get("visible_test_baseline_failure_signatures", 0)
+        )
+        total_visible_test_candidate_failure_signatures += int(
+            result.metrics.get("visible_test_candidate_failure_signatures", 0)
+        )
+        total_visible_test_new_failure_signatures += int(
+            result.metrics.get("visible_test_new_failure_signatures", 0)
+        )
+        total_visible_test_outcome_parser_failures += int(
+            result.metrics.get("visible_test_outcome_parser_failures", 0)
+        )
         test_evidence_available = test_evidence_available or bool(
             result.metrics.get("test_evidence_available", False)
         )
@@ -188,6 +204,18 @@ def combine_phase_results(
         "visible_test_valid_executions": total_visible_test_valid_executions,
         "visible_test_infrastructure_errors": (
             total_visible_test_infrastructure_errors
+        ),
+        "visible_test_baseline_failure_signatures": (
+            total_visible_test_baseline_failure_signatures
+        ),
+        "visible_test_candidate_failure_signatures": (
+            total_visible_test_candidate_failure_signatures
+        ),
+        "visible_test_new_failure_signatures": (
+            total_visible_test_new_failure_signatures
+        ),
+        "visible_test_outcome_parser_failures": (
+            total_visible_test_outcome_parser_failures
         ),
         "test_evidence_available": test_evidence_available,
         "visible_test_passed": total_visible_test_passed,
@@ -544,6 +572,10 @@ class ClaudeCodeRunner:
             "visible_test_executions": 0,
             "visible_test_valid_executions": 0,
             "visible_test_infrastructure_errors": 0,
+            "visible_test_baseline_failure_signatures": 0,
+            "visible_test_candidate_failure_signatures": 0,
+            "visible_test_new_failure_signatures": 0,
+            "visible_test_outcome_parser_failures": 0,
             "test_evidence_available": False,
             "visible_test_passed": 0,
             "visible_test_baseline_executions": 0,

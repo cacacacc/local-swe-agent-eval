@@ -32,6 +32,7 @@ from agent.test_plan import (
     consume_test_plan,
     generate_repository_test_plan,
 )
+from agent.test_outcome import TestOutcome, parse_test_outcome
 from agent.test_sandbox import (
     TestSandboxError,
     VisibleTestResult,
@@ -394,8 +395,34 @@ class ScheduledTestExecution:
     error: str | None = None
 
     @property
+    def baseline_outcome(self) -> TestOutcome | None:
+        """解析 baseline 结果；调度前错误没有输出，因此返回 ``None``。"""
+
+        if self.baseline_result is None:
+            return None
+        return parse_test_outcome(self.argv, self.baseline_result)
+
+    @property
+    def candidate_outcome(self) -> TestOutcome | None:
+        """解析 candidate 结果；调度前错误没有输出，因此返回 ``None``。"""
+
+        if self.result is None:
+            return None
+        return parse_test_outcome(self.argv, self.result)
+
+    @property
+    def new_failure_signatures(self) -> frozenset[str]:
+        """返回 candidate 相对 baseline 新增的可定位失败测试。"""
+
+        baseline = self.baseline_outcome
+        candidate = self.candidate_outcome
+        if baseline is None or candidate is None:
+            return frozenset()
+        return candidate.failure_signatures - baseline.failure_signatures
+
+    @property
     def comparison(self) -> str:
-        """按 pass/fail 转换分类；只有 baseline pass → patched fail 算新回归。"""
+        """综合退出状态与失败签名差分，识别已有失败之上的新增回归。"""
 
         if (
             self.baseline_error is not None
@@ -406,15 +433,28 @@ class ScheduledTestExecution:
             or not self.result.evidence_valid
         ):
             return "comparison_unavailable"
-        baseline_passed = self.baseline_result.exit_code == 0
-        patched_passed = self.result.exit_code == 0
+        baseline = self.baseline_outcome
+        candidate = self.candidate_outcome
+        assert baseline is not None and candidate is not None
+        baseline_passed = baseline.status == "passed"
+        patched_passed = candidate.status == "passed"
         if baseline_passed and patched_passed:
             return "both_passed"
         if baseline_passed and not patched_passed:
             return "new_regression"
         if not baseline_passed and patched_passed:
             return "fixed_baseline_failure"
-        return "baseline_failure_persists"
+        if self.new_failure_signatures:
+            return "new_regression"
+        if (
+            baseline.status == candidate.status == "failed"
+            and baseline.reliable
+            and candidate.reliable
+        ):
+            return "baseline_failure_persists"
+        # 双方都非零但无法可靠提取失败测试时，宁可不给结论，也不能把 candidate
+        # 新增的收集错误或进程崩溃掩盖为“基线失败持续存在”。
+        return "comparison_unavailable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -477,6 +517,25 @@ class ScheduledTestEvidence:
             for result in (item.baseline_result, item.result)
             if result is not None
         )
+        baseline_failure_signatures = sum(
+            len(outcome.failure_signatures)
+            for item in self.executions
+            if (outcome := item.baseline_outcome) is not None
+        )
+        candidate_failure_signatures = sum(
+            len(outcome.failure_signatures)
+            for item in self.executions
+            if (outcome := item.candidate_outcome) is not None
+        )
+        new_failure_signatures = sum(
+            len(item.new_failure_signatures) for item in self.executions
+        )
+        outcome_parser_failures = sum(
+            outcome.status == "failed" and not outcome.reliable
+            for item in self.executions
+            for outcome in (item.baseline_outcome, item.candidate_outcome)
+            if outcome is not None
+        )
         rejected = self.request.status == "rejected" or any(
             item.baseline_error is not None
             or item.error is not None
@@ -514,6 +573,14 @@ class ScheduledTestEvidence:
             # 进一步排除 runner 缺失等环境错误，供新实验判断证据是否可信。
             "visible_test_valid_executions": valid_executions,
             "visible_test_infrastructure_errors": infrastructure_errors,
+            "visible_test_baseline_failure_signatures": (
+                baseline_failure_signatures
+            ),
+            "visible_test_candidate_failure_signatures": (
+                candidate_failure_signatures
+            ),
+            "visible_test_new_failure_signatures": new_failure_signatures,
+            "visible_test_outcome_parser_failures": outcome_parser_failures,
             "test_evidence_available": any(
                 item.comparison != "comparison_unavailable"
                 for item in self.executions
@@ -612,6 +679,8 @@ class ScheduledTestEvidence:
             block = [
                 f"[{execution.label}] argv: {list(execution.argv)!r}",
                 f"Comparison: {comparison}",
+                "New failure signatures: "
+                f"{sorted(execution.new_failure_signatures)!r}",
             ]
             if execution.baseline_error is not None:
                 block.append(f"Baseline could not run: {execution.baseline_error}")
@@ -626,6 +695,8 @@ class ScheduledTestEvidence:
                         f"Cache hit: {execution.baseline_result.cache_hit}",
                         "Infrastructure error: "
                         f"{execution.baseline_result.infrastructure_error}",
+                        "Failure signatures: "
+                        f"{sorted(execution.baseline_outcome.failure_signatures)!r}",
                         "Output:",
                         # 两条命令各有 baseline/patched 输出；再次按单块限长，避免
                         # 总证据截断时恰好丢掉位于中间的 patched target traceback。
@@ -648,6 +719,8 @@ class ScheduledTestEvidence:
                         f"Duration seconds: {execution.result.duration_seconds}",
                         f"Cache hit: {execution.result.cache_hit}",
                         f"Infrastructure error: {execution.result.infrastructure_error}",
+                        "Failure signatures: "
+                        f"{sorted(execution.candidate_outcome.failure_signatures)!r}",
                         "Output:",
                         truncate_output(execution.result.output, 2400).rstrip(),
                     )
@@ -817,6 +890,9 @@ def _scheduled_test_result(evidence: ScheduledTestEvidence) -> ClaudeCodeResult:
                 "label": execution.label,
                 "argv": list(execution.argv),
                 "comparison": execution.comparison,
+                "new_failure_signatures": sorted(
+                    execution.new_failure_signatures
+                ),
                 "baseline_error": execution.baseline_error,
                 "baseline_exit_code": (
                     execution.baseline_result.exit_code
@@ -846,6 +922,16 @@ def _scheduled_test_result(evidence: ScheduledTestEvidence) -> ClaudeCodeResult:
                 "baseline_infrastructure_error": (
                     execution.baseline_result.infrastructure_error
                     if execution.baseline_result is not None
+                    else None
+                ),
+                "baseline_failure_signatures": (
+                    sorted(execution.baseline_outcome.failure_signatures)
+                    if execution.baseline_outcome is not None
+                    else []
+                ),
+                "baseline_outcome_parser": (
+                    execution.baseline_outcome.parser
+                    if execution.baseline_outcome is not None
                     else None
                 ),
                 "error": execution.error,
@@ -885,6 +971,16 @@ def _scheduled_test_result(evidence: ScheduledTestEvidence) -> ClaudeCodeResult:
                 "candidate_infrastructure_error": (
                     execution.result.infrastructure_error
                     if execution.result is not None
+                    else None
+                ),
+                "candidate_failure_signatures": (
+                    sorted(execution.candidate_outcome.failure_signatures)
+                    if execution.candidate_outcome is not None
+                    else []
+                ),
+                "candidate_outcome_parser": (
+                    execution.candidate_outcome.parser
+                    if execution.candidate_outcome is not None
                     else None
                 ),
                 "duration_seconds": round(
@@ -1114,11 +1210,35 @@ def run_claude_task(
                     ),
                 )
                 edit_gate_turns = min(2, config.agent.verification_turns)
-                fallback_turns = config.agent.verification_turns - edit_gate_turns
+                # Recovery 不能把全部剩余 turns 都用于继续探索，否则即使父进程
+                # 立即证明 patch 引入新回归，也没有模型预算可以修复。默认 10 turns
+                # 因而稳定切成 2（Read→Edit）+ 5（fallback）+ 3（聚焦修复）。
+                regression_repair_turns = min(
+                    3,
+                    max(0, config.agent.verification_turns - edit_gate_turns),
+                )
+                fallback_turns = max(
+                    0,
+                    config.agent.verification_turns
+                    - edit_gate_turns
+                    - regression_repair_turns,
+                )
                 edit_gate_timeout = max(
                     1,
                     verification_timeout
                     * edit_gate_turns
+                    // config.agent.verification_turns,
+                )
+                fallback_timeout = max(
+                    1,
+                    verification_timeout
+                    * fallback_turns
+                    // config.agent.verification_turns,
+                )
+                regression_repair_timeout = max(
+                    1,
+                    verification_timeout
+                    * regression_repair_turns
                     // config.agent.verification_turns,
                 )
                 edit_gate_prompt = build_recovery_edit_gate_prompt(
@@ -1154,12 +1274,7 @@ def run_claude_task(
                     fallback_result = _runner(
                         config,
                         turns=fallback_turns,
-                        timeout_seconds=task_budget.limit(
-                            max(
-                                1,
-                                verification_timeout - edit_gate_timeout,
-                            )
-                        ),
+                        timeout_seconds=task_budget.limit(fallback_timeout),
                         base_url=base_url,
                         allow_bash=False,
                     ).run(repository, fallback_prompt)
@@ -1169,6 +1284,37 @@ def run_claude_task(
 
                 consume_test_plan(repository)
                 recovered_patch = session.collect_patch(repository)
+                repair_budget_available = regression_repair_turns > 0
+                if (
+                    not _patch_modifies_existing_source(recovered_patch)
+                    and repair_budget_available
+                ):
+                    # 前两段仍没有产品源码 patch 时，保留修复预算已无测试可修；此时
+                    # 才把最后 3 turns 降级为最终实现机会，避免预算被静默浪费。
+                    last_chance_prompt = build_recovery_implementation_prompt(
+                        prompt,
+                        recovery_turns=regression_repair_turns,
+                        max_file_read_lines=config.agent.max_file_read_lines,
+                        max_tool_output_chars=config.agent.max_tool_output_chars,
+                        implementation_handoff=recovery_handoff,
+                        last_chance=True,
+                    )
+                    last_chance_result = _runner(
+                        config,
+                        turns=regression_repair_turns,
+                        timeout_seconds=task_budget.limit(
+                            regression_repair_timeout
+                        ),
+                        base_url=base_url,
+                        allow_bash=False,
+                    ).run(repository, last_chance_prompt)
+                    phases.append(("recovery_last_chance", last_chance_result))
+                    task_budget.ensure_remaining()
+                    recovery_result = last_chance_result
+                    repair_budget_available = False
+                    consume_test_plan(repository)
+                    recovered_patch = session.collect_patch(repository)
+
                 recovery_request = generate_repository_test_plan(
                     repository,
                     repo=task.repo,
@@ -1197,6 +1343,71 @@ def run_claude_task(
                     )
                 )
                 task_budget.ensure_remaining()
+
+                if recovery_evidence.has_new_regression and repair_budget_available:
+                    # Recovery 产出 patch 后也必须形成“测试→修复→复测”闭环。这里
+                    # 复用普通 Verification 的聚焦 prompt，并在 CLI 层只开放
+                    # Read/Edit，防止有限的 3 turns 再次退回广泛搜索。
+                    repair_prompt = build_verification_phase_prompt(
+                        prompt,
+                        verification_turns=regression_repair_turns,
+                        max_file_read_lines=config.agent.max_file_read_lines,
+                        max_tool_output_chars=config.agent.max_tool_output_chars,
+                        candidate_patch=truncate_output(
+                            recovered_patch,
+                            config.agent.max_tool_output_chars,
+                        ),
+                        scheduled_test_evidence=truncate_output(
+                            recovery_evidence.repair_prompt_text(),
+                            config.agent.max_tool_output_chars,
+                        ),
+                        focused_new_regression=True,
+                    )
+                    repair_result = _runner(
+                        config,
+                        turns=regression_repair_turns,
+                        timeout_seconds=task_budget.limit(
+                            regression_repair_timeout
+                        ),
+                        base_url=base_url,
+                        allow_bash=False,
+                        available_tools=("Read", "Edit"),
+                    ).run(repository, repair_prompt)
+                    phases.append(("recovery_regression_repair", repair_result))
+                    task_budget.ensure_remaining()
+                    recovery_result = repair_result
+
+                    consume_test_plan(repository)
+                    recovered_patch = session.collect_patch(repository)
+                    final_recovery_request = generate_repository_test_plan(
+                        repository,
+                        repo=task.repo,
+                        patch=recovered_patch,
+                    )
+                    final_recovery_evidence = _execute_scheduled_test(
+                        repository,
+                        task=task,
+                        workspace_base_commit=patch_base_commit,
+                        sandbox=test_sandbox,
+                        request=final_recovery_request,
+                        candidate_patch=recovered_patch,
+                        cache=test_cache,
+                        target_timeout_seconds=(
+                            config.agent.visible_test_timeout_seconds
+                        ),
+                        regression_timeout_seconds=(
+                            config.agent.visible_regression_test_timeout_seconds
+                        ),
+                        task_budget=task_budget,
+                    )
+                    phases.append(
+                        (
+                            "scheduled_test_recovery_final",
+                            _scheduled_test_result(final_recovery_evidence),
+                        )
+                    )
+                    task_budget.ensure_remaining()
+
                 result = combine_phase_results(tuple(phases))
                 # 末尾测试 phase 只保存证据，不能掩盖 Recovery CLI 自身的失败；
                 # 首轮 Implementation 的失败则允许被成功 Recovery 覆盖。

@@ -1,4 +1,4 @@
-"""把 SWE-bench 官方 ``results.json`` 安全关联到一个本地 run。"""
+"""Safely associate the official SWE-bench ``results.json`` with a local run."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from tracking.evaluation_result import import_official_evaluation
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """声明显式路径和 harness 身份参数，避免根据目录名作不可靠推断。"""
+    """Declare explicit path and harness identity parameters, avoiding unreliable inference from directory names."""
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-path", type=Path, required=True)
@@ -20,7 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    """导入官方判定并输出被更新的 result 文件路径。"""
+    """Import the official verdict and print the updated result file path."""
 
     arguments = build_parser().parse_args()
     destination = import_official_evaluation(

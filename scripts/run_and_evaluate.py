@@ -1,4 +1,4 @@
-"""串行完成本地 Agent 求解、SWE-bench 官方评测和结果导回。"""
+"""Serially complete local Agent solving, official SWE-bench evaluation, and result import."""
 
 from __future__ import annotations
 
@@ -19,14 +19,14 @@ from tracking.evaluation_result import import_official_evaluation
 
 
 class AutomatedRunError(RuntimeError):
-    """当自动化流水线无法安全进入下一阶段时抛出。"""
+    """Raised when the automated pipeline cannot safely proceed to the next stage."""
 
 
 _SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 def _load_tasks(path: Path) -> SWEbenchLoader:
-    """按照安全快照的扩展名加载任务，不接受原始数据集的额外答案字段。"""
+    """Load tasks according to the safe snapshot extension; rejects the raw dataset's extra answer fields."""
 
     if path.suffix.lower() == ".jsonl":
         return SWEbenchLoader.from_jsonl(path)
@@ -42,7 +42,7 @@ def prediction_record(
     *,
     allow_empty: bool = False,
 ) -> dict[str, str]:
-    """读取 run patch 并构造 prediction；批量正式评测可显式保留空 patch。"""
+    """Read the run patch and build a prediction; formal batch evaluation may explicitly retain an empty patch."""
 
     patch_path = run_path / "patch.diff"
     try:
@@ -50,7 +50,7 @@ def prediction_record(
     except OSError as error:
         raise AutomatedRunError(f"cannot read generated patch {patch_path}: {error}") from error
     if not patch.strip() and not allow_empty:
-        # 空 patch 不能送入 harness 冒充有效候选；Agent 失败现场仍留在 run_path 中。
+        # An empty patch cannot be fed into the harness as a valid candidate; the Agent failure site remains in run_path.
         raise AutomatedRunError(
             f"agent generated no patch; official evaluation was not started: {run_path}"
         )
@@ -69,7 +69,7 @@ def write_prediction(
     *,
     allow_empty: bool = False,
 ) -> Path:
-    """从不可变 run patch 创建官方 harness 接受的单题 JSONL。"""
+    """Create the single-task JSONL accepted by the official harness from the immutable run patch."""
 
     prediction = prediction_record(
         run_path,
@@ -99,7 +99,7 @@ def build_harness_command(
     timeout_seconds: int,
     harness_run_id: str,
 ) -> list[str]:
-    """构造无 shell 插值的官方评测命令，确保 run ID 与单题过滤器显式固定。"""
+    """Build the official evaluation command without shell interpolation, ensuring the run ID and single-task filter are explicitly pinned."""
 
     command = [
         str(executable),
@@ -114,15 +114,15 @@ def build_harness_command(
         "--run-id",
         harness_run_id,
     ]
-    # 重复 --instance 是 SWE-bench CLI 的官方多题过滤方式；显式列出能够防止
-    # predictions 文件意外混入其他题目后扩大评测范围。
+    # Repeating --instance is SWE-bench CLI's official multi-task filter; listing them
+    # explicitly prevents the predictions file from accidentally mixing in other tasks and widening evaluation scope.
     for instance_id in instance_ids:
         command.extend(("--instance", instance_id))
     return command
 
 
 def run_harness(command: list[str], swebench_root: Path, log_path: Path) -> None:
-    """运行官方 harness，同时把输出显示给操作者并完整保存到 run artifact。"""
+    """Run the official harness while showing output to the operator and saving it fully to the run artifact."""
 
     lines: list[str] = []
     try:
@@ -151,7 +151,7 @@ def run_harness(command: list[str], swebench_root: Path, log_path: Path) -> None
 
 
 def run_pipeline(arguments: argparse.Namespace) -> Path:
-    """执行单题完整流水线，并返回已写入官方判定的 result 路径。"""
+    """Run the complete single-task pipeline and return the result path with the official verdict written in."""
 
     if not _SAFE_RUN_ID.fullmatch(arguments.run_id):
         raise AutomatedRunError("--run-id contains unsafe characters")
@@ -171,11 +171,11 @@ def run_pipeline(arguments: argparse.Namespace) -> Path:
         raise AutomatedRunError("evaluation workers must be positive")
 
     reporter.banner(
-        "Local SWE-bench 单题流水线",
+        "Local SWE-bench single-task pipeline",
         f"run={arguments.run_id}  instance={task.instance_id}  model={config.model.name}",
     )
-    reporter.stage(1, 4, "准备仓库并运行本地 Agent")
-    with reporter.activity("检查并按需下载 SWE-bench 测试镜像"):
+    reporter.stage(1, 4, "Prepare repository and run local Agent")
+    with reporter.activity("Check and download SWE-bench test images as needed"):
         prepare_visible_test_image(
             task,
             config,
@@ -185,12 +185,12 @@ def run_pipeline(arguments: argparse.Namespace) -> Path:
         config.project_root / config.storage.repository_cache,
         config.project_root / config.storage.workspaces / arguments.run_id,
     )
-    with reporter.activity("创建干净 worktree"):
+    with reporter.activity("Create clean worktree"):
         prepared = manager.prepare(
             task,
             allow_network=arguments.allow_network_preparation,
         )
-    with reporter.activity("Claude Code 求解"):
+    with reporter.activity("Claude Code solving"):
         run_path = run_claude_task(
             task,
             prepared.path,
@@ -200,7 +200,7 @@ def run_pipeline(arguments: argparse.Namespace) -> Path:
             workspace_base_commit=prepared.workspace_base_commit,
         )
 
-    reporter.stage(2, 4, "生成官方 prediction")
+    reporter.stage(2, 4, "Generate official prediction")
     prediction_path = write_prediction(run_path, task, config.model.name)
     reporter.line(f"  ✓ prediction={prediction_path}")
 
@@ -212,7 +212,7 @@ def run_pipeline(arguments: argparse.Namespace) -> Path:
     if not executable.is_file():
         raise AutomatedRunError(f"SWE-bench executable does not exist: {executable}")
 
-    reporter.stage(3, 4, "运行 SWE-bench Docker harness")
+    reporter.stage(3, 4, "Run SWE-bench Docker harness")
     command = build_harness_command(
         executable,
         dataset=arguments.swebench_dataset,
@@ -222,14 +222,14 @@ def run_pipeline(arguments: argparse.Namespace) -> Path:
         timeout_seconds=arguments.evaluation_timeout,
         harness_run_id=harness_run_id,
     )
-    with reporter.activity("官方 Docker 评测"):
+    with reporter.activity("Official Docker evaluation"):
         run_harness(command, swebench_root, run_path / "official_evaluation.log")
     report_path = swebench_root / "logs" / "evaluation" / harness_run_id / "results.json"
     if not report_path.is_file():
         raise AutomatedRunError(
             f"harness completed but official report is missing: {report_path}"
         )
-    reporter.stage(4, 4, "校验并导回官方结果")
+    reporter.stage(4, 4, "Validate and import official results")
     result_path = import_official_evaluation(
         run_path,
         report_path,
@@ -253,7 +253,7 @@ def run_pipeline(arguments: argparse.Namespace) -> Path:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """声明求解与官方评测所需参数；所有身份字段必须由操作者显式给出。"""
+    """Declare the parameters required for solving and official evaluation; all identity fields must be provided explicitly by the operator."""
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
@@ -272,7 +272,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    """运行自动化流水线并打印最终 result.json 路径。"""
+    """Run the automated pipeline and print the final result.json path."""
 
     result_path = run_pipeline(build_parser().parse_args())
     print(f"official_result={result_path}")

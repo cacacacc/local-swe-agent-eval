@@ -1,4 +1,4 @@
-"""对外导出经过严格校验的实验配置类型。"""
+"""Public exports for the strictly validated experiment configuration types."""
 
 from .config import (
     AgentSettings,

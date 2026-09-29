@@ -1,7 +1,8 @@
-"""使用固定模板为每道 SWE-bench 任务生成可审计 Prompt。
+"""Generate an auditable Prompt for each SWE-bench task from a fixed template.
 
-模板在构造时一次性验证，渲染时只接收 ``SWEbenchTask`` 的安全字段，确保不同
-任务之间只有题目数据变化，而实验指令保持一致。
+The template is validated once at construction time, and rendering accepts only the
+safe fields of ``SWEbenchTask``, ensuring that only the problem data varies between
+tasks while the experiment instructions stay identical.
 """
 
 from __future__ import annotations
@@ -13,11 +14,11 @@ from benchmark.task import SWEbenchTask
 
 
 class PromptTemplateError(ValueError):
-    """当 Prompt 模板为空、不可读或缺少必要占位符时抛出。"""
+    """Raised when the Prompt template is empty, unreadable, or missing required placeholders."""
 
 
 class PromptBuilder:
-    """加载并验证模板，只使用批准的任务字段完成渲染。"""
+    """Load and validate the template, then render using only approved task fields."""
 
     REQUIRED_PLACEHOLDERS = (
         "instance_id",
@@ -27,9 +28,9 @@ class PromptBuilder:
     )
 
     def __init__(self, template_text: str) -> None:
-        """规范化换行符并确认四个任务字段均有显式占位符。"""
+        """Normalize newlines and confirm that all four task fields have explicit placeholders."""
 
-        # 统一成 LF，避免 Windows/WSL 行尾差异改变 prompt hash。
+        # Normalize to LF so Windows/WSL line-ending differences do not change the prompt hash.
         normalized = template_text.replace("\r\n", "\n").replace("\r", "\n")
         if not normalized.strip():
             raise PromptTemplateError("prompt template cannot be empty")
@@ -46,7 +47,7 @@ class PromptBuilder:
 
     @classmethod
     def from_file(cls, path: Path | str) -> "PromptBuilder":
-        """从 UTF-8 文本文件读取模板，并把文件系统错误转换成领域错误。"""
+        """Read the template from a UTF-8 text file, converting filesystem errors into domain errors."""
 
         source = Path(path)
         try:
@@ -55,9 +56,10 @@ class PromptBuilder:
             raise PromptTemplateError(f"cannot read prompt template {source}: {error}") from error
 
     def build(self, task: SWEbenchTask) -> str:
-        """渲染单个任务，并保证结果恰好以一个换行符结束。"""
+        """Render a single task and guarantee the result ends with exactly one newline."""
 
-        # ``to_agent_payload`` 是唯一的数据入口，因此评测专用字段无法被替换进模板。
+        # ``to_agent_payload`` is the only data entry point, so evaluation-only fields
+        # cannot be substituted into the template.
         rendered = self._template.substitute(task.to_agent_payload())
         return f"{rendered.rstrip()}\n"
 
@@ -70,11 +72,13 @@ def build_implementation_phase_prompt(
     max_file_read_lines: int,
     max_tool_output_chars: int,
 ) -> str:
-    """为实现阶段追加补丁交付点和上下文预算护栏。
+    """Append the patch delivery point and context budget guardrails for the implementation phase.
 
-    Claude Code 暂不提供可靠的逐次 Read/Bash 输出硬上限，因此这里把限制写成
-    可审计的阶段协议。真实测试统一由父进程在候选补丁产生后调度，Implementation
-    不再承担容易受宿主环境误导的前置测试。
+    Claude Code does not yet offer a reliable per-call hard limit on Read/Bash output,
+    so these limits are written as an auditable phase protocol instead. Real tests are
+    always scheduled by the parent process after the candidate patch is produced;
+    Implementation no longer carries the up-front testing that is easily misled by the
+    host environment.
     """
 
     return (
@@ -107,7 +111,7 @@ def build_verification_phase_prompt(
     scheduled_test_evidence: str = "",
     focused_new_regression: bool = False,
 ) -> str:
-    """注入候选补丁和测试证据，按是否产生新回归构造修复 Prompt。"""
+    """Inject the candidate patch and test evidence, building the repair Prompt based on whether a new regression occurred."""
     patch_block = (
         "Candidate patch collected relative to the task base commit\n"
         "<candidate_patch>\n"
@@ -175,10 +179,12 @@ def build_recovery_read_gate_prompt(
     implementation_handoff: str,
     source_context: str,
 ) -> str:
-    """构造 Recovery 状态机的第一步，要求且只允许一次目标源码 Read。
+    """Build the first step of the Recovery state machine, requiring and allowing exactly one target-source Read.
 
-    父进程随后会校验实际工具事件；只有读取仓库内既有源码才会进入同一 session
-    的 Edit-only 第二步。Prompt 因而只负责给模型上下文，顺序由父进程实施。
+    The parent process subsequently validates the actual tool event; only a read of
+    existing in-repository source proceeds to the Edit-only second step in the same
+    session. The Prompt therefore only provides the model context, while the parent
+    process enforces the sequencing.
     """
 
     handoff = implementation_handoff.strip() or "No visible diagnosis was recorded."
@@ -207,7 +213,7 @@ def build_recovery_edit_gate_prompt(
     *,
     target_file: str,
 ) -> str:
-    """构造 Recovery 状态机的第二步，只允许 Edit 第一步读取的同一文件。"""
+    """Build the second step of the Recovery state machine, allowing only an Edit of the same file read in the first step."""
 
     return (
         f"{base_prompt.rstrip()}\n\n"
@@ -232,12 +238,14 @@ def build_recovery_implementation_prompt(
     implementation_handoff: str = "",
     last_chance: bool = False,
 ) -> str:
-    """为强制 Edit 未产出源码 patch 的情况构造受限 fallback 会话。
+    """Build a restricted fallback session for the case where the mandatory Edit produced no source patch.
 
-    Recovery 只复用原本预留给 Verification、但因没有候选补丁而无法使用的
-    turns，因此不会扩大单题模型预算。上一阶段只交接可见结论和工具调用摘要，
-    不传递 thinking 或大段工具输出。由于前置 gate 已真实尝试 Edit，本阶段只允许
-    使用剩余预算做最小范围的补充读取，再交付源码修改。
+    Recovery only reuses the turns originally reserved for Verification but unusable
+    because no candidate patch exists, so it does not enlarge the per-task model
+    budget. The previous stage hands off only visible findings and a tool-call summary,
+    never thinking or large tool outputs. Because the upstream gate already made a real
+    Edit attempt, this stage only allows minimal supplementary reads with the remaining
+    budget before delivering a source change.
     """
 
     handoff = implementation_handoff.strip() or (

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 
-# 启动与所有既有题集零重叠的 seed-43 固定 30 题。
+# Launch the frozen seed-43 set of 30 tasks with zero overlap against every existing task set.
 #
-# 环境准备、断点续跑和正式批处理逻辑全部复用经过测试的 seed42 入口；这里只
-# 固定 TASK_SEED，避免复制长脚本后两份启动边界逐渐分叉。
+# Environment prep, resume, and the official batch logic all reuse the tested seed42 entry point; here we only
+# pin TASK_SEED, so duplicating the long script does not let the two startup boundaries gradually diverge.
 
 set -Eeuo pipefail
 

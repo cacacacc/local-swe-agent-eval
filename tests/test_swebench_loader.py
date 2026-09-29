@@ -1,4 +1,4 @@
-"""验证任务加载、字段防泄漏、顺序保持和输入校验。"""
+"""Verify task loading, field-leak prevention, order preservation, and input validation."""
 
 import json
 
@@ -8,7 +8,7 @@ from benchmark.swebench_loader import DatasetFormatError, SWEbenchLoader
 from benchmark.task import SWEbenchTask
 
 
-# 故意加入秘密字段，用来证明安全任务对象只复制白名单字段。
+# Deliberately add a secret field to prove the safe task object only copies whitelisted fields.
 VALID_RECORD = {
     "instance_id": "example__project-123",
     "repo": "example/project",
@@ -21,7 +21,7 @@ VALID_RECORD = {
 
 
 def test_agent_payload_excludes_evaluation_only_fields() -> None:
-    """Agent payload 和对象 repr 都不能泄漏参考补丁或隐藏测试。"""
+    """Neither the Agent payload nor the object repr may leak the reference patch or hidden tests."""
 
     task = SWEbenchTask.from_record(VALID_RECORD)
 
@@ -35,7 +35,7 @@ def test_agent_payload_excludes_evaluation_only_fields() -> None:
 
 
 def test_jsonl_loader_preserves_order_and_selects_by_id(tmp_path) -> None:
-    """JSONL 加载保持原顺序，select 则遵循调用方指定的新顺序。"""
+    """JSONL loading keeps the original order, while select follows the new order the caller specifies."""
 
     second = {
         **VALID_RECORD,
@@ -62,7 +62,7 @@ def test_jsonl_loader_preserves_order_and_selects_by_id(tmp_path) -> None:
 
 
 def test_loader_rejects_duplicate_instance_ids() -> None:
-    """拒绝重复 ID，避免结果在按 ID 索引时发生覆盖。"""
+    """Reject duplicate IDs to avoid overwriting results when indexing by ID."""
 
     with pytest.raises(DatasetFormatError, match="duplicate instance_id"):
         SWEbenchLoader.from_records([VALID_RECORD, VALID_RECORD])
@@ -77,7 +77,7 @@ def test_loader_rejects_duplicate_instance_ids() -> None:
     ],
 )
 def test_loader_rejects_invalid_required_values(field, value) -> None:
-    """仓库、commit 和问题描述中的非法值必须在加载阶段失败。"""
+    """Illegal values in the repo, commit, and problem statement must fail at load time."""
 
     record = {**VALID_RECORD, field: value}
     with pytest.raises(DatasetFormatError):

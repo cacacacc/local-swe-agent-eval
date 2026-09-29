@@ -1,4 +1,4 @@
-"""验证任务快照只包含 Agent 白名单字段且保持冻结 ID 顺序。"""
+"""Verify that the task snapshot contains only Agent allow-listed fields and keeps the frozen ID order."""
 
 import json
 from pathlib import Path
@@ -11,7 +11,7 @@ from scripts.prepare_tasks import _load_instance_ids
 
 
 def test_load_instance_ids_rejects_duplicates(tmp_path: Path) -> None:
-    """重复任务会扭曲样本量，因此必须在下载数据前失败。"""
+    """Duplicate tasks distort the sample size, so they must fail before any data is downloaded."""
 
     path = tmp_path / "ids.json"
     path.write_text('["a", "a"]', encoding="utf-8")
@@ -21,7 +21,7 @@ def test_load_instance_ids_rejects_duplicates(tmp_path: Path) -> None:
 
 
 def test_safe_projection_excludes_reference_fields() -> None:
-    """即使原始记录含答案字段，序列化载荷也只能保留四个求解字段。"""
+    """Even if the raw record contains answer fields, the serialized payload may only keep the four solving fields."""
 
     record = {
         "instance_id": "owner__repo-1",

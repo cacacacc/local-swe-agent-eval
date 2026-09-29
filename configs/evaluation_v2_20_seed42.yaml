@@ -1,5 +1,5 @@
-# 第二组扩展评测配置：先排除 Dev、十题 Evaluation 和第一组 15 题，
-# 再对排序后的 472 个候选 instance ID 使用 seed 42 无放回抽取 20 题。
+# Second extended evaluation config: first exclude Dev, the ten-task Evaluation, and the first group of 15 tasks,
+# then draw 20 tasks without replacement using seed 42 over the 472 sorted candidate instance IDs.
 schema_version: 1
 
 experiment:
@@ -13,7 +13,7 @@ dataset:
   split: test
   tasks_file: experiments/evaluation_tasks_20_seed42.json
 
-# 保持模型不变，采用 30+10 双会话预算和父进程测试规划。
+# Keep the model unchanged, using the 30+10 dual-session budget and parent-process test planning.
 model:
   runtime: ollama
   name: qwen3.5:9b

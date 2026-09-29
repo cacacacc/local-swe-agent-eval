@@ -1,5 +1,5 @@
-# 第四组扩展评测配置：排除仓库中既有且互不重叠的 78 道固定题，
-# 再对排序后的 422 个候选 instance ID 使用 seed 43 无放回抽取 30 题。
+# Fourth extended evaluation config: exclude the existing 78 mutually non-overlapping fixed tasks in the repository,
+# then draw 30 tasks without replacement using seed 43 over the 422 sorted candidate instance IDs.
 schema_version: 1
 
 experiment:
@@ -13,9 +13,9 @@ dataset:
   split: test
   tasks_file: experiments/evaluation_tasks_30_seed43.json
 
-# 保持总计 40 turns：30 turns Implementation 加 10 turns Verification/Recovery。
-# 空 patch 的 Recovery 先经过仅开放 Edit 的 2-turn gate；父进程检测到
-# new_regression 时，Verification 只开放 Read/Edit 进行聚焦修复。
+# Keep the total at 40 turns: 30 turns for Implementation plus 10 turns for Verification/Recovery.
+# Recovery of an empty patch first goes through a 2-turn gate that only opens Edit; when the parent process detects
+# a new_regression, Verification opens only Read/Edit for focused fixing.
 model:
   runtime: ollama
   name: qwen3.5:9b
@@ -25,7 +25,7 @@ model:
 agent:
   framework: claude-code
   timeout_seconds: 5400
-  # 单题总墙钟最多 30 分钟，覆盖模型会话与父进程 Docker 测试的累计时间。
+  # The per-task total wall clock is at most 30 minutes, covering the cumulative time of model sessions and parent-process Docker tests.
   task_timeout_seconds: 1800
   max_turns: 40
   verification_turns: 10
@@ -33,7 +33,7 @@ agent:
   max_file_read_lines: 200
   max_tool_output_chars: 12000
   visible_test_sandbox: true
-  # 目标测试保留 15 分钟；范围更大的相邻回归测试最多等待 5 分钟。
+  # The target test keeps 15 minutes; the broader adjacent regression tests wait at most 5 minutes.
   visible_test_timeout_seconds: 900
   visible_regression_test_timeout_seconds: 300
   prompt_template: prompts/swe_agent_prompt_v2.txt

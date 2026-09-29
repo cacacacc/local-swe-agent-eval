@@ -1,4 +1,4 @@
-"""验证严格实验配置、Prompt 渲染、fingerprint 与 metadata 关联。"""
+"""Verify strict experiment configuration, prompt rendering, fingerprint, and metadata association."""
 
 import json
 from pathlib import Path
@@ -20,12 +20,12 @@ from experiment.config import ConfigurationError, ExperimentConfig
 from tracking.run_manager import RunManager
 
 
-# 从测试文件位置推导项目根目录，避免依赖执行 pytest 时的当前目录。
+# Derive the project root from the test file location to avoid depending on the current directory when running pytest.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def make_task() -> SWEbenchTask:
-    """构造包含美元符号的任务，确保 Template 不会二次展开题目文本。"""
+    """Build a task containing a dollar sign to ensure the Template does not expand the problem text a second time."""
 
     return SWEbenchTask(
         instance_id="example__project-789",
@@ -42,19 +42,19 @@ def make_task() -> SWEbenchTask:
 def test_repository_configs_have_expected_freeze_state(
     name, phase, expected_frozen
 ) -> None:
-    """Dev 配置保持可调，而正式 Evaluation 配置必须在开发完成后冻结。"""
+    """The Dev config stays adjustable, while the official Evaluation config must be frozen once development is complete."""
 
     config = ExperimentConfig.load(PROJECT_ROOT / "configs" / name)
 
     assert config.experiment.phase == phase
     assert config.experiment.configuration_frozen is expected_frozen
-    # 防止配置意外退回无法产生结构化 tool_use 的旧模型。
+    # Prevent the config from accidentally falling back to an older model that cannot produce structured tool_use.
     assert config.model.name == "qwen3.5:9b"
     assert config.model.max_output_tokens == 8192
     assert config.model.max_output_tokens < config.model.context_length
     assert config.agent.max_turns == 30
     assert config.network.formal_solving is False
-    # Dev 阶段保持单 worker 便于排错；正式评测使用两个 worker，以利用 CPU 且避免 20GB WSL 内存发生过度争用。
+    # The Dev phase keeps a single worker for easier debugging; the official evaluation uses two workers to use CPU capacity while avoiding excessive contention on 20GB of WSL memory.
     expected_workers = 1 if phase == "dev" else 2
     assert config.evaluation.max_workers == expected_workers
     assert config.evaluation.cache_level == "env"
@@ -64,7 +64,7 @@ def test_repository_configs_have_expected_freeze_state(
 
 
 def test_config_fingerprint_is_independent_of_yaml_key_order(tmp_path) -> None:
-    """仅调整 YAML 键顺序不应改变规范化内容的 fingerprint。"""
+    """Only reordering YAML keys should not change the fingerprint of the normalized content."""
 
     source = PROJECT_ROOT / "configs" / "dev.yaml"
     raw = yaml.safe_load(source.read_text(encoding="utf-8"))
@@ -78,7 +78,7 @@ def test_config_fingerprint_is_independent_of_yaml_key_order(tmp_path) -> None:
 
 
 def test_config_rejects_network_during_formal_solving(tmp_path) -> None:
-    """正式求解阶段启用网络必须被拒绝，以降低 solution leakage 风险。"""
+    """Enabling the network during the formal solving phase must be rejected to reduce the risk of solution leakage."""
 
     raw = yaml.safe_load(
         (PROJECT_ROOT / "configs" / "dev.yaml").read_text(encoding="utf-8")
@@ -94,7 +94,7 @@ def test_config_rejects_network_during_formal_solving(tmp_path) -> None:
 
 
 def test_model_test_planning_turns_are_rejected(tmp_path) -> None:
-    """父进程接管测试计划后，不得再为独立模型 planner 预留 turns。"""
+    """Once the parent process takes over test planning, no turns may be reserved for an independent model planner."""
 
     raw = yaml.safe_load(
         (PROJECT_ROOT / "configs" / "dev_v2.yaml").read_text(encoding="utf-8")
@@ -110,7 +110,7 @@ def test_model_test_planning_turns_are_rejected(tmp_path) -> None:
 
 
 def test_evaluation_config_is_frozen_for_formal_batch() -> None:
-    """完成 Dev 后，仓库中的 evaluation 配置必须允许正式十题脚本启动。"""
+    """After Dev is complete, the repository's evaluation config must allow the official ten-task script to start."""
 
     config = ExperimentConfig.load(PROJECT_ROOT / "configs" / "evaluation.yaml")
 
@@ -118,7 +118,7 @@ def test_evaluation_config_is_frozen_for_formal_batch() -> None:
 
 
 def test_dev_v2_reserves_an_independent_verification_session() -> None:
-    """新架构必须保留验证 turns 和上下文护栏，同时不得修改正式基线配置。"""
+    """The new architecture must keep verification turns and context guardrails while leaving the official baseline config unchanged."""
 
     config = ExperimentConfig.load(PROJECT_ROOT / "configs" / "dev_v2.yaml")
 
@@ -140,7 +140,7 @@ def test_dev_v2_reserves_an_independent_verification_session() -> None:
 
 
 def test_evaluation_v2_is_frozen_as_a_separate_ablation() -> None:
-    """架构 v2 十题配置必须冻结，但不得覆盖原正式基线的实验身份。"""
+    """The architecture v2 ten-task config must be frozen, but must not override the experimental identity of the original official baseline."""
 
     baseline = ExperimentConfig.load(PROJECT_ROOT / "configs" / "evaluation.yaml")
     ablation = ExperimentConfig.load(PROJECT_ROOT / "configs" / "evaluation_v2.yaml")
@@ -159,7 +159,7 @@ def test_evaluation_v2_is_frozen_as_a_separate_ablation() -> None:
 
 @pytest.mark.parametrize("task_count", [15, 20, 30])
 def test_extended_evaluation_v2_configs_are_frozen_and_sized(task_count: int) -> None:
-    """扩展评测必须冻结，并让配置名称、任务清单和声明规模保持一致。"""
+    """Extended evaluations must be frozen, and the config name, task list, and declared size must stay consistent."""
 
     config = ExperimentConfig.load(
         PROJECT_ROOT / "configs" / f"evaluation_v2_{task_count}_seed42.yaml"
@@ -175,7 +175,7 @@ def test_extended_evaluation_v2_configs_are_frozen_and_sized(task_count: int) ->
 
 
 def test_seed43_tasks_are_frozen_and_disjoint_from_every_existing_set() -> None:
-    """新 30 题必须冻结且不复用仓库中任何既有 Dev/Evaluation instance。"""
+    """The new 30 tasks must be frozen and must not reuse any existing Dev/Evaluation instance in the repository."""
 
     config = ExperimentConfig.load(
         PROJECT_ROOT / "configs" / "evaluation_v2_30_seed43.yaml"
@@ -197,7 +197,7 @@ def test_seed43_tasks_are_frozen_and_disjoint_from_every_existing_set() -> None:
 
 
 def test_phase_prompts_reanchor_task_and_enforce_delivery_boundaries() -> None:
-    """两个独立会话都必须携带原任务，且分别强调交付补丁和验证修复。"""
+    """Both independent sessions must carry the original task and separately emphasize delivering a patch and verifying the repair."""
 
     base = "instance_id: example__repo-1\nProblem: preserve semantics\n"
     implementation = build_implementation_phase_prompt(
@@ -271,7 +271,7 @@ def test_phase_prompts_reanchor_task_and_enforce_delivery_boundaries() -> None:
 
 
 def test_dev_config_cannot_be_used_as_formal_evaluation() -> None:
-    """可继续调参的 Dev 配置仍不得绕过正式评测冻结边界。"""
+    """A Dev config that may still be tuned must not bypass the formal evaluation freeze boundary."""
 
     config = ExperimentConfig.load(PROJECT_ROOT / "configs" / "dev.yaml")
 
@@ -280,7 +280,7 @@ def test_dev_config_cannot_be_used_as_formal_evaluation() -> None:
 
 
 def test_prompt_builder_renders_only_safe_task_fields() -> None:
-    """Prompt 应包含安全任务字段、固定约束和规范化结尾换行。"""
+    """The prompt should contain safe task fields, fixed constraints, and a normalized trailing newline."""
 
     config = ExperimentConfig.load(PROJECT_ROOT / "configs" / "dev.yaml")
     prompt = PromptBuilder.from_file(config.prompt_template_path).build(make_task())
@@ -293,14 +293,14 @@ def test_prompt_builder_renders_only_safe_task_fields() -> None:
 
 
 def test_prompt_builder_requires_all_placeholders() -> None:
-    """缺少任一必要任务占位符的模板必须在构造时失败。"""
+    """A template missing any required task placeholder must fail at construction time."""
 
     with pytest.raises(PromptTemplateError, match="missing placeholder"):
         PromptBuilder("Only ${instance_id}")
 
 
 def test_run_metadata_contains_configuration_fingerprint(tmp_path) -> None:
-    """每次运行的 metadata 必须关联准确配置 fingerprint 和网络策略。"""
+    """Each run's metadata must associate the exact configuration fingerprint and network policy."""
 
     config = ExperimentConfig.load(PROJECT_ROOT / "configs" / "dev.yaml")
     task = make_task()

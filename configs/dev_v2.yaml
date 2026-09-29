@@ -1,4 +1,4 @@
-# 架构改进实验使用独立 Dev 配置；原 evaluation.yaml 对应已完成的正式基线，禁止改写。
+# The architecture-improvement experiment uses a separate Dev config; the original evaluation.yaml corresponds to a completed formal baseline and must not be modified.
 schema_version: 1
 
 experiment:
@@ -7,35 +7,35 @@ experiment:
   random_seed: 42
   configuration_frozen: false
 
-# 沿用原三题 Dev Set，便于把架构变化与既有运行做可比分析。
+# Reuse the original three-task Dev Set so architecture changes can be compared against existing runs.
 dataset:
   name: princeton-nlp/SWE-bench_Verified
   split: test
   tasks_file: experiments/dev_tasks.json
 
-# 模型本身保持不变，将结果差异主要归因于 Agent 编排而不是模型替换。
+# Keep the model itself unchanged, attributing result differences mainly to Agent orchestration rather than model replacement.
 model:
   runtime: ollama
   name: qwen3.5:9b
   context_length: 32768
   max_output_tokens: 8192
 
-# 40 是硬上限：30 turns 实现、父进程确定性规划并运行测试、10 turns 验证和修复。
-# 文件与输出限制先作为可审计 Prompt 协议，后续再根据 Dev 轨迹决定是否增加 CLI hook 硬限制。
+# 40 is the hard ceiling: 30 turns for implementation, deterministic parent-process test planning and running, and 10 turns for verification and fixing.
+# File and output limits start as an auditable Prompt protocol; later, based on Dev trajectories, decide whether to add CLI hook hard limits.
 agent:
   framework: claude-code
   timeout_seconds: 5400
-  # Dev 与正式 v2 使用相同的 30 分钟单题总墙钟边界。
+  # Dev and the formal v2 use the same 30-minute total wall-clock boundary per task.
   task_timeout_seconds: 1800
   max_turns: 40
   verification_turns: 10
   test_planning_turns: 0
   max_file_read_lines: 200
   max_tool_output_chars: 12000
-  # Agent 只能把自己的 patch 放进无网络官方镜像，不能接触 hidden test patch。
+  # The Agent can only put its own patch into the offline official image and cannot touch the hidden test patch.
   visible_test_sandbox: true
   visible_test_timeout_seconds: 900
-  # 相邻回归通常比目标测试更宽，单独限制为 5 分钟。
+  # Adjacent regression tests are usually broader than the target test, so they are separately limited to 5 minutes.
   visible_regression_test_timeout_seconds: 300
   prompt_template: prompts/swe_agent_prompt_v2.txt
 

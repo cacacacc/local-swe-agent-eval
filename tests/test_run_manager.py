@@ -1,4 +1,4 @@
-"""验证通用运行产物对超时和补丁规模的结构化分类。"""
+"""Verify the structured classification of generic run artifacts by timeout and patch size."""
 
 import json
 from pathlib import Path
@@ -9,7 +9,7 @@ from tracking.run_manager import RunManager
 
 
 def run_git(path: Path, *arguments: str) -> str:
-    """在临时仓库执行 Git，用于构造 Agent 已提交变更的真实场景。"""
+    """Run Git in a temporary repo to build a realistic scenario where the Agent has committed changes."""
 
     result = subprocess.run(
         ["git", "-C", str(path), *arguments],
@@ -21,7 +21,7 @@ def run_git(path: Path, *arguments: str) -> str:
 
 
 def test_collect_patch_includes_agent_commits_and_untracked_files(tmp_path: Path) -> None:
-    """Agent 自行 commit 后仍须导出相对 base_commit 的完整 patch，防止有效修复丢失。"""
+    """After the Agent commits on its own, the full patch relative to base_commit must still be exported so valid fixes are not lost."""
 
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -64,7 +64,7 @@ def test_collect_patch_includes_agent_commits_and_untracked_files(tmp_path: Path
 def test_collect_patch_excludes_generated_environments_but_keeps_source(
     tmp_path: Path,
 ) -> None:
-    """任务内虚拟环境和缓存不能污染 prediction，真实源码修改仍必须保留。"""
+    """In-task virtualenvs and caches must not pollute the prediction, while real source changes must still be kept."""
 
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -108,7 +108,7 @@ def test_collect_patch_excludes_generated_environments_but_keeps_source(
 
 
 def test_finalize_classifies_timeout_and_counts_changed_lines(tmp_path: Path) -> None:
-    """退出码 124 必须归类为 timeout，且补丁规模不能统计 diff header。"""
+    """Exit code 124 must be classified as a timeout, and the patch size must not count the diff header."""
 
     task = SWEbenchTask(
         instance_id="owner__repo-1",

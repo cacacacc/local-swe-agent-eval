@@ -1,8 +1,10 @@
-"""在 SWE-bench 官方 instance 镜像中运行仓库可见测试。
+"""Run repository-visible tests inside the official SWE-bench instance image.
 
-沙箱只把 Agent 当前 Git patch 应用到镜像自带的 ``/testbed``，不注入官方
-``test_patch`` 或评测脚本。容器禁用网络并在每次命令后删除，因此测试依赖与宿主
-调度仓库的虚拟环境完全隔离，也不会把测试产生的文件写回 Agent worktree。
+The sandbox only applies the Agent's current Git patch to the image's bundled
+``/testbed``; it never injects the official ``test_patch`` or evaluation scripts. The
+container has networking disabled and is removed after each command, so test
+dependencies are fully isolated from the host scheduler's virtual environment, and
+files produced by tests are never written back into the Agent worktree.
 """
 
 from __future__ import annotations
@@ -20,12 +22,12 @@ from tracking.run_manager import patch_pathspecs
 
 
 class TestSandboxError(RuntimeError):
-    """当镜像缺失、Git patch 无法生成或 Docker 无法启动时抛出。"""
+    """Raised when the image is missing, the Git patch cannot be produced, or Docker cannot start."""
 
 
 @dataclass(frozen=True, slots=True)
 class VisibleTestResult:
-    """一次可见测试的启动证据、耗时、缓存状态和实际镜像。"""
+    """Startup evidence, duration, cache status, and actual image for one visible test run."""
 
     exit_code: int
     output: str
@@ -38,13 +40,13 @@ class VisibleTestResult:
 
     @property
     def evidence_valid(self) -> bool:
-        """仅在测试命令真实启动且 runner 基础设施可用时返回 ``True``。"""
+        """Return ``True`` only when the test command actually started and the runner infrastructure is available."""
 
         return self.command_started and self.infrastructure_error is None
 
 
 def image_candidates(instance_id: str) -> tuple[str, str]:
-    """返回本地构建名和 Docker Hub 发布名，顺序优先复用本地镜像。"""
+    """Return the local build name and the Docker Hub release name, in an order that prefers reusing the local image."""
 
     normalized = instance_id.lower()
     local = f"sweb.eval.x86_64.{normalized}:latest"
@@ -53,7 +55,7 @@ def image_candidates(instance_id: str) -> tuple[str, str]:
 
 
 def truncate_output(output: str, maximum_chars: int) -> str:
-    """保留输出开头和末尾，既显示启动错误也保留最终测试摘要。"""
+    """Keep the head and tail of the output, so both startup errors and the final test summary remain visible."""
 
     if maximum_chars <= 0:
         raise ValueError("maximum_chars must be positive")
@@ -74,12 +76,14 @@ def _detect_infrastructure_error(
     command_started: bool,
     timed_out: bool,
 ) -> str | None:
-    """识别测试框架未安装或入口不存在，而不吞掉普通测试失败。
+    """Detect a missing test framework or a nonexistent entry point without swallowing ordinary test failures.
 
-    这里只接受与启动命令直接相关的窄匹配。测试代码内部任意依赖的
-    ``ModuleNotFoundError`` 可能是候选 patch 引入的真实回归，不能笼统归为环境
-    故障；当前重点识别曾让 SymPy 产生假证据的 pytest runner 缺失，以及解释器或
-    runner 脚本根本无法执行的情况。
+    Only narrow matches directly related to the launched command are accepted here. A
+    ``ModuleNotFoundError`` for an arbitrary dependency inside the test code may be a
+    real regression introduced by the candidate patch and must not be broadly labeled
+    an environment fault; the current focus is the missing pytest runner that once
+    produced false evidence for SymPy, plus cases where the interpreter or runner
+    script simply cannot execute.
     """
 
     if not command_started or timed_out or exit_code == 0:
@@ -108,7 +112,7 @@ def _detect_infrastructure_error(
 
 
 class VisibleTestSandbox:
-    """使用 Docker CLI 创建无网络、一次性的仓库测试容器。"""
+    """Create an offline, one-shot repository test container using the Docker CLI."""
 
     def __init__(
         self,
@@ -117,7 +121,7 @@ class VisibleTestSandbox:
         max_output_chars: int,
         docker_executable: str = "docker",
     ) -> None:
-        """验证资源边界；镜像只允许来自固定 SWE-bench 命名规则。"""
+        """Validate resource bounds; only images from the fixed SWE-bench naming scheme are allowed."""
 
         if timeout_seconds <= 0 or max_output_chars <= 0:
             raise ValueError("test timeout and output limit must be positive")
@@ -126,7 +130,7 @@ class VisibleTestSandbox:
         self.docker_executable = docker_executable
 
     def resolve_image(self, instance_id: str) -> str:
-        """只检查本地镜像，不在正式求解期间隐式联网拉取。"""
+        """Check only local images, never implicitly pulling over the network during a formal solve."""
 
         for image in image_candidates(instance_id):
             result = subprocess.run(
@@ -144,10 +148,11 @@ class VisibleTestSandbox:
         )
 
     def ensure_image(self, instance_id: str, *, allow_pull: bool) -> str:
-        """复用本地镜像，或仅在明确的环境准备阶段自动拉取官方镜像。
+        """Reuse the local image, or auto-pull the official image only during an explicit environment-preparation phase.
 
-        ``allow_pull`` 必须由命令行的 ``--allow-network-preparation`` 传入；Agent
-        求解过程中只调用 ``resolve_image``，因此无法借此绕过离线实验边界。
+        ``allow_pull`` must come from the command line's ``--allow-network-preparation``;
+        the Agent solve process only calls ``resolve_image``, so it cannot use this to
+        bypass the offline experiment boundary.
         """
 
         try:
@@ -168,11 +173,12 @@ class VisibleTestSandbox:
         if completed.returncode != 0:
             detail = completed.stderr.strip() or completed.stdout.strip() or "no output"
             raise TestSandboxError(f"cannot pull SWE-bench image {remote}: {detail}")
-        # pull 成功后再次 inspect，避免把 Docker 的零退出码直接当作镜像可用证据。
+        # Inspect again after a successful pull so Docker's zero exit code is not
+        # taken directly as evidence that the image is usable.
         return self.resolve_image(instance_id)
 
     def image_digest(self, image: str) -> str:
-        """读取本地 immutable image ID，供运行 metadata 固定实际测试环境。"""
+        """Read the local immutable image ID so run metadata pins the actual test environment."""
 
         result = subprocess.run(
             [
@@ -205,11 +211,13 @@ class VisibleTestSandbox:
         apply_patch: bool = True,
         timeout_seconds: float | None = None,
     ) -> VisibleTestResult:
-        """在隔离镜像中执行 argv，并由调用方决定是否应用候选 patch。
+        """Execute the argv in the isolated image, letting the caller decide whether to apply the candidate patch.
 
-        ``apply_patch=False`` 直接测试官方 instance 镜像中的基线 checkout，供父
-        进程与随后 patched 结果比较。调用方可用 ``timeout_seconds`` 收紧单次命令
-        预算；省略时沿用沙箱默认值，且绝不允许覆盖值扩大默认安全边界。
+        ``apply_patch=False`` tests the baseline checkout in the official instance
+        image directly, for the parent process to compare against the subsequent
+        patched result. The caller may tighten the per-command budget with
+        ``timeout_seconds``; when omitted, the sandbox default applies, and an override
+        value must never enlarge the default safety boundary.
         """
 
         repository_path = Path(repository).resolve()
@@ -235,8 +243,10 @@ class VisibleTestSandbox:
             else ""
         )
         container_name = self._container_name(instance_id)
-        # 唯一标记只在 git apply 成功之后、exec 测试之前输出。Docker 返回结果但
-        # 缺少该标记时，调度器不能把镜像或补丁准备失败误算成真实测试执行。
+        # The unique marker is printed only after git apply succeeds and before the
+        # test is exec'd. When Docker returns a result but this marker is absent, the
+        # scheduler must not mistake an image or patch-preparation failure for a real
+        # test execution.
         started_marker = f"__LOCAL_SWE_TEST_STARTED_{uuid.uuid4().hex}__"
         with tempfile.TemporaryDirectory(prefix="local-swe-visible-test-") as directory:
             patch_path = Path(directory) / "agent.patch"
@@ -262,7 +272,8 @@ class VisibleTestSandbox:
                 image,
                 "bash",
                 "-lc",
-                # 命令参数通过 "$@" 原样传递，不把 issue 文本或 argv 拼接为 shell。
+                # Command arguments are passed verbatim through "$@" so the issue text
+                # or argv is never concatenated into a shell.
                 (
                     "cd /testbed && "
                     "([ ! -s /tmp/agent.patch ] || "
@@ -297,8 +308,9 @@ class VisibleTestSandbox:
                 )
                 output += f"\nvisible test timed out after {effective_timeout:g}s\n"
             finally:
-                # timeout 时 docker 客户端可能先退出，必须按不可猜测的 UUID 名称清理
-                # 精确容器，防止后台测试继续占用内存和 CPU。
+                # On timeout the docker client may exit first, so clean up the exact
+                # container by its unguessable UUID name, preventing a background test
+                # from continuing to consume memory and CPU.
                 subprocess.run(
                     [self.docker_executable, "rm", "--force", container_name],
                     stdout=subprocess.DEVNULL,
@@ -328,7 +340,7 @@ class VisibleTestSandbox:
 
     @staticmethod
     def _collect_patch(repository: Path, base_commit: str) -> str:
-        """收集 committed、tracked 与 untracked 修改；基线测试允许空 patch。"""
+        """Collect committed, tracked, and untracked modifications; an empty patch is allowed for baseline tests."""
 
         add = subprocess.run(
             [
@@ -373,7 +385,7 @@ class VisibleTestSandbox:
 
     @staticmethod
     def _container_name(instance_id: str) -> str:
-        """生成不会与正式 harness 或并发测试冲突的单次容器名。"""
+        """Generate a one-shot container name that cannot collide with the formal harness or concurrent tests."""
 
         safe_id = re.sub(r"[^a-z0-9_.-]+", "-", instance_id.lower()).strip("-.")
         return f"local-swe-visible-{safe_id[:40]}-{uuid.uuid4().hex[:12]}"

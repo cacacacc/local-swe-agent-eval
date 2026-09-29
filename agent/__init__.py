@@ -1,4 +1,4 @@
-"""对外导出实验流水线使用的 Agent runner 与 Prompt 构建器。"""
+"""Exports the Agent runners and Prompt builders used by the experiment pipeline."""
 
 from .mock_runner import MockAgentResult, MockAgentRunner, ObservableEvent
 from .prompt_builder import PromptBuilder, PromptTemplateError

@@ -1,4 +1,4 @@
-"""对外导出可复现实验的运行产物存储接口。"""
+"""Public exports for the run-artifact storage interface of reproducible experiments."""
 
 from .run_manager import RunArtifactError, RunManager, RunSession
 

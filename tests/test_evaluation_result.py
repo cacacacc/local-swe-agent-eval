@@ -1,4 +1,4 @@
-"""验证官方评测结果导入的身份校验、审计字段和防覆盖边界。"""
+"""Verify identity validation, audit fields, and anti-overwrite boundaries when importing official evaluation results."""
 
 import hashlib
 import json
@@ -10,7 +10,7 @@ from tracking.evaluation_result import EvaluationImportError, import_official_ev
 
 
 def write_json(path: Path, value: object) -> bytes:
-    """用稳定格式写入测试 JSON，并返回用于核对来源哈希的原始字节。"""
+    """Write test JSON in a stable format and return the raw bytes used to verify the source hash."""
 
     raw = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
     path.write_bytes(raw)
@@ -18,7 +18,7 @@ def write_json(path: Path, value: object) -> bytes:
 
 
 def make_run_and_report(tmp_path: Path) -> tuple[Path, Path, bytes]:
-    """构造尚未导入官方判定的 run，以及 resolved 的单题 harness 报告。"""
+    """Build a run that has not yet imported an official verdict, and a single-task harness report marked resolved."""
 
     run_path = tmp_path / "run" / "owner__repo-1"
     run_path.mkdir(parents=True)
@@ -41,7 +41,7 @@ def make_run_and_report(tmp_path: Path) -> tuple[Path, Path, bytes]:
 
 
 def test_import_records_resolved_result_and_report_hash(tmp_path: Path) -> None:
-    """resolved 判定必须连同 harness 身份和原始报告哈希写入运行产物。"""
+    """A resolved verdict must be written to the run artifact together with the harness identity and the raw report hash."""
 
     run_path, report_path, raw_report = make_run_and_report(tmp_path)
 
@@ -61,7 +61,7 @@ def test_import_records_resolved_result_and_report_hash(tmp_path: Path) -> None:
 
 
 def test_import_rejects_report_for_another_instance(tmp_path: Path) -> None:
-    """报告未提交当前 instance 时必须失败，避免把别题结果错误关联到该 run。"""
+    """A report that does not submit the current instance must fail, to avoid wrongly associating another task's result with this run."""
 
     run_path, report_path, _ = make_run_and_report(tmp_path)
     report = json.loads(report_path.read_text(encoding="utf-8"))
@@ -78,7 +78,7 @@ def test_import_rejects_report_for_another_instance(tmp_path: Path) -> None:
 
 
 def test_import_refuses_to_overwrite_official_result(tmp_path: Path) -> None:
-    """同一 run 的官方判定一旦落盘就不可被另一次导入静默替换。"""
+    """Once an official verdict for a run has been written, another import must not silently replace it."""
 
     run_path, report_path, _ = make_run_and_report(tmp_path)
     arguments = {
@@ -94,7 +94,7 @@ def test_import_refuses_to_overwrite_official_result(tmp_path: Path) -> None:
 def test_unresolved_test_result_takes_priority_over_ambiguous_diagnostic(
     tmp_path: Path,
 ) -> None:
-    """真实测试失败与启发式诊断重叠时必须归为 unresolved，防止误报评测错误。"""
+    """When a real test failure overlaps with a heuristic diagnostic, it must be classified as unresolved to avoid misreporting an evaluation error."""
 
     run_path, report_path, _ = make_run_and_report(tmp_path)
     report = json.loads(report_path.read_text(encoding="utf-8"))

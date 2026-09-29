@@ -1,7 +1,7 @@
-"""使用本地 Ollama 驱动 Claude Code，完成一道已准备的 SWE-bench 任务。
+"""Use a local Ollama to drive Claude Code and solve a prepared SWE-bench task.
 
-输入任务文件必须是经过 ``SWEbenchLoader`` 安全投影的 JSON/JSONL，不能直接把
-包含 gold patch 或 test patch 的原始数据记录传给本脚本。
+The input task file must be JSON/JSONL safely projected through ``SWEbenchLoader``; raw data
+records containing the gold patch or test patch must not be passed directly to this script.
 """
 
 from __future__ import annotations
@@ -78,18 +78,18 @@ _SOURCE_SUFFIXES = {
 
 
 class TaskBudgetExhausted(RuntimeError):
-    """单题总墙钟预算耗尽；调用方仍需保存已经形成的 patch 和轨迹。"""
+    """The per-task total wall-clock budget is exhausted; the caller must still save the patch and trajectory already produced."""
 
 
 @dataclass(frozen=True, slots=True)
 class _TaskBudget:
-    """用单调时钟把分散的模型与 Docker 超时约束在同一截止时间内。"""
+    """Use a monotonic clock to constrain the scattered model and Docker timeouts under a single deadline."""
 
     deadline_monotonic: float | None
 
     @classmethod
     def start(cls, timeout_seconds: int) -> "_TaskBudget":
-        """从当前时刻启动预算；0 是旧配置使用的兼容关闭值。"""
+        """Start the budget from the current moment; 0 is the compatibility off value used by older configs."""
 
         deadline = (
             time.monotonic() + timeout_seconds if timeout_seconds > 0 else None
@@ -97,7 +97,7 @@ class _TaskBudget:
         return cls(deadline_monotonic=deadline)
 
     def limit(self, requested_seconds: float) -> float:
-        """返回不越过总截止时间的子阶段预算，耗尽时立即中止调度。"""
+        """Return a sub-phase budget that never crosses the total deadline, aborting scheduling immediately when exhausted."""
 
         if requested_seconds <= 0:
             raise ValueError("requested timeout must be positive")
@@ -106,11 +106,11 @@ class _TaskBudget:
         remaining = self.deadline_monotonic - time.monotonic()
         if remaining <= 0:
             raise TaskBudgetExhausted("task wall-clock budget exhausted")
-        # subprocess 接受浮点秒；保留毫秒级余量可避免不足一秒时人为再放宽一秒。
+        # subprocess accepts fractional seconds; keeping a millisecond margin avoids artificially rounding up by one second when less than a second remains.
         return min(requested_seconds, max(0.001, remaining))
 
     def ensure_remaining(self) -> None:
-        """阶段结束后阻止下一个模型或 Docker 进程越过单题截止时间。"""
+        """After a phase ends, prevent the next model or Docker process from crossing the per-task deadline."""
 
         if (
             self.deadline_monotonic is not None
@@ -135,7 +135,7 @@ def _runner(
     resume_session: bool = False,
     persist_session: bool = False,
 ) -> ClaudeCodeRunner:
-    """按阶段预算构造 Claude Code，并传递工具及临时会话边界。"""
+    """Construct Claude Code according to the phase budget and pass tool and temporary-session boundaries."""
 
     return ClaudeCodeRunner(
         model=config.model.name,
@@ -153,10 +153,10 @@ def _runner(
 
 
 def _apply_patch_gate(result: ClaudeCodeResult, patch: str) -> ClaudeCodeResult:
-    """把空补丁从“正常完成”改为明确失败，并记录测试证据是否存在。
+    """Change an empty patch from "normal completion" into an explicit failure, and record whether test evidence exists.
 
-    该门禁不把“运行过测试”当作成功，因为部分仓库在宿主环境没有依赖；真正的
-    resolved 状态仍只由官方 harness 决定。它只消除模型通用回复造成的假完成。
+    This gate does not treat "tests were run" as success, because some repositories lack dependencies in the host environment; the true
+    resolved status is still decided solely by the official harness. It only eliminates the false completion caused by the model's generic replies.
     """
 
     patch_generated = bool(patch.strip())
@@ -167,7 +167,7 @@ def _apply_patch_gate(result: ClaudeCodeResult, patch: str) -> ClaudeCodeResult:
     metrics["patch_gate"] = {
         "patch_generated": patch_generated,
         "existing_source_modified": existing_source_modified,
-        # 宿主测试没有使用 SWE-bench instance 环境，永远不能满足测试门禁。
+        # Host tests do not use the SWE-bench instance environment and can never satisfy the test gate.
         "test_attempted": visible_executions > 0,
         "visible_test_attempted": visible_executions > 0,
         "host_test_attempted": host_attempts > 0,
@@ -184,23 +184,23 @@ def _apply_patch_gate(result: ClaudeCodeResult, patch: str) -> ClaudeCodeResult:
     )
     exit_code = result.exit_code
     if (not patch_generated or not existing_source_modified) and exit_code == 0:
-        # 2 表示运行器的交付物门禁失败，区别于 Claude CLI 自身的退出码 1。
+        # 2 means the runner's deliverable gate failed, distinct from the Claude CLI's own exit code 1.
         exit_code = 2
     return replace(result, exit_code=exit_code, events=tuple(events), metrics=metrics)
 
 
 def _patch_modifies_existing_source(patch: str) -> bool:
-    """判断补丁是否修改至少一个既有的非测试源码文件。
+    """Determine whether the patch modifies at least one existing non-test source file.
 
-    该门禁专门拦截只留下复现脚本、临时文本或新增测试目录的探索结果。已有测试
-    文件的修改也不算产品修复，避免模型通过改测试绕过交付要求。
+    This gate specifically intercepts exploration results that leave only reproduction scripts, temporary text, or newly added test directories. Modifying existing test
+    files also does not count as a product fix, preventing the model from bypassing delivery requirements by editing tests.
     """
 
     return bool(_existing_source_patch_projection(patch))
 
 
 def _existing_source_patch_projection(patch: str) -> str:
-    """只保留既有产品源码 diff，供 gate 前后比较真实实现变化。"""
+    """Keep only diffs to existing product source code, for comparing real implementation changes before and after the gate."""
 
     accepted: list[str] = []
     for section in re.split(r"(?=^diff --git )", patch, flags=re.MULTILINE):
@@ -216,8 +216,8 @@ def _existing_source_patch_projection(patch: str) -> str:
             or name.endswith(".test.js")
             or name.endswith(".test.ts")
         )
-        # 文档、日志和任意既有临时文件同样不能满足“修复产品源码”的要求；
-        # 显式后缀白名单适配 SWE-bench 中常见的 Python/C/前端与模板源码。
+        # Documents, logs, and any existing temporary files likewise cannot satisfy the "fix product source" requirement;
+        # the explicit suffix whitelist covers the Python/C/frontend and template sources common in SWE-bench.
         if not is_test and path.suffix.lower() in _SOURCE_SUFFIXES and "@@" in section:
             accepted.append(section)
     return "".join(accepted)
@@ -225,7 +225,7 @@ def _existing_source_patch_projection(patch: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class _RecoveryGateValidation:
-    """父进程对 Recovery Read/Edit 单步工具事件的审计结论。"""
+    """The parent process's audit conclusion for a Recovery Read/Edit single-step tool event."""
 
     valid: bool
     step: str
@@ -238,7 +238,7 @@ def _validate_recovery_read_step(
     result: ClaudeCodeResult,
     repository: Path,
 ) -> _RecoveryGateValidation:
-    """只接受一次指向仓库内既有产品源码的 Read。"""
+    """Accept only a single Read targeting an existing product source file inside the repository."""
 
     calls = _observable_tool_calls(result)
     sequence = tuple(name for name, _ in calls)
@@ -274,7 +274,7 @@ def _validate_recovery_edit_step(
     *,
     expected_target: str,
 ) -> _RecoveryGateValidation:
-    """只接受一次修改第一步同一源码文件的 Edit。"""
+    """Accept only a single Edit that modifies the same source file as the first step."""
 
     calls = _observable_tool_calls(result)
     sequence = tuple(name for name, _ in calls)
@@ -309,7 +309,7 @@ def _validate_recovery_edit_step(
 def _observable_tool_calls(
     result: ClaudeCodeResult,
 ) -> list[tuple[str, Mapping[str, Any]]]:
-    """按轨迹顺序提取模型请求的工具和参数，不依赖自然语言声明。"""
+    """Extract the tools and arguments the model requested in trajectory order, without relying on natural-language claims."""
 
     calls: list[tuple[str, Mapping[str, Any]]] = []
     for event in result.events:
@@ -334,7 +334,7 @@ def _validated_gate_source_path(
     repository: Path,
     raw_path: Any,
 ) -> str | None:
-    """把工具路径约束到 worktree 内的既有非测试源码并返回 POSIX 相对路径。"""
+    """Constrain the tool path to an existing non-test source file inside the worktree and return the POSIX relative path."""
 
     if not isinstance(raw_path, str) or not raw_path.strip():
         return None
@@ -368,7 +368,7 @@ def _annotate_recovery_gate_result(
     result: ClaudeCodeResult,
     validation: _RecoveryGateValidation,
 ) -> ClaudeCodeResult:
-    """把状态机判定加入 phase 指标和事件，供结果分析直接审计。"""
+    """Add the state-machine decision into phase metrics and events so result analysis can audit it directly."""
 
     details = {
         "step": validation.step,
@@ -389,9 +389,9 @@ def _annotate_recovery_gate_result(
             "details": details,
         }
     )
-    # 单步会话在工具调用完成后常以 max_turns 结束；若父进程已从结构化事件证明
-    # 唯一允许动作成功发出，该退出码属于状态机边界而非交付失败。原值仍保存在
-    # recovery_gate.raw_exit_code 和 Claude terminal_reason 中供审计。
+    # A single-step session often ends with max_turns after its tool call completes; if the parent process has already proved from the structured events
+    # that the sole permitted action was issued successfully, that exit code is a state-machine boundary rather than a delivery failure. The original value is still preserved in
+    # recovery_gate.raw_exit_code and the Claude terminal_reason for auditing.
     exit_code = 0 if validation.valid else result.exit_code
     return replace(
         result,
@@ -402,7 +402,7 @@ def _annotate_recovery_gate_result(
 
 
 def _should_run_verification(patch: str) -> bool:
-    """只以候选 patch 是否非空决定 Verification，不依赖测试计划或结果。"""
+    """Decide Verification solely by whether the candidate patch is non-empty, independent of the test plan or results."""
 
     return bool(patch.strip())
 
@@ -412,11 +412,11 @@ def _build_recovery_handoff(
     *,
     maximum_chars: int,
 ) -> str:
-    """从首轮公开轨迹生成短交接，不复制 thinking 和工具返回内容。
+    """Generate a short handoff from the first round's public trajectory, without copying thinking or tool-return content.
 
-    Recovery 是全新模型会话，若只重新发送 issue，它会重复首轮定位并耗尽有限
-    turns。这里保留最后几段模型可见结论及已调用工具的关键参数，让它能直接继续；
-    ``tool_result``、stderr、原始日志和任意隐藏推理均不进入新 prompt。
+    Recovery is a brand-new model session; if only the issue were resent, it would repeat the first round's locating and exhaust the limited
+    turns. This keeps the last few model-visible conclusions and the key parameters of the tools already called, so it can continue directly;
+    ``tool_result``, stderr, raw logs, and any hidden reasoning never enter the new prompt.
     """
 
     visible_texts: list[str] = []
@@ -443,8 +443,8 @@ def _build_recovery_handoff(
                     visible_texts.append(truncate_output(value.strip(), 1200))
                 continue
             if block_type != "tool_use":
-                # 显式白名单只接纳 text/tool_use；即便上游清洗规则改变，thinking
-                # 和 tool_result 也不会意外进入 Recovery 上下文。
+                # The explicit whitelist admits only text/tool_use; even if upstream sanitization rules change, thinking
+                # and tool_result cannot accidentally enter the Recovery context.
                 continue
             name = block.get("name")
             tool_input = block.get("input")
@@ -471,7 +471,7 @@ def _build_recovery_handoff(
 
 
 def _summarize_recovery_tool_call(name: str, tool_input: Mapping[str, Any]) -> str:
-    """把允许交接的工具参数压缩为单行，避免携带任意大段结果。"""
+    """Compress the tool arguments allowed for handoff into a single line, avoiding carrying arbitrarily large results."""
 
     fields_by_tool = {
         "Read": ("file_path", "offset", "limit"),
@@ -479,7 +479,7 @@ def _summarize_recovery_tool_call(name: str, tool_input: Mapping[str, Any]) -> s
         "Write": ("file_path",),
         "Grep": ("pattern", "path", "glob"),
         "Glob": ("pattern", "path"),
-        # Recovery 禁用 Bash，但上一阶段执行过的命令可以帮助避免重复定位。
+        # Recovery disables Bash, but commands executed in the previous phase can help avoid repeating the locating work.
         "Bash": ("description", "command"),
     }
     fields = fields_by_tool.get(name)
@@ -501,11 +501,11 @@ def _build_recovery_source_context(
     *,
     maximum_chars: int,
 ) -> str:
-    """按最近 Read 参数从 worktree 提取受限源码片段，供强制 Edit 使用。
+    """Extract limited source excerpts from the worktree using the most recent Read arguments, for use by the forced Edit.
 
-    父进程重新读取文件，而不是复制任意 ``tool_result``，因此只会交接仓库内、
-    后缀受信任的现有源码。最多选择两个最近读取位置且每处不超过 80 行，既为
-    Edit 提供精确 old text，也避免把首轮的大段输出重新塞进上下文。
+    The parent process re-reads the files instead of copying arbitrary ``tool_result`` content, so only existing source inside the repository
+    with trusted suffixes is handed off. At most the two most recent read locations are selected, each capped at 80 lines, both providing
+    precise old text for the Edit and avoiding stuffing the first round's large output back into context.
     """
 
     root = repository.resolve()
@@ -578,7 +578,7 @@ def _build_recovery_source_context(
 
 @dataclass(frozen=True, slots=True)
 class ScheduledTestExecution:
-    """同一测试 argv 在基线和候选 patch 上的成对 Docker 结果。"""
+    """The paired Docker results for the same test argv on the baseline and the candidate patch."""
 
     label: str
     argv: tuple[str, ...]
@@ -589,7 +589,7 @@ class ScheduledTestExecution:
 
     @property
     def baseline_outcome(self) -> TestOutcome | None:
-        """解析 baseline 结果；调度前错误没有输出，因此返回 ``None``。"""
+        """Parse the baseline result; pre-scheduling errors have no output, so return ``None``."""
 
         if self.baseline_result is None:
             return None
@@ -597,7 +597,7 @@ class ScheduledTestExecution:
 
     @property
     def candidate_outcome(self) -> TestOutcome | None:
-        """解析 candidate 结果；调度前错误没有输出，因此返回 ``None``。"""
+        """Parse the candidate result; pre-scheduling errors have no output, so return ``None``."""
 
         if self.result is None:
             return None
@@ -605,7 +605,7 @@ class ScheduledTestExecution:
 
     @property
     def new_failure_signatures(self) -> frozenset[str]:
-        """返回 candidate 相对 baseline 新增的可定位失败测试。"""
+        """Return the localizable failing tests newly added by the candidate relative to the baseline."""
 
         baseline = self.baseline_outcome
         candidate = self.candidate_outcome
@@ -615,7 +615,7 @@ class ScheduledTestExecution:
 
     @property
     def comparison(self) -> str:
-        """综合退出状态与失败签名差分，识别已有失败之上的新增回归。"""
+        """Combine exit status with failure-signature diffs to identify new regressions on top of existing failures."""
 
         if (
             self.baseline_error is not None
@@ -645,14 +645,14 @@ class ScheduledTestExecution:
             and candidate.reliable
         ):
             return "baseline_failure_persists"
-        # 双方都非零但无法可靠提取失败测试时，宁可不给结论，也不能把 candidate
-        # 新增的收集错误或进程崩溃掩盖为“基线失败持续存在”。
+        # When both sides are non-zero but the failing tests cannot be reliably extracted, it is better to give no conclusion than to mask the
+        # candidate's newly added collection errors or process crashes as "baseline failure persists".
         return "comparison_unavailable"
 
 
 @dataclass(frozen=True, slots=True)
 class ScheduledTestEvidence:
-    """一份双命令测试计划及其可审计 Docker 执行结果。"""
+    """A two-command test plan and its auditable Docker execution results."""
 
     request: TestPlanRequest
     executions: tuple[ScheduledTestExecution, ...] = ()
@@ -660,7 +660,7 @@ class ScheduledTestEvidence:
 
     @property
     def ready_for_verification(self) -> bool:
-        """判断两条命令是否形成有效对照证据，不再充当硬门禁。"""
+        """Determine whether the two commands form valid comparison evidence; it no longer acts as a hard gate."""
 
         return (
             self.request.accepted
@@ -676,7 +676,7 @@ class ScheduledTestEvidence:
 
     @property
     def has_new_regression(self) -> bool:
-        """返回是否存在基线通过、候选失败的确定性新增回归。"""
+        """Return whether there is a deterministic new regression where the baseline passes and the candidate fails."""
 
         return any(
             execution.comparison == "new_regression"
@@ -684,7 +684,7 @@ class ScheduledTestEvidence:
         )
 
     def metrics(self) -> dict[str, Any]:
-        """生成不会把文本提及误算为容器执行的指标。"""
+        """Generate metrics that never mis-count textual mentions as container executions."""
 
         patched_executed = sum(
             item.result is not None
@@ -752,8 +752,8 @@ class ScheduledTestEvidence:
             "tool_calls": 0,
             "host_test_calls": 0,
             "agent_test_command_calls": 0,
-            # 旧指标继续只计算 patched 执行，保证与历史批次可比较；baseline
-            # 容器次数由独立字段记录，二者相加才是实际 Docker 测试次数。
+            # Legacy metrics keep counting only patched executions, preserving comparability with historical batches; the baseline
+            # container count is recorded in a separate field, and only the sum of the two is the actual number of Docker test runs.
             "visible_test_calls": patched_executed,
             "visible_test_requests": int(self.request.requested),
             "visible_test_missing": int(self.request.status == "missing"),
@@ -762,8 +762,8 @@ class ScheduledTestEvidence:
                 self.request.origin == "parent" and self.request.accepted
             ),
             "visible_test_executions": patched_executed,
-            # executions 保留“实际启动过容器命令”的历史语义；valid_executions
-            # 进一步排除 runner 缺失等环境错误，供新实验判断证据是否可信。
+            # executions keeps the historical semantics of "a container command was actually started"; valid_executions
+            # further excludes environment errors such as a missing runner, so new experiments can judge whether the evidence is trustworthy.
             "visible_test_valid_executions": valid_executions,
             "visible_test_infrastructure_errors": infrastructure_errors,
             "visible_test_baseline_failure_signatures": (
@@ -854,7 +854,7 @@ class ScheduledTestEvidence:
         }
 
     def prompt_text(self) -> str:
-        """把真实执行证据压缩成可直接注入修复会话的文本。"""
+        """Compress the real execution evidence into text that can be injected directly into the repair session."""
 
         if self.request.status == "missing":
             prefix = (
@@ -891,8 +891,8 @@ class ScheduledTestEvidence:
                         "Failure signatures: "
                         f"{sorted(execution.baseline_outcome.failure_signatures)!r}",
                         "Output:",
-                        # 两条命令各有 baseline/patched 输出；再次按单块限长，避免
-                        # 总证据截断时恰好丢掉位于中间的 patched target traceback。
+                        # Each of the two commands has its own baseline/patched output; cap length again per block to avoid
+                        # dropping the patched target traceback in the middle when the total evidence is truncated.
                         truncate_output(
                             execution.baseline_result.output,
                             2400,
@@ -922,7 +922,7 @@ class ScheduledTestEvidence:
         return "\n\n".join(blocks)
 
     def repair_prompt_text(self) -> str:
-        """新增回归时只交接第一条确定失败，避免无关测试稀释修复注意力。"""
+        """When there is a new regression, hand off only the first certain failure, avoiding dilution of the repair focus by irrelevant tests."""
 
         for execution in self.executions:
             if execution.comparison == "new_regression":
@@ -937,11 +937,11 @@ class ScheduledTestEvidence:
 def _verification_policy(
     evidence: ScheduledTestEvidence,
 ) -> tuple[str, tuple[str, ...] | None]:
-    """根据真实回归证据选择 Verification phase 名称和 CLI 工具白名单。"""
+    """Choose the Verification phase name and CLI tool whitelist based on the real regression evidence."""
 
     if evidence.has_new_regression:
-        # 白名单比逐个禁用更稳健：即使 Claude Code 新增内置工具，聚焦模式仍然
-        # 只能 Read 失败位置并 Edit 既有文件，不能重新搜索或委派子代理。
+        # A whitelist is more robust than disabling tools one by one: even if Claude Code adds built-in tools, focused mode can
+        # still only Read the failing location and Edit existing files, and cannot re-search or delegate sub-agents.
         return "verification_regression_repair", ("Read", "Edit")
     return "verification", None
 
@@ -959,11 +959,11 @@ def _execute_scheduled_test(
     regression_timeout_seconds: float | None = None,
     task_budget: _TaskBudget | None = None,
 ) -> ScheduledTestEvidence:
-    """对双命令分别运行基线与 patched 容器，形成可比较证据。
+    """Run the baseline and patched containers for both commands to form comparable evidence.
 
-    baseline 使用空 patch 的稳定缓存键，因此有效结果在 Initial/Final 间不会重复
-    运行。候选结果只有在 patch 完全相同且上次真实通过时才复用；基础设施错误永不
-    写入或读取缓存，失败和超时也会重跑，避免把偶发环境故障固化成最终证据。
+    The baseline uses a stable cache key for the empty patch, so a valid result is not re-run between Initial/Final.
+    A candidate result is reused only when the patch is exactly the same and it genuinely passed last time; infrastructure errors are never
+    written to or read from the cache, and failures and timeouts are also re-run, avoiding turning occasional environment faults into final evidence.
     """
 
     request = consume_test_plan(repository) if request is None else request
@@ -984,7 +984,7 @@ def _execute_scheduled_test(
         )
 
         def run_one(*, apply_patch: bool) -> VisibleTestResult:
-            """执行或复用单侧结果，同时把总预算收紧到本次子进程。"""
+            """Execute or reuse a single-side result, while tightening the total budget to this subprocess."""
 
             digest = patch_digest if apply_patch else baseline_digest
             timeout_key = float(configured_timeout or 0.0)
@@ -1004,8 +1004,8 @@ def _execute_scheduled_test(
                 )
             )
             if can_reuse and cached is not None:
-                # duration_seconds 表示本阶段实际等待时间；历史耗时仍保留在首次
-                # scheduled phase，因此命中缓存时必须归零，避免汇总重复计费。
+                # duration_seconds represents the actual waiting time of this phase; the historical duration is still kept in the first
+                # scheduled phase, so on a cache hit it must be zeroed to avoid double-counting in the summary.
                 return replace(cached, duration_seconds=0.0, cache_hit=True)
 
             timeout_override = configured_timeout
@@ -1021,13 +1021,13 @@ def _execute_scheduled_test(
                 "command": argv,
                 "apply_patch": apply_patch,
             }
-            # 兼容只实现旧 run 签名的测试替身；真实调度传入配置后始终显式使用
-            # target/regression 各自的超时值。
+            # Compatible with test doubles that only implement the old run signature; real scheduling always passes the configured
+            # target/regression timeout values explicitly.
             if timeout_override is not None:
                 run_options["timeout_seconds"] = timeout_override
             result = sandbox.run(repository, **run_options)
-            # runner 缺失等结果没有测试语义，缓存后只会让 Final 阶段重复相信同一份
-            # 假证据；允许后续阶段重试，也便于环境被修复后立即得到真实结果。
+            # Results such as a missing runner have no test semantics; caching them would only make the Final phase keep believing the same
+            # fake evidence. Allowing later phases to retry also makes it easy to get real results as soon as the environment is fixed.
             if cache is not None and result.evidence_valid:
                 cache[key] = result
             return result
@@ -1072,7 +1072,7 @@ def _execute_scheduled_test(
 
 
 def _scheduled_test_result(evidence: ScheduledTestEvidence) -> ClaudeCodeResult:
-    """把调度器证据包装成 phase，使 trajectory、日志和汇总保持同一拓扑。"""
+    """Wrap the scheduler evidence into a phase so the trajectory, logs, and summary keep the same topology."""
 
     evidence_metrics = evidence.metrics()
     details: dict[str, Any] = {
@@ -1208,7 +1208,7 @@ def _scheduled_test_result(evidence: ScheduledTestEvidence) -> ClaudeCodeResult:
     }
     text = evidence.prompt_text()
     return ClaudeCodeResult(
-        # 此 phase 只负责保存证据；测试缺失或失败不再阻断非空补丁进入验证。
+        # This phase only saves evidence; missing or failing tests no longer block a non-empty patch from entering verification.
         exit_code=0,
         agent_log=text + "\n",
         test_output=text + "\n",
@@ -1228,7 +1228,7 @@ def _scheduled_test_result(evidence: ScheduledTestEvidence) -> ClaudeCodeResult:
 def _task_budget_result(
     phases: Sequence[tuple[str, ClaudeCodeResult]],
 ) -> ClaudeCodeResult:
-    """把预算耗尽转换为可持久化结果，并保留此前所有阶段证据。"""
+    """Convert budget exhaustion into a persistable result, preserving all prior phase evidence."""
 
     if phases:
         combined = combine_phase_results(phases)
@@ -1273,7 +1273,7 @@ def prepare_visible_test_image(
     *,
     allow_network_preparation: bool,
 ) -> str | None:
-    """在 Agent 启动前准备测试镜像；求解阶段不得调用此下载入口。"""
+    """Prepare the test image before the Agent starts; the solving phase must not call this download entry point."""
 
     if not config.agent.visible_test_sandbox:
         return None
@@ -1288,7 +1288,7 @@ def prepare_visible_test_image(
 
 
 def _load_tasks(path: Path) -> SWEbenchLoader:
-    """按扩展名加载经过字段白名单约束的任务快照。"""
+    """Load task snapshots constrained by the field whitelist according to the file extension."""
 
     if path.suffix.lower() == ".jsonl":
         return SWEbenchLoader.from_jsonl(path)
@@ -1306,7 +1306,7 @@ def run_claude_task(
     base_url: str,
     workspace_base_commit: str | None = None,
 ) -> Path:
-    """执行实现、调度测试与无 Bash 修复阶段，并持久化完整证据。"""
+    """Run the implementation, scheduled-test, and no-Bash repair phases, and persist the complete evidence."""
 
     patch_base_commit = workspace_base_commit or task.base_commit
     prompt = PromptBuilder.from_file(config.prompt_template_path).build(task)
@@ -1319,8 +1319,8 @@ def run_claude_task(
     configuration = config.to_metadata()
     configuration["runtime"] = runtime_fingerprint
     if config.agent.visible_test_sandbox:
-        # 在创建 Agent 进程前完成只读镜像预检；缺失镜像必须回到允许联网的环境
-        # 准备阶段处理，不能让模型在正式求解期间尝试 docker pull。
+        # Complete the read-only image precheck before creating the Agent process; a missing image must be handled in
+        # the network-allowed preparation stage, not by letting the model try docker pull during the actual solve.
         test_sandbox = VisibleTestSandbox(
             timeout_seconds=config.agent.visible_test_timeout_seconds,
             max_output_chars=config.agent.max_tool_output_chars,
@@ -1349,8 +1349,8 @@ def run_claude_task(
                 config.agent.max_turns
                 - config.agent.verification_turns
             )
-            # 两个模型会话的墙钟预算按 turns 比例硬切分；父进程测试规划和 Docker
-            # 执行不消耗模型 turns，最后的 verification 吸收整数除法余数。
+            # The two model sessions' wall-clock budgets are split hard in proportion to turns; parent test planning and Docker
+            # execution consume no model turns, and the final verification absorbs the integer-division remainder.
             implementation_timeout = max(
                 1,
                 config.agent.timeout_seconds
@@ -1378,15 +1378,15 @@ def run_claude_task(
             phases.append(("implementation", implementation_result))
             task_budget.ensure_remaining()
 
-            # 清理旧模型可能遗留的控制文件但绝不采用其中命令。实际测试计划只由
-            # 父进程根据仓库布局与候选 patch 确定性生成。
+            # Clean up control files an older model may have left behind, but never adopt their commands. The real test plan is
+            # generated deterministically by the parent from the repository layout and the candidate patch.
             consume_test_plan(repository)
             candidate_patch = session.collect_patch(repository)
             if not _should_run_verification(candidate_patch):
-                # 空 patch 无法进入 Verification，但其预留 turns 不能白白浪费。
-                # 先用两 turns 的 Read→Edit gate：第一 turn 满足 Claude Code 的
-                # 编辑前置读取，第二 turn 立即修改。只有未形成产品源码 patch 时，
-                # 才把剩余预算交给可探索的 fallback。
+                # An empty patch cannot enter Verification, but its reserved turns must not go to waste.
+                # First use a two-turn Read→Edit gate: the first turn satisfies Claude Code's
+                # pre-edit read requirement and the second turn edits immediately. Only when no product-source patch
+                # has formed is the remaining budget handed to an explorable fallback.
                 recovery_handoff = _build_recovery_handoff(
                     implementation_result,
                     maximum_chars=min(
@@ -1403,9 +1403,9 @@ def run_claude_task(
                     ),
                 )
                 edit_gate_turns = min(2, config.agent.verification_turns)
-                # Recovery 不能把全部剩余 turns 都用于继续探索，否则即使父进程
-                # 立即证明 patch 引入新回归，也没有模型预算可以修复。默认 10 turns
-                # 因而稳定切成 2（Read→Edit）+ 5（fallback）+ 3（聚焦修复）。
+                # Recovery must not spend all remaining turns still exploring, otherwise even if the parent
+                # immediately proves the patch introduces a new regression there is no model budget left to fix it. The default 10 turns
+                # therefore splits stably into 2 (Read→Edit) + 5 (fallback) + 3 (focused repair).
                 regression_repair_turns = min(
                     3,
                     max(0, config.agent.verification_turns - edit_gate_turns),
@@ -1528,8 +1528,8 @@ def run_claude_task(
                     task_budget.ensure_remaining()
                     recovery_result = fallback_result
                     recovered_patch = session.collect_patch(repository)
-                    # 无效 gate 可能已经留下错误源码 diff；fallback 必须实际改变
-                    # 工作树，不能仅靠继承该 diff 绕过状态机判定。
+                    # An invalid gate may have left a wrong source diff behind; the fallback must actually change the
+                    # working tree, and must not bypass the state-machine verdict by merely inheriting that diff.
                     fallback_source_patch = _existing_source_patch_projection(
                         recovered_patch
                     )
@@ -1544,8 +1544,8 @@ def run_claude_task(
                     not recovery_patch_valid
                     and repair_budget_available
                 ):
-                    # 前两段仍没有产品源码 patch 时，保留修复预算已无测试可修；此时
-                    # 才把最后 3 turns 降级为最终实现机会，避免预算被静默浪费。
+                    # When the first two segments still yield no product-source patch, there is no test left to repair with the reserved budget; only
+                    # then are the last 3 turns downgraded to a final implementation chance, so the budget is not silently wasted.
                     last_chance_prompt = build_recovery_implementation_prompt(
                         prompt,
                         recovery_turns=regression_repair_turns,
@@ -1600,9 +1600,9 @@ def run_claude_task(
                 task_budget.ensure_remaining()
 
                 if recovery_evidence.has_new_regression and repair_budget_available:
-                    # Recovery 产出 patch 后也必须形成“测试→修复→复测”闭环。这里
-                    # 复用普通 Verification 的聚焦 prompt，并在 CLI 层只开放
-                    # Read/Edit，防止有限的 3 turns 再次退回广泛搜索。
+                    # After Recovery produces a patch it must also close the "test→repair→retest" loop. Here we
+                    # reuse the ordinary Verification focused prompt and, at the CLI layer, allow only
+                    # Read/Edit so the limited 3 turns do not fall back into broad search.
                     repair_prompt = build_verification_phase_prompt(
                         prompt,
                         verification_turns=regression_repair_turns,
@@ -1664,8 +1664,8 @@ def run_claude_task(
                     task_budget.ensure_remaining()
 
                 result = combine_phase_results(tuple(phases))
-                # 末尾测试 phase 只保存证据，不能掩盖 Recovery CLI 自身的失败；
-                # 首轮 Implementation 的失败则允许被成功 Recovery 覆盖。
+                # The trailing test phase only stores evidence and must not mask the Recovery CLI's own failure;
+                # a first-round Implementation failure, however, may be overridden by a successful Recovery.
                 result = replace(result, exit_code=recovery_result.exit_code)
             else:
                 candidate_patch_for_prompt = truncate_output(
@@ -1700,8 +1700,8 @@ def run_claude_task(
                     )
                 )
                 task_budget.ensure_remaining()
-                # Verification 的总 turns 不变。主会话最多使用 7 turns，最后 3
-                # turns 专门保留给主会话结束后才被 Docker 证明的新回归。
+                # Verification's total turns stay unchanged. The main session uses at most 7 turns, and the last 3
+                # turns are reserved specifically for regressions Docker only proves after the main session ends.
                 post_test_repair_turns = min(
                     3,
                     max(0, config.agent.verification_turns - 1),
@@ -1734,9 +1734,9 @@ def run_claude_task(
                 verification_phase, verification_available_tools = (
                     _verification_policy(initial_evidence)
                 )
-                # 只要候选 patch 非空就启动验证。Bash 在 CLI 层禁用，避免模型因
-                # 父进程测试缺失或失败而回退到宿主环境自行执行；发现新增回归时
-                # 同时禁用 Grep/Glob，把会话限制在失败证据和已修改文件内。
+                # Start verification whenever the candidate patch is non-empty. Bash is disabled at the CLI layer so the model cannot
+                # fall back to running tests in the host environment when the parent's tests are missing or fail; when a new regression is found,
+                # Grep/Glob are disabled too, confining the session to the failure evidence and the modified files.
                 verification_result = _runner(
                     config,
                     turns=primary_verification_turns,
@@ -1750,8 +1750,8 @@ def run_claude_task(
                 phases.append((verification_phase, verification_result))
                 task_budget.ensure_remaining()
 
-                # 验证阶段无权替换命令；父进程根据修复后的最终 patch 重新生成，
-                # 保证命令始终与实际修改路径一致且不依赖模型控制文件。
+                # The verification phase has no authority to replace commands; the parent regenerates them from the final repaired patch,
+                # keeping commands consistent with the actual modified paths and independent of model-controlled files.
                 consume_test_plan(repository)
                 final_patch = session.collect_patch(repository)
                 final_request = generate_repository_test_plan(
@@ -1782,8 +1782,8 @@ def run_claude_task(
 
                 final_model_result = verification_result
                 if final_evidence.has_new_regression and post_test_repair_turns > 0:
-                    # 只有主 Verification 之后的新回归能使用这段预算；缺失计划、
-                    # baseline 固有失败和无法比较的输出仍只记证据，不触发盲修。
+                    # Only a new regression after the main Verification may use this budget; a missing plan,
+                    # inherent baseline failures, and incomparable output still only record evidence and do not trigger blind repair.
                     post_repair_prompt = build_verification_phase_prompt(
                         prompt,
                         verification_turns=post_test_repair_turns,
@@ -1847,12 +1847,12 @@ def run_claude_task(
                     task_budget.ensure_remaining()
 
                 result = combine_phase_results(tuple(phases))
-                # 测试缺失、启动失败和非零退出码都只记录证据；模型会话状态仍由
-                # 最后实际运行的模型修复阶段决定，正确性仍由官方 harness 裁决。
+                # Missing tests, launch failures, and non-zero exit codes all only record evidence; the model session state is still
+                # decided by the last model repair phase that actually ran, and correctness is still adjudicated by the official harness.
                 result = replace(result, exit_code=final_model_result.exit_code)
         else:
-            # 已冻结的正式基线配置继续走原来的单会话路径，保证历史 fingerprint
-            # 对应的实验协议不被后续架构开发悄悄改写。
+            # The frozen official baseline config keeps using the original single-session path so the experiment protocol
+            # corresponding to a historical fingerprint is not silently rewritten by later architecture work.
             result = _runner(
                 config,
                 turns=config.agent.max_turns,
@@ -1864,13 +1864,13 @@ def run_claude_task(
         patch = session.collect_patch(repository)
         result = _apply_patch_gate(result, patch)
     except TaskBudgetExhausted:
-        # 总预算耗尽是预期的资源边界，不应走基础设施异常分支；保留已有 patch，
-        # 让官方 harness 仍能评价截止时间前已经完成的候选修复。
+        # Total-budget exhaustion is an expected resource boundary and must not take the infrastructure-error branch; keeping the existing patch
+        # lets the official harness still evaluate the candidate fix completed before the deadline.
         patch = session.collect_patch(repository)
         result = _apply_patch_gate(_task_budget_result(phases), patch)
     except Exception as error:
-        # 无论 Agent 还是 patch 收集失败，都要终结 metadata 的 running 状态，
-        # 否则后续分析无法区分“仍在运行”和“基础设施异常退出”。
+        # Whether the Agent or the patch collection fails, the metadata's running state must be finalized,
+        # otherwise later analysis cannot distinguish "still running" from "exited on an infrastructure error".
         try:
             partial_patch = session.collect_patch(repository)
         except Exception as patch_error:
@@ -1909,7 +1909,7 @@ def run_claude_task(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """声明单题运行参数；run ID 强制显式给出以防覆盖或结果误复用。"""
+    """Declare single-task run arguments; the run ID is required explicitly to prevent overwriting or accidental result reuse."""
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
@@ -1926,7 +1926,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    """校验配置、准备 worktree，并启动只连接本机 Ollama 的 Agent。"""
+    """Validate config, prepare the worktree, and launch an Agent that only connects to the local Ollama."""
 
     arguments = build_parser().parse_args()
     if not _SAFE_RUN_ID.fullmatch(arguments.run_id):

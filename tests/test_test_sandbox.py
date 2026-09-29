@@ -1,4 +1,4 @@
-"""验证可见测试 Docker 沙箱的镜像规则、隔离参数和输出边界。"""
+"""Verify the image rules, isolation parameters, and output bounds of the visible-test Docker sandbox."""
 
 from pathlib import Path
 import subprocess
@@ -14,7 +14,7 @@ from agent.test_sandbox import (
 
 
 def test_published_image_name_matches_swebench_convention() -> None:
-    """双下划线必须按官方 Docker Hub 规则编码，避免拉取错误镜像。"""
+    """Double underscores must be encoded per official Docker Hub rules to avoid pulling the wrong image."""
 
     assert image_candidates("Django__Django-11951") == (
         "sweb.eval.x86_64.django__django-11951:latest",
@@ -23,7 +23,7 @@ def test_published_image_name_matches_swebench_convention() -> None:
 
 
 def test_truncate_output_keeps_start_and_final_failure() -> None:
-    """硬截断必须同时保留初始化错误和最终测试摘要。"""
+    """Hard truncation must preserve both the initialization error and the final test summary."""
 
     output = "BEGIN\n" + "x" * 20000 + "\nFAILED final assertion\n"
     truncated = truncate_output(output, 12000)
@@ -37,7 +37,7 @@ def test_truncate_output_keeps_start_and_final_failure() -> None:
 def test_image_digest_requires_nonempty_immutable_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """运行元数据只能记录 Docker 返回的非空 image ID，不能用可变 tag 冒充。"""
+    """Run metadata may only record the non-empty image ID Docker returns, not masquerade a mutable tag."""
 
     def fake_run(command, **kwargs):
         return subprocess.CompletedProcess(
@@ -56,7 +56,7 @@ def test_image_digest_requires_nonempty_immutable_id(
 def test_ensure_image_pulls_only_when_preparation_allows_network(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """缺失镜像只能在显式允许联网的准备阶段拉取，并在拉取后重新 inspect。"""
+    """A missing image may only be pulled during the network-allowed preparation phase, and re-inspected after pulling."""
 
     pulled = False
     calls: list[list[str]] = []
@@ -90,7 +90,7 @@ def test_ensure_image_pulls_only_when_preparation_allows_network(
 def test_ensure_image_refuses_pull_during_offline_solving(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """未授权准备网络时，缺失镜像必须立即失败且不得执行 docker pull。"""
+    """When network preparation is not authorized, a missing image must fail immediately without running docker pull."""
 
     calls: list[list[str]] = []
 
@@ -112,7 +112,7 @@ def test_sandbox_applies_only_current_patch_and_disables_network(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """容器只能获得 Agent patch，并以无网络、限资源的一次性方式执行测试 argv。"""
+    """The container may only receive the Agent patch and run the test argv in a one-shot, network-free, resource-limited way."""
 
     repository = tmp_path / "repo"
     repository.mkdir()
@@ -177,7 +177,7 @@ def test_sandbox_marks_missing_pytest_as_infrastructure_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """pytest runner 未安装不能被误判成真正执行后的测试失败。"""
+    """A missing pytest runner must not be mistaken for a test failure after real execution."""
 
     repository = tmp_path / "repo"
     repository.mkdir()
@@ -226,7 +226,7 @@ def test_sandbox_does_not_count_patch_apply_failure_as_test_execution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """容器已启动但补丁应用失败时，不能生成真实测试启动证据。"""
+    """When the container starts but patch application fails, no real test-start evidence may be produced."""
 
     repository = tmp_path / "repo"
     repository.mkdir()
@@ -268,7 +268,7 @@ def test_sandbox_runs_unmodified_baseline_without_collecting_patch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """基线比较必须直接运行镜像 checkout，不能读取或应用候选 patch。"""
+    """Baseline comparison must run the image checkout directly, without reading or applying the candidate patch."""
 
     repository = tmp_path / "repo"
     repository.mkdir()

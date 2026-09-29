@@ -1,4 +1,4 @@
-"""命令行入口：在无网络 SWE-bench instance 容器中运行仓库可见测试。"""
+"""Command-line entry point: run repository-visible tests in a network-isolated SWE-bench instance container."""
 
 from __future__ import annotations
 
@@ -6,8 +6,9 @@ import argparse
 from pathlib import Path
 import sys
 
-# 该脚本会被目标 worktree 中的 Claude Code 通过绝对路径调用；显式加入项目根目录，
-# 避免当前目录不是调度仓库时无法导入 ``agent`` 包。
+# This script is invoked via absolute path by Claude Code inside the target worktree;
+# explicitly add the project root so the ``agent`` package can still be imported when
+# the current directory is not the scheduling repository.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -16,7 +17,7 @@ from agent.test_sandbox import TestSandboxError, VisibleTestSandbox  # noqa: E40
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """声明固定任务身份、资源上限以及 ``--`` 后的无 shell 测试 argv。"""
+    """Declare the fixed task identity, resource limits, and the no-shell test argv after ``--``."""
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository", type=Path, default=Path.cwd())
@@ -29,7 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    """执行测试并把截断后的真实输出及退出码透明返回给 Agent。"""
+    """Run the test and transparently return the truncated real output and exit code to the Agent."""
 
     arguments = build_parser().parse_args()
     command = list(arguments.command)

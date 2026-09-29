@@ -1,5 +1,5 @@
-# 第三组扩展评测配置：排除既有 Dev、十题 Evaluation、15 题和 20 题，
-# 再对排序后的 452 个候选 instance ID 使用 seed 42 无放回抽取 30 题。
+# Third extended evaluation config: exclude the existing Dev, ten-task Evaluation, 15-task, and 20-task sets,
+# then draw 30 tasks without replacement using seed 42 over the 452 sorted candidate instance IDs.
 schema_version: 1
 
 experiment:
@@ -13,8 +13,8 @@ dataset:
   split: test
   tasks_file: experiments/evaluation_tasks_30_seed42.json
 
-# 新协议保留 30 turns 实现和 10 turns 验证；父进程按仓库生成测试命令，
-# 缺失或失败只形成证据，不再阻断非空 patch 进入 Verification。
+# The new protocol keeps 30 turns for implementation and 10 turns for verification; the parent process generates test commands per repository,
+# and missing or failing tests only form evidence without blocking a non-empty patch from entering Verification.
 model:
   runtime: ollama
   name: qwen3.5:9b

@@ -1,46 +1,46 @@
-# 配置格式版本；解析器只接受当前明确支持的版本。
+# Config format version; the parser only accepts the currently explicitly supported versions.
 schema_version: 1
 
-# Dev Set 用于连通性检查和调参，完成前不得将配置标记为 frozen。
+# The Dev Set is used for connectivity checks and parameter tuning; do not mark the config frozen until it passes.
 experiment:
   name: local-qwen35-9b-dev
   phase: dev
   random_seed: 42
   configuration_frozen: false
 
-# tasks_file 只保存开发题目 ID；不得包含 reference patch 或隐藏测试内容。
+# tasks_file stores only development task IDs; it must not contain reference patches or hidden test content.
 dataset:
   name: princeton-nlp/SWE-bench_Verified
   split: test
   tasks_file: experiments/dev_tasks.json
 
-# Ollama 在本机运行开源模型；Dev 验证已确认该模型能通过 Claude Code 产生结构化 tool_use。
-# context_length 固定为 32768；max_output_tokens 预留 24K 输入空间，避免未知模型默认
-# 使用 32K 输出预算后反复触发 Claude Code auto-compact。
+# Ollama runs the open-source model locally; Dev verification confirmed it can produce structured tool_use through Claude Code.
+# context_length is fixed at 32768; max_output_tokens reserves 24K of input space to avoid the unknown model's default
+# 32K output budget repeatedly triggering Claude Code auto-compact.
 model:
   runtime: ollama
   name: qwen3.5:9b
   context_length: 32768
   max_output_tokens: 8192
 
-# timeout_seconds 是每道题完整 Agent 运行的墙钟时间上限。
+# timeout_seconds is the wall-clock time limit for the full Agent run on each task.
 agent:
   framework: claude-code
   timeout_seconds: 5400
   max_turns: 30
   prompt_template: prompts/swe_agent_prompt.txt
 
-# 只允许准备阶段联网；正式求解必须离线，避免检索现成答案。
+# Networking is only allowed during the preparation phase; formal solving must be offline to avoid retrieving ready-made answers.
 network:
   environment_preparation: true
   formal_solving: false
 
-# 单 worker 优先保证本地开发稳定；cache_level 控制 Docker 镜像复用范围。
+# A single worker prioritizes stable local development; cache_level controls the scope of Docker image reuse.
 evaluation:
   max_workers: 1
   cache_level: env
 
-# 所有路径均相对于项目根目录，便于在轻薄本和 4070 主机之间迁移。
+# All paths are relative to the project root, making it easy to migrate between a lightweight laptop and the 4070 host.
 storage:
   repository_cache: repo-cache
   workspaces: workspaces

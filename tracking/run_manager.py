@@ -1,7 +1,7 @@
-"""创建不可静默覆盖的运行目录，并持久化可观察实验数据。
+"""Create run directories that cannot be silently overwritten, and persist observable experiment data.
 
-每次运行会保存 metadata、prompt、agent 日志、trajectory、Git patch、测试输出
-和结果摘要。这里记录的是可验证行为，不记录或推测模型隐藏思维过程。
+Each run saves metadata, prompt, agent log, trajectory, Git patch, test output,
+and a result summary. What is recorded here is verifiable behavior; hidden model reasoning is neither recorded nor inferred.
 """
 
 from __future__ import annotations
@@ -18,15 +18,16 @@ from benchmark.task import SWEbenchTask
 
 
 class RunArtifactError(RuntimeError):
-    """当运行产物无法在不丢失数据的前提下创建时抛出。"""
+    """Raised when run artifacts cannot be created without losing data."""
 
 
-# instance ID 来自外部数据集，必须先转换为安全的单层目录名。
+# The instance ID comes from an external dataset and must first be converted into a safe single-level directory name.
 _SAFE_PATH_COMPONENT = re.compile(r"[^A-Za-z0-9_.-]+")
 
-# 这些目录只包含 Agent 在任务 worktree 中临时创建的解释器环境或缓存，把它们
-# 写入 prediction 会产生数万行无意义 diff，甚至掩盖真正源码修改。使用 Git
-# pathspec 排除而不删除文件，既保留失败现场，也避免把运行产物送入官方评测。
+# These directories contain only interpreter environments or caches the Agent created temporarily in the task worktree;
+# writing them into the prediction would produce tens of thousands of meaningless diff lines and could even mask real source
+# changes. Excluding them via Git pathspec rather than deleting files preserves the failure scene and avoids feeding run
+# artifacts into the official evaluation.
 _PATCH_EXCLUDE_PATHS = (
     ":(exclude,glob)**/.venv/**",
     ":(exclude,glob)**/venv/**",
@@ -42,19 +43,19 @@ _PATCH_EXCLUDE_PATHS = (
 
 
 def patch_pathspecs() -> tuple[str, ...]:
-    """返回 patch 收集的稳定 Git pathspec，供保存与 Docker 测试共用。"""
+    """Return the stable Git pathspec for patch collection, shared by saving and Docker tests."""
 
     return (".", *_PATCH_EXCLUDE_PATHS)
 
 
 def _utc_now() -> str:
-    """生成带时区的 UTC 时间戳，避免不同机器本地时区造成歧义。"""
+    """Produce a timezone-aware UTC timestamp so different machines' local timezones cause no ambiguity."""
 
     return datetime.now(timezone.utc).isoformat()
 
 
 class RunSession:
-    """单道任务的一次运行会话；完成后不可再次 finalize。"""
+    """One run session for a single task; it cannot be finalized again once complete."""
 
     def __init__(
         self,
@@ -64,7 +65,7 @@ class RunSession:
         started_monotonic: float,
         patch_base_commit: str,
     ) -> None:
-        """保存运行上下文；单调时钟专用于准确计算耗时。"""
+        """Store the run context; the monotonic clock is used specifically to measure durations accurately."""
 
         self.path = path
         self.task = task
@@ -74,13 +75,13 @@ class RunSession:
         self._finished = False
 
     def collect_patch(self, repository: Path | str) -> str:
-        """收集相对任务基线的 committed、tracked 与 untracked 修改。
+        """Collect committed, tracked, and untracked changes relative to the task baseline.
 
-        ``git diff`` 默认不会包含未跟踪文件，因此先用 ``--intent-to-add``
-        将它们标记为“计划加入”，但不会真正创建 commit。diff 必须显式以任务的
-        隔离仓库的单提交基线为左侧；Agent 可能自行 commit，若只比较 working
-        tree 会把已经提交的有效修复误判为空 patch。上游原始 SHA 只用于审计，
-        不能作为隔离仓库中并不存在的对象参与 diff。
+        ``git diff`` does not include untracked files by default, so first use ``--intent-to-add``
+        to mark them as "intended to add" without actually creating a commit. The diff must explicitly take the task's
+        isolated single-commit baseline as its left side; the Agent may commit on its own, and comparing only the working
+        tree would misjudge an already-committed valid fix as an empty patch. The upstream original SHA is used only for
+        auditing and cannot take part in the diff as an object that does not exist in the isolated repository.
         """
 
         repository_path = Path(repository).resolve()
@@ -112,10 +113,10 @@ class RunSession:
         patch: str,
         metrics: Mapping[str, Any] | None = None,
     ) -> None:
-        """原子写入本次运行的最终产物，并将会话标记为完成。
+        """Atomically write this run's final artifacts and mark the session complete.
 
-        ``exit_code == 0`` 只表示 Agent 进程正常结束，不等价于 SWE-bench issue
-        已解决；官方评测结果因此保持为 ``None``，等待 harness 后续填写。
+        ``exit_code == 0`` only means the Agent process exited normally; it does not mean the SWE-bench issue
+        is resolved; the official evaluation result therefore stays ``None`` until the harness fills it in later.
         """
 
         if self._finished:
@@ -123,7 +124,7 @@ class RunSession:
 
         end_time = _utc_now()
         runtime_seconds = round(time.monotonic() - self._started_monotonic, 6)
-        # 124 沿用 GNU timeout 的约定，单独分类后才能准确计算 timeout rate。
+        # 124 follows the GNU timeout convention; classifying it separately is what allows an accurate timeout rate.
         status = "completed" if exit_code == 0 else "timeout" if exit_code == 124 else "failed"
         patch_line_count = sum(
             1
@@ -132,7 +133,7 @@ class RunSession:
             or (line.startswith("-") and not line.startswith("---"))
         )
 
-        # 先写详细产物，再更新 metadata；这样异常时仍能保留尽可能多的证据。
+        # Write the detailed artifacts first, then update metadata, so an exception still preserves as much evidence as possible.
         self._write_text("agent.log", agent_log)
         self._write_text("test_output.log", test_output)
         self._write_text("patch.diff", patch)
@@ -166,7 +167,7 @@ class RunSession:
         self._finished = True
 
     def _write_text(self, name: str, content: str) -> None:
-        """先写同目录临时文件，再 replace，避免留下半写入文件。"""
+        """Write a temporary file in the same directory first, then replace, to avoid leaving a half-written file."""
 
         destination = self.path / name
         temporary = self.path / f".{name}.tmp"
@@ -174,7 +175,7 @@ class RunSession:
         temporary.replace(destination)
 
     def _write_json(self, name: str, content: Mapping[str, Any]) -> None:
-        """以稳定键顺序和 UTF-8 格式保存便于审计的 JSON。"""
+        """Save audit-friendly JSON with stable key order and UTF-8 encoding."""
 
         serialized = json.dumps(
             content,
@@ -186,7 +187,7 @@ class RunSession:
 
     @staticmethod
     def _run_git(repository: Path, *arguments: str) -> str:
-        """运行补丁收集所需的 Git 命令，并保留失败细节。"""
+        """Run the Git commands needed for patch collection and preserve failure details."""
 
         result = subprocess.run(
             ["git", "-C", str(repository), *arguments],
@@ -206,10 +207,10 @@ class RunSession:
 
 
 class RunManager:
-    """在 Agent 执行前创建运行目录并写入初始 metadata。"""
+    """Create the run directory and write initial metadata before the Agent executes."""
 
     def __init__(self, runs_root: Path | str) -> None:
-        """保存解析后的运行根目录，避免后续受当前工作目录变化影响。"""
+        """Store the resolved run root so later steps are unaffected by changes to the current working directory."""
 
         self.runs_root = Path(runs_root).resolve()
 
@@ -224,10 +225,10 @@ class RunManager:
         configuration: Mapping[str, Any] | None = None,
         patch_base_commit: str | None = None,
     ) -> RunSession:
-        """启动新会话并立即持久化 prompt 与初始元数据。
+        """Start a new session and immediately persist the prompt and initial metadata.
 
-        目录使用 ``exist_ok=False``：相同 instance ID 的旧结果不会被新运行
-        静默覆盖。若要重复实验，调用方必须提供新的运行根目录或 run ID。
+        The directory uses ``exist_ok=False``: old results for the same instance ID are not silently
+        overwritten by a new run. To repeat an experiment, the caller must supply a new run root or run ID.
         """
 
         safe_instance_id = _SAFE_PATH_COMPONENT.sub("_", task.instance_id)
@@ -242,7 +243,7 @@ class RunManager:
             raise RunArtifactError(f"cannot create run directory {run_path}: {error}") from error
 
         start_time = _utc_now()
-        # 在 Agent 启动前就落盘，进程崩溃时仍能知道任务和启动配置。
+        # Persist before the Agent starts so the task and launch config are known even if the process crashes.
         metadata = {
             "schema_version": 1,
             "instance_id": task.instance_id,
@@ -257,8 +258,8 @@ class RunManager:
             "status": "running",
             "configuration": dict(configuration) if configuration is not None else None,
         }
-        # 旧调用方仍可传入普通 checkout，此时原始 base commit 继续有效；新的隔离
-        # RepositoryManager 会显式传入重新初始化后的 workspace baseline。
+        # Old callers may still pass a plain checkout, in which case the original base commit remains valid; the new isolated
+        # RepositoryManager explicitly passes the re-initialized workspace baseline.
         effective_patch_base = patch_base_commit or task.base_commit
         metadata["workspace_base_commit"] = effective_patch_base
         session = RunSession(

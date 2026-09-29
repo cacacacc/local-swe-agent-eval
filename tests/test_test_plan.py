@@ -1,4 +1,4 @@
-"""验证结构化测试计划的消费、清理和命令边界。"""
+"""Verify the consumption, cleanup, and command boundaries of the structured test plan."""
 
 import json
 from pathlib import Path
@@ -11,7 +11,7 @@ from agent.test_plan import (
 
 
 def write_plan(repository: Path, value: object) -> Path:
-    """在临时仓库写入单次计划，保持测试准备步骤清晰。"""
+    """Write a single plan into a temporary repo to keep the test setup steps clear."""
 
     path = repository / TEST_PLAN_FILENAME
     path.write_text(json.dumps(value), encoding="utf-8")
@@ -19,7 +19,7 @@ def write_plan(repository: Path, value: object) -> Path:
 
 
 def test_consume_accepts_target_and_regression_argv(tmp_path: Path) -> None:
-    """两类合法 argv 应原样保留，同时控制文件不得进入最终 patch。"""
+    """Both kinds of legal argv should be preserved verbatim, while the control file must not enter the final patch."""
 
     path = write_plan(
         tmp_path,
@@ -43,7 +43,7 @@ def test_consume_accepts_target_and_regression_argv(tmp_path: Path) -> None:
 
 
 def test_consume_rejects_shell_and_unknown_fields(tmp_path: Path) -> None:
-    """计划不能把 shell 命令字符串或未识别控制字段交给调度器。"""
+    """The plan must not hand shell command strings or unrecognized control fields to the scheduler."""
 
     path = write_plan(
         tmp_path,
@@ -58,7 +58,7 @@ def test_consume_rejects_shell_and_unknown_fields(tmp_path: Path) -> None:
 
 
 def test_consume_reports_missing_without_creating_file(tmp_path: Path) -> None:
-    """未提交计划应与无效计划区分，便于报告真实遵循率。"""
+    """An unsubmitted plan should be distinguished from an invalid plan, so the real adherence rate can be reported."""
 
     request = consume_test_plan(tmp_path)
 
@@ -68,7 +68,7 @@ def test_consume_reports_missing_without_creating_file(tmp_path: Path) -> None:
 
 
 def test_consume_rejects_shell_executable_even_with_exact_schema(tmp_path: Path) -> None:
-    """argv 虽无 shell 插值，仍不得把 shell 本身作为测试入口。"""
+    """Although argv has no shell interpolation, the shell itself must still not be the test entry point."""
 
     write_plan(
         tmp_path,
@@ -85,7 +85,7 @@ def test_consume_rejects_shell_executable_even_with_exact_schema(tmp_path: Path)
 
 
 def test_consume_rejects_duplicate_target_and_regression(tmp_path: Path) -> None:
-    """两条相同命令不能冒充目标测试与相邻回归测试。"""
+    """Two identical commands must not masquerade as the target test and the adjacent regression test."""
 
     command = ["python", "-m", "pytest", "tests/test_one.py"]
     write_plan(
@@ -100,7 +100,7 @@ def test_consume_rejects_duplicate_target_and_regression(tmp_path: Path) -> None
 
 
 def test_parent_generates_pytest_plan_from_modified_source(tmp_path: Path) -> None:
-    """父进程应把修改模块映射到现有 pytest 模块及其相邻回归目录。"""
+    """The parent should map a modified module to the existing pytest module and its adjacent regression directory."""
 
     target = tmp_path / "testing" / "test_reports.py"
     target.parent.mkdir(parents=True)
@@ -130,7 +130,7 @@ def test_parent_generates_pytest_plan_from_modified_source(tmp_path: Path) -> No
 
 
 def test_parent_uses_django_runner_and_dotted_labels(tmp_path: Path) -> None:
-    """Django 不能套用通用 pytest 命令，必须生成项目 runner 的 dotted label。"""
+    """Django cannot reuse the generic pytest command; it must generate a dotted label for the project runner."""
 
     target = tmp_path / "tests" / "forms_tests" / "tests" / "test_forms.py"
     target.parent.mkdir(parents=True)
@@ -165,7 +165,7 @@ def test_parent_uses_django_runner_and_dotted_labels(tmp_path: Path) -> None:
 
 
 def test_parent_uses_sympy_native_runner_without_pytest(tmp_path: Path) -> None:
-    """SymPy 官方镜像未必安装 pytest，父进程必须调用仓库自带的 ``bin/test``。"""
+    """The official SymPy image may not have pytest installed, so the parent must call the repository's own ``bin/test``."""
 
     test_directory = tmp_path / "sympy" / "matrices" / "expressions" / "tests"
     test_directory.mkdir(parents=True)
@@ -195,7 +195,7 @@ def test_parent_uses_sympy_native_runner_without_pytest(tmp_path: Path) -> None:
 
 
 def test_parent_adapts_django_root_test_to_distinct_neighbor(tmp_path: Path) -> None:
-    """Django 根级测试没有 app 时也必须选择另一个模块作为相邻回归。"""
+    """When the Django root-level test has no app, another module must still be chosen as the adjacent regression."""
 
     tests = tmp_path / "tests"
     tests.mkdir()
@@ -218,7 +218,7 @@ def test_parent_adapts_django_root_test_to_distinct_neighbor(tmp_path: Path) -> 
 
 
 def test_parent_missing_plan_is_diagnostic_for_unmatched_patch(tmp_path: Path) -> None:
-    """找不到相邻测试时应记录 missing，而不是伪造命令或阻断验证。"""
+    """When no adjacent test is found, record missing instead of fabricating a command or blocking verification."""
 
     request = generate_repository_test_plan(
         tmp_path,
@@ -236,7 +236,7 @@ def test_parent_missing_plan_is_diagnostic_for_unmatched_patch(tmp_path: Path) -
 
 
 def test_parent_ignores_new_reproduction_when_selecting_tests(tmp_path: Path) -> None:
-    """模型新建的复现脚本不能被父进程误认为既有产品源码或可信测试。"""
+    """A reproduction script newly created by the model must not be mistaken by the parent for existing product source or a trusted test."""
 
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "test_widget.py").write_text("", encoding="utf-8")

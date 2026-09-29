@@ -1,9 +1,12 @@
-"""读取旧 Agent 计划，并由父进程生成仓库适配的可见测试计划。
+"""Read legacy Agent plans and let the parent process generate repository-adapted visible test plans.
 
-模型不得自行拼接或执行宿主测试命令。父进程根据仓库布局和 patch 生成目标测试
-与相邻回归测试 argv，再依次交给无网络 Docker 沙箱。``consume_test_plan`` 仅为
-兼容和清理旧会话可能遗留的 ``.agent-test-plan.json``；其中命令不再控制执行，
-控制文件在读取后立即删除，因此不会污染最终补丁。
+The model must not assemble or execute host test commands on its own. The parent
+process generates the target-test and adjacent regression-test argv from the
+repository layout and the patch, then hands them one by one to the offline Docker
+sandbox. ``consume_test_plan`` exists only for compatibility and to clean up a
+``.agent-test-plan.json`` that an old session may have left behind; commands in that
+file no longer control execution, and the control file is deleted immediately after
+being read, so it never pollutes the final patch.
 """
 
 from __future__ import annotations
@@ -36,7 +39,7 @@ _FORBIDDEN_EXECUTABLES = {
 
 @dataclass(frozen=True, slots=True)
 class TestPlanRequest:
-    """一次计划读取结果；拒绝原因也作为实验数据保留。"""
+    """One plan-read result; the rejection reason is also preserved as experiment data."""
 
     status: str
     target_argv: tuple[str, ...] = ()
@@ -46,19 +49,19 @@ class TestPlanRequest:
 
     @property
     def accepted(self) -> bool:
-        """仅当结构与安全边界全部通过时返回 ``True``。"""
+        """Return ``True`` only when both structure and safety boundaries pass."""
 
         return self.status in {"accepted", "generated"}
 
     @property
     def requested(self) -> bool:
-        """区分模型未提交计划与提交了无效计划。"""
+        """Distinguish a model that submitted no plan from one that submitted an invalid plan."""
 
         return self.status != "missing"
 
     @property
     def commands(self) -> tuple[tuple[str, tuple[str, ...]], ...]:
-        """按固定顺序返回目标测试与相邻回归测试。"""
+        """Return the target test and the adjacent regression test in a fixed order."""
 
         if not self.accepted:
             return ()
@@ -69,11 +72,13 @@ class TestPlanRequest:
 
 
 def consume_test_plan(repository: Path | str) -> TestPlanRequest:
-    """读取、校验并删除仓库根目录中的一次性 JSON 测试计划。
+    """Read, validate, and delete the one-shot JSON test plan at the repository root.
 
-    删除发生在解析前后的 ``finally`` 中：即使模型写入超大、损坏或恶意计划，
-    该控制文件也不会进入 candidate patch。计划只接受两个固定 argv 字段，避免
-    日后新增字段被旧调度器静默忽略并产生权限误解。
+    Deletion happens in a ``finally`` around parsing: even if the model writes an
+    oversized, corrupt, or malicious plan, the control file never enters the candidate
+    patch. The plan accepts only the two fixed argv fields, avoiding future extra
+    fields being silently ignored by an old scheduler and creating a permission
+    misunderstanding.
     """
 
     repository_path = Path(repository).resolve()
@@ -118,16 +123,18 @@ def generate_repository_test_plan(
     repo: str,
     patch: str,
 ) -> TestPlanRequest:
-    """根据仓库类型、修改路径和现有测试布局确定性生成两条测试命令。
+    """Deterministically generate two test commands from the repository type, modified paths, and existing test layout.
 
-    生成器只选择任务仓库中已经存在的测试文件，绝不读取 SWE-bench 隐藏
-    ``test_patch``。目标测试取与修改源码文件名最接近的现有测试模块并采用
-    fail-fast；回归测试选择同目录或共同路径最深的另一个测试模块，避免用取消
-    ``-x`` 的同一命令冒充相邻回归。Django 的回归命令运行目标测试 app。
-    Django 使用项目自己的 ``tests/runtests.py``，SymPy 使用不依赖 pytest 的
-    ``bin/test``，其余 SWE-bench Python 仓库使用 pytest。无法找到可信测试时
-    返回 ``missing``，调用方仍应把这一事实交给 Verification，而不能把它当作
-    硬门禁。
+    The generator only selects test files that already exist in the task repository
+    and never reads the SWE-bench hidden ``test_patch``. The target test takes the
+    existing test module closest to the modified source file name with fail-fast;
+    the regression test selects another test module in the same directory or with the
+    deepest shared path, avoiding passing off the same command with ``-x`` removed as
+    the adjacent regression. Django's regression command runs the target test app.
+    Django uses the project's own ``tests/runtests.py``, SymPy uses ``bin/test``
+    (which does not depend on pytest), and the remaining SWE-bench Python repositories
+    use pytest. When no trustworthy test is found it returns ``missing``; the caller
+    should still hand that fact to Verification rather than treating it as a hard gate.
     """
 
     repository_path = Path(repository).resolve()
@@ -172,7 +179,7 @@ def generate_repository_test_plan(
 
 
 def _patch_paths(patch: str) -> tuple[list[Path], set[Path]]:
-    """提取补丁中的目标路径，并标记本轮新建文件供计划器排除。"""
+    """Extract target paths from the patch and mark this round's newly created files for the planner to exclude."""
 
     changed: list[Path] = []
     newly_created: set[Path] = set()
@@ -188,7 +195,7 @@ def _patch_paths(patch: str) -> tuple[list[Path], set[Path]]:
 
 
 def _repository_test_files(repository: Path, repo: str) -> list[Path]:
-    """枚举受支持仓库的既有 Python 测试，保持排序以保证可复现。"""
+    """Enumerate existing Python tests in supported repositories, keeping the order sorted for reproducibility."""
 
     roots = ("tests",) if repo == "django/django" else ("tests", "testing")
     candidates: set[Path] = set()
@@ -203,7 +210,7 @@ def _repository_test_files(repository: Path, repo: str) -> list[Path]:
                 or root_name == "testing"
             ):
                 candidates.add(path.relative_to(repository))
-    # Astropy、scikit-learn、xarray、SymPy 等把测试放在源码包内部。
+    # Astropy, scikit-learn, xarray, SymPy, and others keep tests inside the source package.
     if not candidates:
         for path in repository.rglob("test_*.py"):
             if path.is_file() and ".git" not in path.parts:
@@ -217,7 +224,7 @@ def _select_test_files(
     *,
     repo: str,
 ) -> tuple[Path, Path | None] | None:
-    """按修改路径选择目标文件和一个不同的相邻回归文件。"""
+    """Select a target file and a different adjacent regression file based on the modified paths."""
 
     ignored = {
         "__init__",
@@ -235,14 +242,18 @@ def _select_test_files(
     }
     tokens: set[str] = set()
     for source in source_paths:
-        # 首段通常只是顶层包名（astropy、sklearn、sphinx 等），保留它会让几乎
-        # 所有测试同分并退化成字典序选择，因此只使用更具体的内部路径。
+        # The first segment is usually just the top-level package name (astropy,
+        # sklearn, sphinx, etc.); keeping it would give nearly all tests the same
+        # score and reduce selection to lexicographic order, so only the more specific
+        # inner path is used.
         for part in source.with_suffix("").parts[1:]:
             for token in re.findall(r"[a-z0-9]+", part.lower()):
                 if len(token) >= 3 and token not in ignored:
                     tokens.add(token)
-                    # 包路径常用 sqlite3 等带版本后缀名称，而测试模块通常省略数字；
-                    # 同时保留去尾数字形式，避免因命名惯例差异错过直接对应测试。
+                    # Package paths often use version-suffixed names like sqlite3,
+                    # while test modules usually drop the digits; keep the trailing-
+                    # digits-stripped form too, so a direct corresponding test is not
+                    # missed due to differing naming conventions.
                     without_version = token.rstrip("0123456789")
                     if len(without_version) >= 3:
                         tokens.add(without_version)
@@ -263,7 +274,8 @@ def _select_test_files(
         text = path.with_suffix("").as_posix().lower()
         matched = sum(1 for token in tokens if token in text)
         exact_stem = int(any(path.stem == f"test_{token}" for token in tokens))
-        # 同分时优先更短、更具体的路径，最后用字符串顺序消除文件系统差异。
+        # On ties prefer shorter, more specific paths; finally use string order to
+        # eliminate filesystem differences.
         return (exact_stem * 100 + matched * 10, -len(path.parts))
 
     target = max(test_files, key=score, default=None)
@@ -284,7 +296,8 @@ def _select_test_files(
             compactness,
         )
 
-    # 列表已按路径排序；max 在同分时保留第一个，因而跨文件系统仍可复现。
+    # The list is already sorted by path; max keeps the first on ties, so selection
+    # remains reproducible across filesystems.
     regression = max(
         (path for path in test_files if path != target),
         key=adjacent_score,
@@ -294,7 +307,7 @@ def _select_test_files(
 
 
 def _django_test_prefixes(source_paths: list[Path]) -> set[str]:
-    """把 Django 源码子系统映射到测试 app，避免仅凭通用文件名误选模块。"""
+    """Map Django source subsystems to test apps, avoiding module misselection based only on a generic file name."""
 
     mappings = {
         ("django", "forms"): "forms_tests",
@@ -317,12 +330,14 @@ def _pytest_commands(
     target: Path,
     regression: Path | None,
 ) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
-    """为 pytest 仓库构造目标文件和不同相邻范围的两条命令。"""
+    """Build the two commands for pytest repositories: the target file and a different adjacent scope."""
 
     regression_path = regression
     if regression_path is None and target.parent != Path("."):
-        # 极小仓库只有一个测试文件时退回其目录；argv 仍与目标文件不同，并能覆盖
-        # 同目录 fixture/收集行为。仓库根目录不作为回退，避免意外跑全量测试。
+        # When a tiny repository has a single test file, fall back to its directory;
+        # the argv still differs from the target file and can cover same-directory
+        # fixture/collection behavior. The repository root is not used as a fallback,
+        # to avoid accidentally running the full test suite.
         regression_path = target.parent
     if regression_path is None:
         return None
@@ -337,11 +352,13 @@ def _sympy_commands(
     target: Path,
     regression: Path | None,
 ) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
-    """为不预装 pytest 的 SymPy 镜像生成项目原生测试命令。
+    """Generate project-native test commands for SymPy images that do not preinstall pytest.
 
-    SWE-bench 的旧版 SymPy 镜像只保证 ``bin/test`` 可用。``--no-colors`` 让持久化
-    日志不含终端控制字符，``-C`` 关闭 runner 自身缓存，防止基线与候选在同一实验
-    中受到仓库内部缓存影响；父进程自己的结果缓存仍由 patch digest 严格控制。
+    The old SWE-bench SymPy images only guarantee ``bin/test`` is available.
+    ``--no-colors`` keeps terminal control characters out of the persisted log, and
+    ``-C`` disables the runner's own cache so the baseline and candidate are not
+    affected by in-repository cache within one experiment; the parent's own result
+    cache remains strictly keyed by the patch digest.
     """
 
     regression_path = regression
@@ -361,7 +378,7 @@ def _django_commands(
     target: Path,
     regression: Path | None,
 ) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
-    """把 ``tests/`` 下路径转换成 Django 自带 runner 接受的 dotted label。"""
+    """Convert a path under ``tests/`` into a dotted label accepted by Django's own runner."""
 
     if not target.parts or target.parts[0] != "tests" or len(target.parts) < 2:
         return None
@@ -370,8 +387,9 @@ def _django_commands(
     if len(relative.parts) >= 2:
         regression_label = relative.parts[0]
     elif regression is not None and regression.parts[:1] == ("tests",):
-        # 少数 Django 根级测试（如 tests/test_sqlite.py）没有 app 可扩大；此时
-        # 使用规划器选出的另一个测试模块，仍保证两条命令覆盖不同范围。
+        # A few Django root-level tests (such as tests/test_sqlite.py) have no app to
+        # widen to; in that case use the other test module selected by the planner,
+        # still ensuring the two commands cover different scopes.
         regression_label = ".".join(
             regression.relative_to("tests").with_suffix("").parts
         )
@@ -391,18 +409,19 @@ def _django_commands(
 
 
 def _remove_control_path(path: Path) -> None:
-    """只清理隔离仓库内固定名称的控制路径，不跟随目录 symlink。"""
+    """Clean up only the fixed-name control path inside the isolated repository, without following a directory symlink."""
 
     if path.is_symlink() or not path.is_dir():
         path.unlink(missing_ok=True)
     else:
-        # 目录只可能由当前 Agent 在一次性 workspace 中创建；精确删除保留“控制
-        # 文件绝不进入 patch”的安全边界，同时不会扩大到仓库其他内容。
+        # A directory can only have been created by the current Agent in the one-shot
+        # workspace; precise removal preserves the "control file never enters the
+        # patch" safety boundary without extending to the rest of the repository.
         shutil.rmtree(path)
 
 
 def _validate_plan(value: Any) -> str | None:
-    """返回首个验证错误；``None`` 表示 argv 可直接交给 subprocess。"""
+    """Return the first validation error; ``None`` means the argv can be handed directly to subprocess."""
 
     expected_fields = {"target_argv", "regression_argv"}
     if not isinstance(value, dict) or set(value) != expected_fields:
@@ -419,7 +438,7 @@ def _validate_plan(value: Any) -> str | None:
 
 
 def _validate_argv(argv: Any, field: str) -> str | None:
-    """校验一条无 shell 的测试 argv，并在错误中保留字段名称。"""
+    """Validate one shell-free test argv, preserving the field name in errors."""
 
     if not isinstance(argv, list) or not argv or len(argv) > _MAX_ARGUMENTS:
         return f"{field} must contain between 1 and {_MAX_ARGUMENTS} string items"
@@ -430,8 +449,10 @@ def _validate_argv(argv: Any, field: str) -> str | None:
             return f"{field} items cannot contain control characters"
 
     executable = Path(argv[0])
-    # 测试在容器固定的 /testbed 下启动；禁止绝对路径和父目录逃逸，防止模型选择
-    # 镜像外的宿主工具。shell、网络和包管理入口即使在无网络容器中也没有必要。
+    # Tests start under the container's fixed /testbed; forbid absolute paths and
+    # parent-directory escapes so the model cannot pick host tools outside the image.
+    # Shell, network, and package-management entries are unnecessary even in an
+    # offline container.
     if executable.is_absolute() or ".." in executable.parts:
         return "test executable must stay relative to /testbed or use PATH"
     if executable.name.lower() in _FORBIDDEN_EXECUTABLES:

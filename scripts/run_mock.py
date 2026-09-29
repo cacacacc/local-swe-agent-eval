@@ -1,7 +1,7 @@
-"""通过 Phase 2 产物流水线运行一道确定性的 Mock 任务。
+"""Run one deterministic Mock task through the Phase 2 artifact pipeline.
 
-该 CLI 用于在不启动真实 LLM 的情况下端到端验证：任务加载、仓库准备、
-Mock 修改、Git patch 收集以及运行产物持久化。
+This CLI verifies end-to-end, without starting a real LLM: task loading, repository
+preparation, Mock modification, Git patch collection, and run artifact persistence.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from benchmark.task import SWEbenchTask
 from tracking.run_manager import RunManager
 
 
-# 固定文本让每次 Mock 运行具有相同输入，便于比较产物。
+# The fixed text gives every Mock run identical input, making artifacts easy to compare.
 MOCK_PROMPT = """Phase 2 mock run.
 Create one deterministic marker file and emit only observable actions.
 Do not access the network.
@@ -31,7 +31,7 @@ def run_mock_task(
     *,
     workspace_base_commit: str | None = None,
 ) -> Path:
-    """执行 Mock Agent，并按隔离仓库基线收集完整补丁。"""
+    """Run the Mock Agent and collect the full patch against the isolated repository baseline."""
 
     session = RunManager(runs_root).start(
         task,
@@ -45,7 +45,7 @@ def run_mock_task(
         result = MockAgentRunner().run(task, repository)
         patch = session.collect_patch(repository)
     except Exception as error:
-        # Agent 失败时仍尽量收集部分 patch，避免丢失可用于诊断的现场。
+        # Even when the Agent fails, try to collect a partial patch so diagnostic state is not lost.
         try:
             partial_patch = session.collect_patch(repository)
         except Exception as patch_error:
@@ -85,7 +85,7 @@ def run_mock_task(
 
 
 def _load_tasks(path: Path) -> SWEbenchLoader:
-    """根据文件扩展名选择 JSON 或 JSONL 加载器。"""
+    """Select the JSON or JSONL loader based on the file extension."""
 
     if path.suffix.lower() == ".jsonl":
         return SWEbenchLoader.from_jsonl(path)
@@ -95,7 +95,7 @@ def _load_tasks(path: Path) -> SWEbenchLoader:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """声明命令行接口；路径默认值与实验配置的目录布局一致。"""
+    """Declare the command-line interface; path defaults match the experiment config's directory layout."""
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tasks", type=Path, required=True)
@@ -112,7 +112,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    """解析参数、准备仓库、运行 Mock 流水线并打印产物路径。"""
+    """Parse arguments, prepare the repository, run the Mock pipeline, and print the artifact path."""
 
     arguments = build_parser().parse_args()
     task = _load_tasks(arguments.tasks).get(arguments.instance_id)

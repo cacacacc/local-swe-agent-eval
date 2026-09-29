@@ -1,46 +1,46 @@
-# 配置格式版本；解析器只接受当前明确支持的版本。
+# Config format version; the parser only accepts the currently explicitly supported versions.
 schema_version: 1
 
-# 三道 Dev 题已完成并由官方 harness 判定 resolved；正式十题使用此冻结配置。
+# The three Dev tasks are complete and judged resolved by the official harness; the formal ten tasks use this frozen config.
 experiment:
   name: local-qwen35-9b-evaluation
   phase: evaluation
   random_seed: 42
   configuration_frozen: true
 
-# 正式题目清单必须预先固定，不能根据运行结果临时更换失败题目。
+# The formal task list must be fixed in advance; failed tasks must not be swapped out based on run results.
 dataset:
   name: princeton-nlp/SWE-bench_Verified
   split: test
   tasks_file: experiments/evaluation_tasks.json
 
-# 模型参数必须与 Dev 阶段验证通过的本地模型及最终报告一致；任何变更都会产生新的 fingerprint。
-# 三道 Dev 题完成后已冻结；正式运行期间不得再修改此模型参数组。
-# 8K 输出上限为工具结果和后续轮次保留至少 24K context，防止 auto-compact 抖动。
+# Model parameters must match the locally validated Dev model and the final report; any change produces a new fingerprint.
+# Frozen after the three Dev tasks were completed; this model parameter group must not be modified during the formal run.
+# The 8K output cap preserves at least 24K of context for tool results and subsequent turns, preventing auto-compact churn.
 model:
   runtime: ollama
   name: qwen3.5:9b
   context_length: 32768
   max_output_tokens: 8192
 
-# 每道题使用相同 Agent、超时和 Prompt，以控制任务间实验变量。
+# Each task uses the same Agent, timeout, and Prompt to control experimental variables across tasks.
 agent:
   framework: claude-code
   timeout_seconds: 5400
   max_turns: 30
   prompt_template: prompts/swe_agent_prompt.txt
 
-# 环境应提前准备完成；Agent 求解期间禁止访问外部网络。
+# The environment should be prepared in advance; external network access is forbidden during Agent solving.
 network:
   environment_preparation: true
   formal_solving: false
 
-# 并发和缓存设置会影响硬件负载，因此属于需要冻结的实验配置。
+# Concurrency and cache settings affect hardware load, so they belong to the frozen experiment configuration.
 evaluation:
   max_workers: 2
   cache_level: env
 
-# 产物与缓存使用项目相对路径，保证配置可在另一台机器复现。
+# Artifacts and caches use project-relative paths so the config can be reproduced on another machine.
 storage:
   repository_cache: repo-cache
   workspaces: workspaces

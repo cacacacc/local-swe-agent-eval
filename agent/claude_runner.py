@@ -1,8 +1,10 @@
-"""通过 Claude Code CLI 调用本机 Ollama，并保留可审计的可观察轨迹。
+"""Invoke local Ollama through the Claude Code CLI and preserve an auditable observable trajectory.
 
-本模块只负责单道题的 Agent 进程边界。调用方负责准备干净 worktree、创建运行
-目录和收集最终 Git patch。CLI 使用结构化流输出；解析时会丢弃 thinking 等隐藏
-推理字段，只保存模型可见回复、工具调用、工具结果和用量等实验事实。
+This module is responsible only for the per-task Agent process boundary. The caller
+is responsible for preparing a clean worktree, creating the run directory, and
+collecting the final Git patch. The CLI uses structured streaming output; parsing
+discards hidden reasoning fields such as thinking and keeps only experiment facts
+such as model-visible replies, tool calls, tool results, and usage.
 """
 
 from __future__ import annotations
@@ -21,12 +23,12 @@ from uuid import UUID
 
 
 class ClaudeCodeError(RuntimeError):
-    """当 Claude Code 配置不安全、无法启动或输出不可解析时抛出。"""
+    """Raised when the Claude Code configuration is unsafe, cannot start, or its output is unparseable."""
 
 
 @dataclass(frozen=True, slots=True)
 class ClaudeCodeResult:
-    """一次 Claude Code 进程的完整可观察结果。"""
+    """The complete observable result of one Claude Code process."""
 
     exit_code: int
     agent_log: str
@@ -39,11 +41,13 @@ class ClaudeCodeResult:
 def combine_phase_results(
     phases: Sequence[tuple[str, ClaudeCodeResult]],
 ) -> ClaudeCodeResult:
-    """合并多个独立 Claude 会话，同时保留逐阶段终止原因与用量。
+    """Merge multiple independent Claude sessions while preserving per-phase termination reasons and usage.
 
-    最后一个验证会话决定总体 exit code；实现阶段因 turn 预算结束并不应让一个
-    后续已成功修复的运行仍被标记为失败。任何阶段的墙钟超时仍单独记录在 metrics，
-    便于分析预算是否合理。
+    The last verification session decides the overall exit code; the implementation
+    phase ending because of the turn budget must not cause a run that was later
+    successfully repaired to still be marked as failed. A wall-clock timeout in any
+    phase is still recorded separately in metrics, making it easy to analyze whether
+    the budget is reasonable.
     """
 
     if not phases:
@@ -194,8 +198,10 @@ def combine_phase_results(
     metrics: dict[str, Any] = {
         "agent_turns": total_turns,
         "tool_calls": total_tool_calls,
-        # 旧字段保留为兼容别名，但只等于调度器确认创建过容器的执行次数，不能再
-        # 通过 Bash 文本中出现脚本名称来推测。
+        # The legacy field is kept as a compatibility alias, but it only equals the
+        # number of executions for which the scheduler confirmed a container was
+        # created; it must no longer be inferred from script names appearing in Bash
+        # text.
         "visible_test_calls": total_visible_test_executions,
         "visible_test_requests": total_visible_test_requests,
         "visible_test_missing": total_visible_test_missing,
@@ -231,8 +237,9 @@ def combine_phase_results(
             total_visible_test_unchanged_baseline_failures
         ),
         "visible_test_timed_out": total_visible_test_timed_out,
-        # duration_seconds 只统计本轮实际等待 Docker 的时间；缓存命中返回 0，
-        # 单题完整墙钟仍以 metadata.runtime_seconds 为准。
+        # duration_seconds only counts the time this round actually waited on Docker;
+        # a cache hit returns 0, and the full per-task wall clock still uses
+        # metadata.runtime_seconds as the source of truth.
         "duration_seconds": round(total_visible_test_duration_seconds, 6),
         "cache_hit": any_cache_hit,
         "baseline_timed_out": any_baseline_timed_out,
@@ -255,13 +262,13 @@ def combine_phase_results(
 
 
 def _utc_now() -> str:
-    """返回带时区的 UTC 时间，供轨迹事件统一使用。"""
+    """Return the current UTC time with a timezone, for uniform use across trajectory events."""
 
     return datetime.now(timezone.utc).isoformat()
 
 
 def _sanitize_value(value: Any) -> Any:
-    """递归移除隐藏推理字段，同时保留可复现实验所需的可见数据。"""
+    """Recursively remove hidden reasoning fields while keeping the visible data needed for a reproducible experiment."""
 
     if isinstance(value, Mapping):
         return {
@@ -272,8 +279,9 @@ def _sanitize_value(value: Any) -> Any:
     if isinstance(value, list):
         sanitized_items = []
         for item in value:
-            # Claude stream 的 thinking block 以 type 标识；整块删除比只清空文本
-            # 更能保证 trajectory 不会暗示保存了模型私有思维过程。
+            # Claude stream thinking blocks are identified by their type; deleting the
+            # whole block, rather than only clearing the text, better guarantees the
+            # trajectory cannot imply the model's private thought process was saved.
             if isinstance(item, Mapping) and item.get("type") in {
                 "thinking",
                 "redacted_thinking",
@@ -293,11 +301,13 @@ _TEST_COMMAND_PATTERN = re.compile(
 
 
 def _looks_like_test_command(command: str) -> bool:
-    """识别模型实际尝试执行的测试，而不是对脚本名称做子串计数。
+    """Recognize tests the model actually tried to execute, rather than substring-counting script names.
 
-    ``cat scripts/run_visible_tests.py`` 不应被记成测试；直接执行该脚本、仓库专用
-    ``runtests.py``/``bin/test`` 以及常见测试入口才属于模型发起的宿主测试尝试。
-    该指标只用于合规分析，真正的 visible execution 由 Docker 调度结果产生。
+    ``cat scripts/run_visible_tests.py`` must not be counted as a test; directly
+    executing that script, the repository-specific ``runtests.py``/``bin/test``, and
+    the common test entry points are what count as model-initiated host test attempts.
+    This metric is used only for compliance analysis; the real visible execution comes
+    from the Docker scheduling result.
     """
 
     stripped = command.strip()
@@ -319,7 +329,7 @@ def _looks_like_test_command(command: str) -> bool:
 
 
 class ClaudeCodeRunner:
-    """以固定 CLI 参数执行 Claude Code，并实施本地模型与外联限制。"""
+    """Run Claude Code with fixed CLI arguments while enforcing local-model and outbound restrictions."""
 
     def __init__(
         self,
@@ -337,7 +347,7 @@ class ClaudeCodeRunner:
         resume_session: bool = False,
         persist_session: bool = False,
     ) -> None:
-        """验证实验上限、工具门禁、临时会话状态和本地 endpoint。"""
+        """Validate experiment limits, tool gating, transient session state, and the local endpoint."""
 
         if (
             timeout_seconds <= 0
@@ -377,7 +387,8 @@ class ClaudeCodeRunner:
         self.base_url = base_url.rstrip("/")
         self.executable = executable
         self.allow_bash = allow_bash
-        # 白名单只由父进程固定策略传入；保持首次出现顺序便于审计 CLI 命令。
+        # The allowlist is passed in only from the parent's fixed policy; preserving
+        # first-occurrence order makes the CLI command easier to audit.
         self.available_tools = (
             tuple(dict.fromkeys(available_tools))
             if available_tools is not None
@@ -388,19 +399,21 @@ class ClaudeCodeRunner:
         self.persist_session = persist_session
 
     def command(self, prompt: str) -> list[str]:
-        """构造无 shell 插值的固定命令，避免题目文本被解释为命令。"""
+        """Build a fixed command without shell interpolation, so problem text cannot be interpreted as a command."""
 
         disallowed_tools = ["WebFetch", "WebSearch"]
         if not self.allow_bash:
-            # Verification/Recovery 只允许内置读写工具；真正的测试由父进程在
-            # Docker 中执行，CLI 级禁用比 Prompt 软约束更能阻止宿主命令。
+            # Verification/Recovery only allow built-in read/write tools; real tests
+            # are executed by the parent process inside Docker, and CLI-level disabling
+            # blocks host commands more effectively than a Prompt soft constraint.
             disallowed_tools.append("Bash")
         disallowed_tools = list(dict.fromkeys(disallowed_tools))
         command = [
             self.executable,
             "--print",
-            # prompt 紧跟固定元数参数，不能放在可变长的 --disallowed-tools
-            # 参数之后，否则 CLI 解析器可能把题目文本误当成另一个工具规则。
+            # prompt follows the fixed-arity arguments and must not come after the
+            # variable-length --disallowed-tools argument, otherwise the CLI parser
+            # could mistake the problem text for another tool rule.
             prompt,
             "--bare",
             "--verbose",
@@ -412,13 +425,15 @@ class ClaudeCodeRunner:
             str(self.max_turns),
         ]
         if self.available_tools is not None:
-            # ``--tools`` 是真正的可用工具白名单。使用单个逗号分隔参数，避免其
-            # 可变长解析吞掉后续固定 CLI 选项。
+            # ``--tools`` is the real available-tools allowlist. Pass a single
+            # comma-separated argument so its variable-length parsing does not swallow
+            # the fixed CLI options that follow.
             command.extend(("--tools", ",".join(self.available_tools)))
         if self.session_id is not None:
-            # Recovery gate 的 Read 与 Edit 是两个不同工具白名单的 CLI 调用；
-            # 显式 session ID 让第二步继承第一步已读取文件的上下文，同时避免
-            # ``--continue`` 意外接入用户或其他题目的最近会话。
+            # The Recovery gate's Read and Edit are two CLI invocations with different
+            # tool allowlists; an explicit session ID lets the second step inherit the
+            # context of files read in the first step, while avoiding ``--continue``
+            # accidentally attaching to the user's or another task's most recent session.
             command.extend(
                 (
                     "--resume" if self.resume_session else "--session-id",
@@ -442,10 +457,11 @@ class ClaudeCodeRunner:
         return command
 
     def environment(self, source: Mapping[str, str] | None = None) -> dict[str, str]:
-        """生成最小化云凭据且限制常见外联路径的子进程环境。"""
+        """Build a subprocess environment that strips cloud credentials and limits common outbound paths."""
 
         environment = dict(os.environ if source is None else source)
-        # 绝不把可能存在的 Anthropic 云密钥传给 Agent；Ollama 只要求 token 非空。
+        # Never pass a possibly-present Anthropic cloud key to the Agent; Ollama only
+        # requires the token to be non-empty.
         for name in (
             "ANTHROPIC_API_KEY",
             "AWS_ACCESS_KEY_ID",
@@ -464,14 +480,17 @@ class ClaudeCodeRunner:
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
                 "DISABLE_LOGIN_COMMAND": "1",
                 "CLAUDE_CODE_MAX_CONTEXT_TOKENS": str(self.context_length),
-                # 未收录于 Claude Code model catalog 的本地模型可能被默认赋予接近整个
-                # context 的输出预算；显式限制后才能给 Prompt 和工具结果保留稳定空间。
+                # A local model absent from the Claude Code model catalog may be given
+                # an output budget close to the whole context by default; only an
+                # explicit limit reserves stable space for the Prompt and tool results.
                 "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(self.max_output_tokens),
                 "CLAUDE_CODE_MAX_TURNS": str(self.max_turns),
                 "MCP_CONNECTION_NONBLOCKING": "true",
-                # Claude Code 2.1.280 不可靠地遵循 HTTP NO_PROXY；为保证本机
-                # Ollama 可达，只拦截通常承载 GitHub/PyPI 等访问的 HTTPS。
-                # Web 工具和云凭据另行禁用，但这仍不冒充内核防火墙级隔离。
+                # Claude Code 2.1.280 does not reliably honor HTTP NO_PROXY; to keep
+                # local Ollama reachable, only intercept HTTPS, which usually carries
+                # GitHub/PyPI access. Web tools and cloud credentials are disabled
+                # separately, but this still does not pretend to be kernel-firewall-level
+                # isolation.
                 "HTTPS_PROXY": "http://127.0.0.1:9",
                 "https_proxy": "http://127.0.0.1:9",
                 "NO_PROXY": "localhost,127.0.0.1,::1",
@@ -481,7 +500,7 @@ class ClaudeCodeRunner:
         return environment
 
     def run(self, repository: Path | str, prompt: str) -> ClaudeCodeResult:
-        """在目标 worktree 运行 Agent，并在墙钟超时后终止整个进程组。"""
+        """Run the Agent in the target worktree and terminate the whole process group on wall-clock timeout."""
 
         repository_path = Path(repository).resolve()
         if not repository_path.is_dir():
@@ -534,7 +553,7 @@ class ClaudeCodeRunner:
         events: Sequence[Mapping[str, Any]],
         timed_out: bool,
     ) -> dict[str, Any]:
-        """从清洗后的事件计算报告所需指标，不依赖模型的成功声明。"""
+        """Compute the metrics needed for reporting from the sanitized events, without relying on the model's success claims."""
 
         turns = 0
         tool_calls = 0
@@ -570,8 +589,9 @@ class ClaudeCodeRunner:
                         if _looks_like_test_command(command):
                             agent_test_command_calls += 1
                             host_test_calls += 1
-            # Claude Code 的最终 result 事件提供权威用量；只读取该事件，避免把
-            # 每条 message 的增量 usage 与最终累计值重复相加。
+            # Claude Code's final result event provides the authoritative usage; read
+            # only that event so the per-message incremental usage is not added twice
+            # to the final cumulative value.
             if event_type == "result":
                 raw_usage = details.get("usage")
                 if isinstance(raw_usage, Mapping):
@@ -580,8 +600,9 @@ class ClaudeCodeRunner:
                         for key, value in raw_usage.items()
                         if isinstance(value, int) and not isinstance(value, bool)
                     }
-                # 直接保存 Claude Code 给出的可观察终止分类，避免事后只能从
-                # agent.log 文本猜测 max_turns、blocking_limit 等根因。
+                # Preserve the observable termination classification Claude Code
+                # provides directly, avoiding having to guess root causes such as
+                # max_turns or blocking_limit from agent.log text afterwards.
                 for source_key, destination_key in (
                     ("terminal_reason", "terminal_reason"),
                     ("subtype", "result_subtype"),
@@ -629,7 +650,7 @@ class ClaudeCodeRunner:
 
     @staticmethod
     def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
-        """超时时终止 Claude 及其 Bash 子进程，避免测试容器在后台残留。"""
+        """On timeout, terminate Claude and its Bash subprocesses so no test container lingers in the background."""
 
         if os.name != "nt":
             try:
@@ -649,7 +670,7 @@ class ClaudeCodeRunner:
         stdout: str,
         stderr: str,
     ) -> tuple[list[dict[str, Any]], str, str]:
-        """把 JSONL 转成可观察事件，并单独提取测试相关命令输出。"""
+        """Convert JSONL into observable events and separately extract the test-related command output."""
 
         events: list[dict[str, Any]] = []
         normalized_lines: list[str] = []
@@ -688,7 +709,8 @@ class ClaudeCodeRunner:
 
         if stderr.strip():
             sequence += 1
-            # stderr 是公开的进程诊断信息，不包含 Claude stream 的 thinking block。
+            # stderr is public process diagnostic information and contains no Claude
+            # stream thinking blocks.
             events.append(
                 {
                     "sequence": sequence,
@@ -719,7 +741,7 @@ class ClaudeCodeRunner:
         test_tool_ids: set[str],
         test_lines: list[str],
     ) -> None:
-        """从消息块中关联测试 Bash 调用及其 tool_result，形成测试日志。"""
+        """Correlate test Bash calls with their tool_results across message blocks to form a test log."""
 
         if not isinstance(event, Mapping):
             return

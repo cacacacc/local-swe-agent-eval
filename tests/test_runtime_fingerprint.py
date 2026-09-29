@@ -1,4 +1,4 @@
-"""验证运行时指纹使用当前实验解释器，而不依赖宿主机命令别名。"""
+"""Verify that the runtime fingerprint uses the current experiment interpreter rather than host command aliases."""
 
 from pathlib import Path
 import sys
@@ -7,7 +7,7 @@ from experiment.runtime_fingerprint import RuntimeFingerprintCollector
 
 
 def test_python_version_uses_current_interpreter(tmp_path: Path, monkeypatch) -> None:
-    """没有裸 `python` 命令时，指纹采集仍应复用启动批处理的解释器。"""
+    """When there is no bare `python` command, fingerprint collection should still reuse the interpreter that launched the batch."""
 
     prompt = tmp_path / "prompt.txt"
     prompt.write_text("test prompt", encoding="utf-8")

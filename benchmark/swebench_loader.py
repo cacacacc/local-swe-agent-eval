@@ -1,7 +1,8 @@
-"""加载 SWE-bench 任务，同时阻止参考答案进入 Agent 上下文。
+"""Load SWE-bench tasks while keeping reference answers out of the Agent context.
 
-支持本地 JSON、JSONL 和可选的 Hugging Face 数据源。无论输入来自哪里，
-最终都必须经过 :class:`SWEbenchTask` 的字段白名单与格式验证。
+Supports local JSON, JSONL, and an optional Hugging Face data source. Regardless of
+where the input comes from, it must ultimately pass the field whitelist and format
+validation of :class:`SWEbenchTask`.
 """
 
 from __future__ import annotations
@@ -14,14 +15,14 @@ from .task import SWEbenchTask, TaskValidationError
 
 
 class DatasetFormatError(ValueError):
-    """当任务集合格式错误或内部不一致时抛出。"""
+    """Raised when the task collection is malformed or internally inconsistent."""
 
 
 class SWEbenchLoader(Sequence[SWEbenchTask]):
-    """保持输入顺序且不含重复 instance ID 的安全任务集合。"""
+    """A safe task collection that preserves input order and contains no duplicate instance IDs."""
 
     def __init__(self, tasks: Iterable[SWEbenchTask]) -> None:
-        # tuple 保证加载完成后顺序稳定，字典则提供 O(1) 的按 ID 查询。
+        # The tuple keeps order stable after loading, while the dict provides O(1) lookup by ID.
         self._tasks = tuple(tasks)
         self._by_id: dict[str, SWEbenchTask] = {}
         for task in self._tasks:
@@ -35,7 +36,7 @@ class SWEbenchLoader(Sequence[SWEbenchTask]):
     def from_records(
         cls, records: Iterable[Mapping[str, Any]]
     ) -> "SWEbenchLoader":
-        """将一组原始记录转换成经过安全验证的任务集合。"""
+        """Convert a batch of raw records into a safely validated task collection."""
 
         tasks: list[SWEbenchTask] = []
         for index, record in enumerate(records):
@@ -49,7 +50,7 @@ class SWEbenchLoader(Sequence[SWEbenchTask]):
 
     @classmethod
     def from_json(cls, path: Path | str) -> "SWEbenchLoader":
-        """从顶层为数组的 UTF-8 JSON 文件加载任务。"""
+        """Load tasks from a UTF-8 JSON file whose top level is an array."""
 
         source = Path(path)
         try:
@@ -63,7 +64,7 @@ class SWEbenchLoader(Sequence[SWEbenchTask]):
 
     @classmethod
     def from_jsonl(cls, path: Path | str) -> "SWEbenchLoader":
-        """逐行读取 JSONL；空行会被忽略，错误会包含准确行号。"""
+        """Read JSONL line by line; blank lines are ignored and errors carry the exact line number."""
 
         source = Path(path)
         records: list[Mapping[str, Any]] = []
@@ -96,10 +97,11 @@ class SWEbenchLoader(Sequence[SWEbenchTask]):
         *,
         split: str = "test",
     ) -> "SWEbenchLoader":
-        """通过可选的 Hugging Face 依赖下载数据集。
+        """Download the dataset via the optional Hugging Face dependency.
 
-        该方法只属于环境准备阶段；正式离线求解期间禁止调用，避免网络访问
-        破坏实验边界或引入随时间变化的数据。
+        This method belongs only to the environment-preparation phase; it must not be
+        called during formal offline solving, to prevent network access from breaking
+        the experiment boundary or introducing time-varying data.
         """
 
         try:
@@ -113,7 +115,7 @@ class SWEbenchLoader(Sequence[SWEbenchTask]):
         return cls.from_records(dataset)
 
     def get(self, instance_id: str) -> SWEbenchTask:
-        """按唯一 ID 返回任务；未知 ID 会转换成包含上下文的错误。"""
+        """Return the task by its unique ID; an unknown ID is turned into an error with context."""
 
         try:
             return self._by_id[instance_id]
@@ -121,21 +123,21 @@ class SWEbenchLoader(Sequence[SWEbenchTask]):
             raise KeyError(f"unknown SWE-bench instance_id: {instance_id}") from error
 
     def select(self, instance_ids: Iterable[str]) -> "SWEbenchLoader":
-        """按调用方给出的顺序选择任务，用于固定实验题目顺序。"""
+        """Select tasks in the caller's given order, used to pin the experiment's task order."""
 
         return SWEbenchLoader(self.get(instance_id) for instance_id in instance_ids)
 
     def __len__(self) -> int:
-        """返回安全任务总数，实现 ``Sequence`` 协议。"""
+        """Return the total number of safe tasks, implementing the ``Sequence`` protocol."""
 
         return len(self._tasks)
 
     def __getitem__(self, index: int | slice) -> SWEbenchTask | tuple[SWEbenchTask, ...]:
-        """支持单个索引和切片访问。"""
+        """Support single-index and slice access."""
 
         return self._tasks[index]
 
     def __iter__(self) -> Iterator[SWEbenchTask]:
-        """按数据集原始顺序迭代任务。"""
+        """Iterate over tasks in the dataset's original order."""
 
         return iter(self._tasks)

@@ -1,8 +1,8 @@
-# 架构 ablation 配置：与原 evaluation.yaml 的正式基线分开保存和报告。
+# Architecture ablation config: kept and reported separately from the formal baseline in evaluation.yaml.
 schema_version: 1
 
-# 三道 Dev v2 已全部运行，官方结果为 2 resolved / 1 unresolved；此处冻结的是
-# 调度架构而不是成功率保证。十题结果不得替换原始 20% 正式结果。
+# All three Dev v2 tasks have been run, with the official result 2 resolved / 1 unresolved; what is frozen here is
+# the scheduling architecture, not a success-rate guarantee. The ten-task results must not replace the original 20% formal result.
 experiment:
   name: local-qwen35-9b-evaluation-v2
   phase: evaluation
@@ -14,7 +14,7 @@ dataset:
   split: test
   tasks_file: experiments/evaluation_tasks.json
 
-# 保持模型不变，使差异主要来自 30+10 双会话和父进程可见测试沙箱。
+# Keep the model unchanged so differences come mainly from the 30+10 dual-session and the parent-process visible test sandbox.
 model:
   runtime: ollama
   name: qwen3.5:9b
@@ -24,7 +24,7 @@ model:
 agent:
   framework: claude-code
   timeout_seconds: 5400
-  # 单题总墙钟预算覆盖模型与 Docker 阶段，防止多个局部超时串联失控。
+  # The per-task total wall-clock budget covers both the model and Docker phases, preventing multiple partial timeouts from cascading out of control.
   task_timeout_seconds: 1800
   max_turns: 40
   verification_turns: 10

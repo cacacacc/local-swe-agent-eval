@@ -1,4 +1,4 @@
-"""验证分阶段 Agent 的交付物门禁和失败分类。"""
+"""Verify the delivery gates and failure classification of the phased Agent."""
 
 import json
 from pathlib import Path
@@ -35,7 +35,7 @@ def _result(
     host_test_calls: int = 0,
     tool_calls: tuple[tuple[str, dict[str, object]], ...] = (),
 ) -> ClaudeCodeResult:
-    """构造不启动真实 Claude Code 的最小结果。"""
+    """Build a minimal result without launching real Claude Code."""
 
     events = tuple(
         {
@@ -70,7 +70,7 @@ def _result(
 
 
 def test_patch_gate_rejects_generic_success_with_empty_diff() -> None:
-    """模型正常退出但没有代码修改时，运行状态不得继续伪装成 completed。"""
+    """When the model exits cleanly without code changes, the run must not keep masquerading as completed."""
 
     validated = _apply_patch_gate(_result(), "\n")
 
@@ -89,7 +89,7 @@ def test_patch_gate_rejects_generic_success_with_empty_diff() -> None:
 def test_recovery_gate_requires_one_read_then_edit_on_the_same_source(
     tmp_path: Path,
 ) -> None:
-    """状态机必须拒绝测试文件 Read 和改到另一源码文件的 Edit。"""
+    """The state machine must reject a Read of a test file and an Edit of a different source file."""
 
     source = tmp_path / "src" / "widget.py"
     other = tmp_path / "src" / "other.py"
@@ -121,7 +121,7 @@ def test_recovery_gate_requires_one_read_then_edit_on_the_same_source(
 
 
 def test_recovery_handoff_keeps_visible_findings_without_tool_results() -> None:
-    """Recovery 只应接收公开结论和工具参数，不能携带 thinking 或工具输出。"""
+    """Recovery should only receive public conclusions and tool arguments, not thinking or tool output."""
 
     implementation = ClaudeCodeResult(
         exit_code=1,
@@ -183,7 +183,7 @@ def test_recovery_handoff_keeps_visible_findings_without_tool_results() -> None:
 def test_recovery_source_context_reads_only_recent_repository_source(
     tmp_path: Path,
 ) -> None:
-    """强制 Edit 上下文只能包含仓库内最近读取的受信任源码片段。"""
+    """Forced Edit context must contain only recently-read trusted source excerpts from the repository."""
 
     source = tmp_path / "src" / "parser.py"
     source.parent.mkdir()
@@ -239,7 +239,7 @@ def test_recovery_source_context_reads_only_recent_repository_source(
 
 
 def test_patch_gate_records_test_evidence_without_overriding_cli_failure() -> None:
-    """非空补丁和测试证据应被记录，但不能掩盖 Claude CLI 自身失败。"""
+    """Non-empty patches and test evidence should be recorded, but must not mask the Claude CLI's own failure."""
 
     validated = _apply_patch_gate(
         _result(
@@ -262,7 +262,7 @@ def test_patch_gate_records_test_evidence_without_overriding_cli_failure() -> No
 
 
 def test_patch_gate_rejects_only_new_reproduction_files() -> None:
-    """只新增复现或临时文件不能冒充对既有产品源码的修复。"""
+    """Adding only reproduction or scratch files must not masquerade as a fix to existing product source."""
 
     patch = (
         "diff --git a/reproduce.py b/reproduce.py\n"
@@ -277,7 +277,7 @@ def test_patch_gate_rejects_only_new_reproduction_files() -> None:
 
 
 def test_patch_gate_cannot_be_bypassed_by_modifying_existing_documentation() -> None:
-    """修改既有 README 仍不属于产品源码修复，不能绕过补丁门禁。"""
+    """Modifying an existing README is still not a product-source fix and must not bypass the patch gate."""
 
     patch = (
         "diff --git a/README.md b/README.md\n"
@@ -291,7 +291,7 @@ def test_patch_gate_cannot_be_bypassed_by_modifying_existing_documentation() -> 
 
 
 def test_v2_config_keeps_scheduler_resource_limits() -> None:
-    """v2 配置继续固定父进程 Docker 测试的资源边界。"""
+    """The v2 config keeps fixing the resource bounds of the parent-process Docker tests."""
 
     config = ExperimentConfig.load(PROJECT_ROOT / "configs" / "dev_v2.yaml")
     assert config.agent.visible_test_sandbox is True
@@ -305,7 +305,7 @@ def test_scheduler_metrics_require_a_real_sandbox_result(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """只有沙箱返回结构化结果后，execution 和 passed 指标才能增加。"""
+    """Execution and passed metrics must only increase after the sandbox returns a structured result."""
 
     request = StructuredTestPlanRequest(
         status="generated",
@@ -318,7 +318,7 @@ def test_scheduler_metrics_require_a_real_sandbox_result(
     monkeypatch.setattr("scripts.run_claude.consume_test_plan", lambda _: request)
 
     class FakeSandbox:
-        """记录 argv 并模拟一次成功的 Docker 测试。"""
+        """Record argv and simulate one successful Docker test."""
 
         def run(
             self,
@@ -375,7 +375,7 @@ def test_scheduler_metrics_require_a_real_sandbox_result(
 def test_scheduler_reuses_unchanged_successful_results_and_records_metrics(
     tmp_path: Path,
 ) -> None:
-    """Final 阶段应复用稳定 baseline 和未变的成功 candidate，并把命中写入指标。"""
+    """The Final phase should reuse the stable baseline and unchanged successful candidate, and record the hit in metrics."""
 
     request = StructuredTestPlanRequest(
         status="generated",
@@ -386,7 +386,7 @@ def test_scheduler_reuses_unchanged_successful_results_and_records_metrics(
     calls: list[tuple[tuple[str, ...], bool, float]] = []
 
     class FakeSandbox:
-        """返回带耗时的成功结果，供测试确认第二阶段没有再次启动容器。"""
+        """Return a successful result with a duration, so the test can confirm the second phase did not start a container again."""
 
         timeout_seconds = 900
 
@@ -449,7 +449,7 @@ def test_scheduler_reuses_unchanged_successful_results_and_records_metrics(
 def test_scheduler_reruns_failed_candidate_but_reuses_baseline(
     tmp_path: Path,
 ) -> None:
-    """候选失败不得被缓存掩盖，Final 仍需重跑 candidate 以容忍偶发故障。"""
+    """Candidate failures must not be masked by the cache; Final must rerun the candidate to tolerate transient faults."""
 
     request = StructuredTestPlanRequest(
         status="generated",
@@ -460,7 +460,7 @@ def test_scheduler_reruns_failed_candidate_but_reuses_baseline(
     calls: list[bool] = []
 
     class FakeSandbox:
-        """所有 candidate 都失败，用调用次数证明它没有被复用。"""
+        """All candidates fail, so the call count proves they were not reused."""
 
         timeout_seconds = 900
 
@@ -503,7 +503,7 @@ def test_scheduler_reruns_failed_candidate_but_reuses_baseline(
 
 
 def test_scheduler_does_not_cache_infrastructure_errors(tmp_path: Path) -> None:
-    """runner 缺失的基线和候选都必须重跑，且不得形成可比较测试证据。"""
+    """Baseline and candidate missing their runner must both rerun and must not form comparable test evidence."""
 
     request = StructuredTestPlanRequest(
         status="generated",
@@ -514,7 +514,7 @@ def test_scheduler_does_not_cache_infrastructure_errors(tmp_path: Path) -> None:
     calls: list[bool] = []
 
     class FakeSandbox:
-        """稳定返回缺少 pytest 的启动错误，验证该结果不会污染调度缓存。"""
+        """Consistently return a missing-pytest launch error to verify it does not pollute the scheduling cache."""
 
         timeout_seconds = 900
 
@@ -568,7 +568,7 @@ def test_scheduler_does_not_cache_infrastructure_errors(tmp_path: Path) -> None:
 def test_scheduler_records_exhausted_task_budget_without_starting_docker(
     tmp_path: Path,
 ) -> None:
-    """总预算已耗尽时不得再启动容器，并应在事件和指标中明确记录原因。"""
+    """When the total budget is exhausted, no container may start, and the reason must be clearly recorded in events and metrics."""
 
     request = StructuredTestPlanRequest(
         status="generated",
@@ -578,7 +578,7 @@ def test_scheduler_records_exhausted_task_budget_without_starting_docker(
     )
 
     class FakeSandbox:
-        """预算门禁应在触达沙箱前结束调度。"""
+        """The budget gate should end scheduling before reaching the sandbox."""
 
         timeout_seconds = 900
 
@@ -618,7 +618,7 @@ def test_run_task_preserves_artifacts_when_total_budget_is_already_exhausted(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """单题硬截止应生成 timeout 产物和五项指标，而不是抛异常丢失运行目录。"""
+    """The per-task hard deadline should produce timeout artifacts and five metrics instead of raising and losing the run directory."""
 
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -649,7 +649,7 @@ def test_run_task_preserves_artifacts_when_total_budget_is_already_exhausted(
     ).stdout.strip()
 
     class FakeSandbox:
-        """预算在 Agent 前耗尽，本测试只需要完成镜像元数据预检。"""
+        """The budget is exhausted before the Agent, so this test only needs the image-metadata precheck."""
 
         def __init__(self, **kwargs):
             pass
@@ -710,7 +710,7 @@ def test_run_task_preserves_artifacts_when_total_budget_is_already_exhausted(
 def test_scheduler_marks_pass_to_fail_and_failure_signature_delta_as_regression(
     tmp_path: Path,
 ) -> None:
-    """除 pass→fail 外，已有失败集合上新增测试 ID 也必须判为回归。"""
+    """Besides pass→fail, a newly added test ID on top of existing failures must also count as a regression."""
 
     request = StructuredTestPlanRequest(
         status="generated",
@@ -720,7 +720,7 @@ def test_scheduler_marks_pass_to_fail_and_failure_signature_delta_as_regression(
     )
 
     class FakeSandbox:
-        """目标命令 pass→fail，相邻命令在原失败上新增一个失败测试。"""
+        """The target command goes pass→fail, and the neighbor adds one failing test on top of its original failure."""
 
         def run(
             self,
@@ -783,12 +783,12 @@ def test_scheduler_marks_pass_to_fail_and_failure_signature_delta_as_regression(
     assert "Comparison: new_regression" in evidence.prompt_text()
     assert "tests/test_neighbor.py::test_added" in evidence.prompt_text()
     assert "Comparison: new_regression" in evidence.repair_prompt_text()
-    # 聚焦 prompt 按计划顺序只交接第一条新增回归，避免两份失败互相稀释。
+    # The focused prompt hands off only the first new regression in plan order, so two failures do not dilute each other.
     assert "tests/test_target.py::test_bug" in evidence.repair_prompt_text()
 
 
 def test_missing_plan_is_counted_and_blocks_verification() -> None:
-    """缺失计划必须形成显式指标，但不再决定是否进入 Verification。"""
+    """A missing plan must produce an explicit metric, but no longer decides whether to enter Verification."""
 
     evidence = ScheduledTestEvidence(
         request=StructuredTestPlanRequest(status="missing")
@@ -800,7 +800,7 @@ def test_missing_plan_is_counted_and_blocks_verification() -> None:
 
 
 def test_nonempty_patch_enters_verification_without_test_plan() -> None:
-    """测试计划缺失时，非空 patch 仍必须进入独立 Verification 会话。"""
+    """When the test plan is missing, a non-empty patch must still enter a separate Verification session."""
 
     assert _should_run_verification("diff --git a/a.py b/a.py\n+new\n") is True
     assert _should_run_verification("\n\t") is False
@@ -809,7 +809,7 @@ def test_nonempty_patch_enters_verification_without_test_plan() -> None:
 def test_scheduler_rejects_container_result_before_test_command_started(
     tmp_path: Path,
 ) -> None:
-    """补丁应用等前置步骤失败时，不得冒充真实 Docker 测试或测试超时。"""
+    """When prerequisites like patch application fail, they must not masquerade as a real Docker test or a test timeout."""
 
     request = StructuredTestPlanRequest(
         status="accepted",
@@ -818,7 +818,7 @@ def test_scheduler_rejects_container_result_before_test_command_started(
     )
 
     class FakeSandbox:
-        """模拟容器已创建但测试命令尚未启动就失败的结果。"""
+        """Simulate a result where the container is created but the test command fails before starting."""
 
         def run(
             self,
@@ -862,7 +862,7 @@ def test_nonempty_patch_reaches_verification_when_parent_plan_is_missing(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """集成保护：父进程找不到测试时，非空 patch 仍必须启动 Verification。"""
+    """Integration guard: when the parent finds no tests, a non-empty patch must still start Verification."""
 
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -896,7 +896,7 @@ def test_nonempty_patch_reaches_verification_when_parent_plan_is_missing(
     calls: list[str] = []
 
     class FakeAgent:
-        """第一次产生 patch，第二次证明 Verification 实际启动。"""
+        """The first run produces a patch; the second proves Verification actually started."""
 
         def run(self, worktree, prompt):
             phase = "verification" if "Current phase: verification" in prompt else "implementation"
@@ -906,7 +906,7 @@ def test_nonempty_patch_reaches_verification_when_parent_plan_is_missing(
             return _result()
 
     class FakeSandbox:
-        """本例没有可映射测试，因此 Docker run 不应被调用。"""
+        """This case has no mappable test, so Docker run must not be called."""
 
         def __init__(self, **kwargs):
             pass
@@ -953,7 +953,7 @@ def test_verification_reserves_three_turns_to_repair_final_new_regression(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """主 Verification 新增回归时必须用保留的 3 turns 修复并再次复测。"""
+    """When the main Verification adds a regression, the reserved 3 turns must fix it and retest."""
 
     repository = tmp_path / "repository"
     source = repository / "src" / "widget.py"
@@ -991,7 +991,7 @@ def test_verification_reserves_three_turns_to_repair_final_new_regression(
     runner_options: list[dict[str, object]] = []
 
     class FakeAgent:
-        """主 Verification 制造回归，post-test repair 再修复。"""
+        """The main Verification introduces a regression and post-test repair fixes it."""
 
         def run(self, worktree, prompt):
             if "Focused repair mode" in prompt:
@@ -1006,7 +1006,7 @@ def test_verification_reserves_three_turns_to_repair_final_new_regression(
             return _result()
 
     class FakeSandbox:
-        """只让主 Verification 的 value=3 candidate 产生确定性新增失败。"""
+        """Only the main Verification's value=3 candidate should produce a deterministic new failure."""
 
         timeout_seconds = 120
 
@@ -1047,7 +1047,7 @@ def test_verification_reserves_three_turns_to_repair_final_new_regression(
             )
 
     def fake_runner(*args, **kwargs):
-        """记录 30+7+3 的模型预算分配。"""
+        """Record the 30+7+3 model budget split."""
 
         runner_options.append(dict(kwargs))
         return FakeAgent()
@@ -1093,7 +1093,7 @@ def test_empty_patch_reuses_verification_budget_for_recovery(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """首轮空 patch 应启动可编辑的 Recovery，而不是浪费预留的模型 turns。"""
+    """A first-round empty patch should start an editable Recovery instead of wasting the reserved model turns."""
 
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -1127,7 +1127,7 @@ def test_empty_patch_reuses_verification_budget_for_recovery(
     runner_options: list[dict[str, object]] = []
 
     class FakeAgent:
-        """首轮不修改文件，状态机按 Read→Edit 交付既有源码修改。"""
+        """The first round changes no files; the state machine delivers an existing-source edit via Read→Edit."""
 
         def run(self, worktree, prompt):
             if "mandatory Read step" in prompt:
@@ -1148,7 +1148,7 @@ def test_empty_patch_reuses_verification_budget_for_recovery(
             return _result()
 
     class FakeSandbox:
-        """仓库没有测试文件，Recovery 后只应记录缺失计划。"""
+        """The repository has no test files, so after Recovery only a missing plan should be recorded."""
 
         def __init__(self, **kwargs):
             pass
@@ -1163,7 +1163,7 @@ def test_empty_patch_reuses_verification_budget_for_recovery(
             raise AssertionError("missing parent plan must not invent a Docker command")
 
     def fake_runner(*args, **kwargs):
-        """记录各阶段 runner 选项，验证 Recovery 的 Bash 硬门禁。"""
+        """Record each phase's runner options and verify the Recovery Bash hard gate."""
 
         runner_options.append(dict(kwargs))
         return FakeAgent()
@@ -1215,7 +1215,7 @@ def test_recovery_fallback_uses_only_budget_left_after_edit_gate(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """强制 Edit 未产出 patch 时，fallback 只能使用 Recovery 的剩余 turns。"""
+    """When the forced Edit produces no patch, the fallback may only use Recovery's remaining turns."""
 
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -1249,7 +1249,7 @@ def test_recovery_fallback_uses_only_budget_left_after_edit_gate(
     runner_options: list[dict[str, object]] = []
 
     class FakeAgent:
-        """Read 合法但 Edit 不落盘，fallback 使用剩余预算完成修改。"""
+        """The Read is valid but the Edit is not persisted; the fallback uses the remaining budget to finish the change."""
 
         def run(self, worktree, prompt):
             if "empty-patch recovery fallback" in prompt:
@@ -1270,7 +1270,7 @@ def test_recovery_fallback_uses_only_budget_left_after_edit_gate(
             return _result()
 
     class FakeSandbox:
-        """本例只验证阶段预算，不执行缺失的仓库测试。"""
+        """This case only verifies phase budgets and does not run the missing repository tests."""
 
         def __init__(self, **kwargs):
             pass
@@ -1285,7 +1285,7 @@ def test_recovery_fallback_uses_only_budget_left_after_edit_gate(
             raise AssertionError("missing parent plan must not run Docker")
 
     def fake_runner(*args, **kwargs):
-        """记录 gate/fallback 的 turns 与硬工具门禁。"""
+        """Record the gate/fallback turns and the hard tool gates."""
 
         runner_options.append(dict(kwargs))
         return FakeAgent()
@@ -1342,7 +1342,7 @@ def test_recovery_new_failure_signature_enters_focused_repair_and_retests(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """Recovery 新增失败测试 ID 后必须用保留 turns 聚焦修复并再次调度测试。"""
+    """After Recovery adds a failing test ID, the reserved turns must apply a focused fix and reschedule the test."""
 
     repository = tmp_path / "repository"
     source = repository / "src" / "widget.py"
@@ -1380,7 +1380,7 @@ def test_recovery_new_failure_signature_enters_focused_repair_and_retests(
     runner_options: list[dict[str, object]] = []
 
     class FakeAgent:
-        """Read→Edit gate 产生带回归的 patch，聚焦阶段再完成窄修复。"""
+        """The Read→Edit gate produces a patch with a regression, and the focused phase completes the narrow fix."""
 
         def run(self, worktree, prompt):
             if "Focused repair mode" in prompt:
@@ -1402,7 +1402,7 @@ def test_recovery_new_failure_signature_enters_focused_repair_and_retests(
             return _result()
 
     class FakeSandbox:
-        """模拟 baseline 已失败，而 gate patch 又新增一个失败测试。"""
+        """Simulate a baseline that already failed, with the gate patch adding one more failing test."""
 
         timeout_seconds = 120
 
@@ -1443,7 +1443,7 @@ def test_recovery_new_failure_signature_enters_focused_repair_and_retests(
             )
 
     def fake_runner(*args, **kwargs):
-        """记录 Recovery 三段的 turns 和聚焦阶段工具白名单。"""
+        """Record the three Recovery segments' turns and the focused phase's tool allowlist."""
 
         runner_options.append(dict(kwargs))
         return FakeAgent()

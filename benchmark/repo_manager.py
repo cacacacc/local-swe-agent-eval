@@ -1,9 +1,11 @@
-"""为 SWE-bench 任务准备不暴露后续历史的独立 Git 仓库。
+"""Prepare an isolated Git repository for a SWE-bench task that hides the later history.
 
-同一上游仓库仍只维护一份共享 clone 以节约下载与磁盘成本，但 Agent 工作目录
-不再是共享 clone 的 worktree。准备器只导出数据集指定 ``base_commit`` 的文件树，
-随后在隔离目录中重新初始化一个单提交、无 remote 的 Git 仓库。这样 Agent 仍可
-使用 ``git diff``，却无法通过 ``git log --all`` 或对象数据库读取题目之后的修复。
+A single shared clone is still maintained per upstream repository to save download and
+disk costs, but the Agent working directory is no longer a worktree of that shared
+clone. The preparer exports only the file tree at the dataset's ``base_commit`` and
+then re-initializes a single-commit, remote-less Git repository in an isolated
+directory. The Agent can therefore still use ``git diff``, but cannot read the fixes
+that follow the task via ``git log --all`` or the object database.
 """
 
 from __future__ import annotations
@@ -23,16 +25,17 @@ from .task import SWEbenchTask
 
 
 class RepositoryError(RuntimeError):
-    """当仓库无法按要求安全、可复现地准备时抛出。"""
+    """Raised when a repository cannot be prepared safely and reproducibly as required."""
 
 
-# 将外部 instance ID 转成单个安全路径组件，避免斜杠等字符改变目录层级。
+# Convert external instance IDs into a single safe path component so that slashes and
+# similar characters cannot alter the directory hierarchy.
 _SAFE_PATH_COMPONENT = re.compile(r"[^A-Za-z0-9_.-]+")
 
 
 @dataclass(frozen=True, slots=True)
 class PreparedRepository:
-    """已从上游基线导出并重新初始化的单提交任务仓库。"""
+    """A single-commit task repository exported from the upstream baseline and re-initialized."""
 
     task: SWEbenchTask
     path: Path
@@ -41,7 +44,7 @@ class PreparedRepository:
 
 
 class RepositoryManager:
-    """管理共享只读来源缓存与不共享 Git 对象的任务仓库。"""
+    """Manage a shared read-only source cache and task repositories that do not share Git objects."""
 
     def __init__(
         self,
@@ -50,7 +53,7 @@ class RepositoryManager:
         *,
         command_timeout_seconds: int = 600,
     ) -> None:
-        """保存并规范化缓存路径，同时验证外部命令超时配置。"""
+        """Store and normalize the cache paths, and validate the external command timeout."""
 
         self.cache_root = Path(cache_root).resolve()
         self.workspace_root = Path(workspace_root).resolve()
@@ -64,10 +67,11 @@ class RepositoryManager:
         *,
         allow_network: bool,
     ) -> PreparedRepository:
-        """导出基线文件树并创建全新的单提交仓库，拒绝覆盖已有目录。
+        """Export the baseline file tree and create a brand-new single-commit repository, refusing to overwrite an existing directory.
 
-        ``allow_network`` 明确区分环境准备阶段与正式离线求解阶段：缓存或
-        commit 缺失时，离线模式必须立即失败，不能偷偷访问远程仓库。
+        ``allow_network`` explicitly separates the environment-preparation phase from
+        the formal offline-solving phase: when the cache or commit is missing, offline
+        mode must fail immediately instead of silently accessing the remote repository.
         """
 
         self.cache_root.mkdir(parents=True, exist_ok=True)
@@ -81,7 +85,7 @@ class RepositoryManager:
                 f"task workspace already exists; refusing to overwrite it: {task_path}"
             )
 
-        # 首次准备仓库时只允许在显式开放网络的阶段执行 clone。
+        # The first-time clone is only allowed during the phase that explicitly enables network access.
         if not cache_path.exists():
             if not allow_network:
                 raise RepositoryError(
@@ -91,7 +95,7 @@ class RepositoryManager:
         else:
             self._verify_cache(cache_path, task.repo)
 
-        # 已有 clone 不代表包含目标历史；必要时在准备阶段 fetch 一次。
+        # An existing clone does not guarantee the target history is present; fetch once during preparation if needed.
         if not self._commit_exists(cache_path, task.base_commit):
             if not allow_network:
                 raise RepositoryError(
@@ -104,8 +108,8 @@ class RepositoryManager:
                 f"base commit {task.base_commit} does not exist in {task.repo}"
             )
 
-        # 先解析上游 commit，防止短 SHA 歧义；这个哈希只进入审计元数据，不会把
-        # 上游对象数据库挂载到 Agent 工作区。
+        # Resolve the upstream commit first to avoid short-SHA ambiguity; this hash only
+        # enters audit metadata and does not mount the upstream object database into the Agent workspace.
         resolved_commit = self._run_git(
             cache_path, "rev-parse", f"{task.base_commit}^{{commit}}"
         ).strip()
@@ -127,11 +131,13 @@ class RepositoryManager:
         task_path: Path,
         resolved_commit: str,
     ) -> str:
-        """从指定 tree 创建单提交仓库，并返回隔离仓库的基线 commit。
+        """Create a single-commit repository from the given tree and return the isolated repository's baseline commit.
 
-        使用 ``git archive`` 而不是复制共享 clone，确保 ``.git/objects``、refs、
-        hooks 和 remote 配置均不会越过准备边界。临时 tar 与目标目录位于同一受控
-        workspace 根目录；任何失败都会删除尚未交给 Agent 的不完整目录。
+        ``git archive`` is used instead of copying the shared clone to ensure that
+        ``.git/objects``, refs, hooks, and remote configuration never cross the
+        preparation boundary. The temporary tar and the target directory live under the
+        same controlled workspace root; any failure deletes the incomplete directory
+        before it is handed to the Agent.
         """
 
         archive_path: Path | None = None
@@ -153,9 +159,10 @@ class RepositoryManager:
             task_path.mkdir(parents=False, exist_ok=False)
             with tarfile.open(archive_path, mode="r:") as source:
                 self._validate_archive_members(source)
-                # 项目支持早期 Python 3.10 补丁版本，运行时检查 filter 参数而非
-                # 假定其存在。显式验证完成后使用 fully_trusted 仅用于关闭新版默认
-                # 策略警告，并保留 Git tree 中的可执行位与安全 symlink。
+                # The project supports early Python 3.10 patch releases, so check for the
+                # filter parameter at runtime rather than assuming it exists. After explicit
+                # validation, fully_trusted is used only to silence the newer default-policy
+                # warning and to preserve the executable bits and safe symlinks from the Git tree.
                 if "filter" in inspect.signature(source.extractall).parameters:
                     source.extractall(task_path, filter="fully_trusted")
                 else:
@@ -169,7 +176,7 @@ class RepositoryManager:
                 "user.email",
                 "local-swe-agent@example.invalid",
             )
-            # --force 使上游已经跟踪但恰好命中 .gitignore 的文件仍进入基线提交。
+            # --force keeps files that upstream already tracks but that happen to match .gitignore in the baseline commit.
             self._run_git(task_path, "add", "--all", "--force")
             self._run_git(
                 task_path,
@@ -187,8 +194,8 @@ class RepositoryManager:
                 raise RepositoryError("isolated repository unexpectedly contains a remote")
             return workspace_base_commit
         except Exception:
-            # task_path 在本方法调用前已确认不存在，因此只清理由本次准备创建的
-            # 精确目录，不会触碰用户已有 workspace。
+            # task_path was confirmed not to exist before this method was called, so only the
+            # exact directory created by this preparation is removed; the user's existing workspace is never touched.
             if task_path.exists():
                 shutil.rmtree(task_path)
             raise
@@ -198,10 +205,11 @@ class RepositoryManager:
 
     @staticmethod
     def _validate_archive_members(source: tarfile.TarFile) -> None:
-        """拒绝 archive 路径逃逸、设备文件和逃逸目标链接。
+        """Reject archive path escapes, device files, and links whose targets escape.
 
-        ``git archive`` 正常只产生文件、目录与 symlink，但缓存仍属于外部输入。
-        在兼容 Python 3.10 的前提下逐项验证，避免恶意仓库在 workspace 外写入。
+        ``git archive`` normally produces only files, directories, and symlinks, but the
+        cache is still external input. Validate each member while remaining compatible
+        with Python 3.10, so a malicious repository cannot write outside the workspace.
         """
 
         for member in source.getmembers():
@@ -215,14 +223,14 @@ class RepositoryManager:
             link_path = PurePosixPath(member.linkname)
             if link_path.is_absolute():
                 raise RepositoryError(f"unsafe absolute archive link: {member.name}")
-            # symlink 相对其父目录解析；hardlink 名称按 tar 约定相对 archive 根。
+            # Symlinks resolve relative to their parent directory; hardlink names are relative to the archive root per tar conventions.
             parent = member_path.parent if member.issym() else PurePosixPath()
             normalized = posixpath.normpath(str(parent / link_path))
             if normalized == ".." or normalized.startswith("../"):
                 raise RepositoryError(f"archive link escapes workspace: {member.name}")
 
     def _clone(self, repo: str, destination: Path) -> None:
-        """建立无工作区的共享 clone；具体任务稍后通过 worktree 检出。"""
+        """Create a shared clone with no working tree; individual tasks are checked out later via a worktree."""
 
         destination.parent.mkdir(parents=True, exist_ok=True)
         url = f"https://github.com/{repo}.git"
@@ -232,7 +240,7 @@ class RepositoryManager:
         )
 
     def _verify_cache(self, cache_path: Path, repo: str) -> None:
-        """确认缓存是 Git clone，且 origin 确实指向预期 GitHub 仓库。"""
+        """Confirm the cache is a Git clone and that origin points at the expected GitHub repository."""
 
         if not (cache_path / ".git").is_dir():
             raise RepositoryError(f"cache path is not a Git clone: {cache_path}")
@@ -250,7 +258,7 @@ class RepositoryManager:
             )
 
     def _commit_exists(self, cache_path: Path, commit: str) -> bool:
-        """使用 ``git cat-file`` 检查标识是否能解析为 commit 对象。"""
+        """Check whether the identifier resolves to a commit object using ``git cat-file``."""
 
         result = subprocess.run(
             ["git", "-C", str(cache_path), "cat-file", "-e", f"{commit}^{{commit}}"],
@@ -264,18 +272,18 @@ class RepositoryManager:
         return result.returncode == 0
 
     def _cache_path(self, repo: str) -> Path:
-        """把 ``owner/name`` 映射成稳定的单层缓存目录名。"""
+        """Map ``owner/name`` to a stable single-level cache directory name."""
 
         return self.cache_root / repo.replace("/", "__")
 
     def _task_path(self, instance_id: str) -> Path:
-        """为任务生成不会逃逸 workspace 根目录的路径。"""
+        """Generate a task path that cannot escape the workspace root."""
 
         safe_name = _SAFE_PATH_COMPONENT.sub("_", instance_id)
         return self.workspace_root / safe_name
 
     def _run_git(self, repository: Path, *arguments: str) -> str:
-        """在指定仓库中运行 Git，并复用统一的错误处理逻辑。"""
+        """Run Git in the given repository, reusing the unified error handling."""
 
         return self._run(
             ["git", "-C", str(repository), *arguments],
@@ -283,7 +291,7 @@ class RepositoryManager:
         )
 
     def _run(self, command: Sequence[str], *, cwd: Path) -> str:
-        """执行外部命令，捕获输出、应用超时并将失败统一包装。"""
+        """Run an external command, capture output, apply the timeout, and wrap failures uniformly."""
 
         try:
             result = subprocess.run(

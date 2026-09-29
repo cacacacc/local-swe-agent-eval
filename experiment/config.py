@@ -1,7 +1,8 @@
-"""解析并验证本地 SWE-bench 实验的严格 YAML 配置。
+"""Parse and validate the strict YAML configuration for local SWE-bench experiments.
 
-本模块采用“拒绝未知字段”的 schema 策略，防止配置拼写错误被静默忽略；同时
-对规范化后的配置计算 SHA-256 fingerprint，使每次运行都能追溯到准确参数集合。
+This module uses a "reject unknown fields" schema policy so that configuration typos
+are not silently ignored; it also computes a SHA-256 fingerprint over the normalized
+configuration so every run can be traced to the exact parameter set.
 """
 
 from __future__ import annotations
@@ -16,11 +17,11 @@ import yaml
 
 
 class ConfigurationError(ValueError):
-    """当实验配置缺失字段、类型错误或违反实验约束时抛出。"""
+    """Raised when the experiment configuration has missing fields, wrong types, or violates experiment constraints."""
 
 
 def _mapping(value: Any, location: str) -> Mapping[str, Any]:
-    """要求配置节点是映射，并在错误信息中保留节点位置。"""
+    """Require the configuration node to be a mapping and preserve its location in error messages."""
 
     if not isinstance(value, Mapping):
         raise ConfigurationError(f"{location} must be a mapping")
@@ -32,9 +33,10 @@ def _exact_keys(
     location: str,
     expected: set[str],
 ) -> None:
-    """要求映射的键集合与 schema 完全一致。
+    """Require the mapping's key set to match the schema exactly.
 
-    同时报告缺失键和未知键，使 YAML 拼写错误不会以默认值悄悄通过。
+    Reports both missing and unknown keys, so YAML typos cannot silently pass through
+    as default values.
     """
 
     missing = expected - set(value)
@@ -55,10 +57,12 @@ def _required_and_optional_keys(
     required: set[str],
     optional: set[str],
 ) -> None:
-    """校验必填键与可选键，同时继续拒绝任何未知配置。
+    """Validate required and optional keys while still rejecting any unknown configuration.
 
-    该辅助函数只用于向后兼容已经冻结的 v1 实验配置。新增的 Agent 架构参数
-    可以仅出现在后续 Dev 配置中，但拼写错误仍然必须立即失败，不能静默回退。
+    This helper is used only for backward compatibility with already-frozen v1
+    experiment configurations. New Agent architecture parameters may appear only in
+    later Dev configurations, but typos must still fail immediately rather than
+    silently fall back.
     """
 
     missing = required - set(value)
@@ -73,7 +77,7 @@ def _required_and_optional_keys(
 
 
 def _string(value: Any, location: str) -> str:
-    """读取非空字符串，并移除首尾空白。"""
+    """Read a non-empty string and strip leading and trailing whitespace."""
 
     if not isinstance(value, str) or not value.strip():
         raise ConfigurationError(f"{location} must be a non-empty string")
@@ -81,7 +85,7 @@ def _string(value: Any, location: str) -> str:
 
 
 def _integer(value: Any, location: str, *, minimum: int = 0) -> int:
-    """读取有下界的整数；显式排除 Python 中属于 int 子类的 bool。"""
+    """Read a bounded-from-below integer; explicitly exclude bool, which is an int subclass in Python."""
 
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
         raise ConfigurationError(f"{location} must be an integer >= {minimum}")
@@ -89,7 +93,7 @@ def _integer(value: Any, location: str, *, minimum: int = 0) -> int:
 
 
 def _boolean(value: Any, location: str) -> bool:
-    """要求使用 YAML 原生布尔值，而不是容易误解的字符串。"""
+    """Require native YAML booleans rather than easily misread strings."""
 
     if not isinstance(value, bool):
         raise ConfigurationError(f"{location} must be true or false")
@@ -97,7 +101,7 @@ def _boolean(value: Any, location: str) -> bool:
 
 
 def _relative_path(value: Any, location: str) -> Path:
-    """读取项目内相对路径，禁止绝对路径和 ``..`` 路径逃逸。"""
+    """Read a project-relative path, forbidding absolute paths and ``..`` path escapes."""
 
     path = Path(_string(value, location))
     if path.is_absolute() or ".." in path.parts:
@@ -109,7 +113,7 @@ def _relative_path(value: Any, location: str) -> Path:
 
 @dataclass(frozen=True, slots=True)
 class ExperimentSettings:
-    """实验身份、阶段、随机种子以及配置是否冻结。"""
+    """Experiment identity, phase, random seed, and whether the configuration is frozen."""
 
     name: str
     phase: str
@@ -119,7 +123,7 @@ class ExperimentSettings:
 
 @dataclass(frozen=True, slots=True)
 class DatasetSettings:
-    """数据集名称、split 和固定题目清单的位置。"""
+    """Dataset name, split, and the location of the pinned task list."""
 
     name: str
     split: str
@@ -128,7 +132,7 @@ class DatasetSettings:
 
 @dataclass(frozen=True, slots=True)
 class ModelSettings:
-    """本地模型运行时、模型标签、上下文窗口和单次输出上限。"""
+    """Local model runtime, model label, context window, and per-output limit."""
 
     runtime: str
     name: str
@@ -138,7 +142,7 @@ class ModelSettings:
 
 @dataclass(frozen=True, slots=True)
 class AgentSettings:
-    """Agent 框架、单题预算、上下文护栏和固定 Prompt 模板。"""
+    """Agent framework, per-task budget, context guardrails, and the pinned Prompt template."""
 
     framework: str
     timeout_seconds: int
@@ -156,7 +160,7 @@ class AgentSettings:
 
 @dataclass(frozen=True, slots=True)
 class NetworkPolicy:
-    """分别控制环境准备阶段与正式求解阶段的网络权限。"""
+    """Control network access separately for the environment-preparation and formal-solving phases."""
 
     environment_preparation: bool
     formal_solving: bool
@@ -164,7 +168,7 @@ class NetworkPolicy:
 
 @dataclass(frozen=True, slots=True)
 class EvaluationSettings:
-    """SWE-bench harness 的并发数和 Docker image 缓存级别。"""
+    """Concurrency and Docker image cache level for the SWE-bench harness."""
 
     max_workers: int
     cache_level: str
@@ -172,7 +176,7 @@ class EvaluationSettings:
 
 @dataclass(frozen=True, slots=True)
 class StorageSettings:
-    """仓库缓存、任务 worktree 和运行产物的项目内相对路径。"""
+    """Project-relative paths for the repository cache, task worktrees, and run artifacts."""
 
     repository_cache: Path
     workspaces: Path
@@ -181,7 +185,7 @@ class StorageSettings:
 
 @dataclass(frozen=True, slots=True)
 class ExperimentConfig:
-    """完整的已验证配置，以及与 YAML 键顺序无关的内容 fingerprint。"""
+    """The complete validated configuration plus a content fingerprint that is independent of YAML key order."""
 
     schema_version: int
     experiment: ExperimentSettings
@@ -197,7 +201,7 @@ class ExperimentConfig:
 
     @classmethod
     def load(cls, path: Path | str) -> "ExperimentConfig":
-        """从 YAML 文件加载配置，完成结构、语义和关联文件验证。"""
+        """Load the configuration from a YAML file and complete structural, semantic, and related-file validation."""
 
         source_path = Path(path).resolve()
         try:
@@ -205,7 +209,7 @@ class ExperimentConfig:
         except (OSError, yaml.YAMLError) as error:
             raise ConfigurationError(f"cannot read config {source_path}: {error}") from error
 
-        # 第一层先锁定 schema，避免未来增加参数时旧代码静默忽略它们。
+        # Lock the schema at the first level, so future parameter additions are not silently ignored by older code.
         raw = _mapping(raw_value, "config")
         top_level_keys = {
             "schema_version",
@@ -219,14 +223,14 @@ class ExperimentConfig:
         }
         _exact_keys(raw, "config", top_level_keys)
 
-        # schema_version 为未来不兼容格式升级保留明确的迁移边界。
+        # schema_version reserves an explicit migration boundary for future incompatible format upgrades.
         schema_version = _integer(raw["schema_version"], "schema_version", minimum=1)
         if schema_version != 1:
             raise ConfigurationError(
                 f"unsupported schema_version {schema_version}; expected 1"
             )
 
-        # experiment 段决定当前是允许调参的 dev，还是冻结后的 evaluation。
+        # The experiment section decides whether this is a tunable dev run or a frozen evaluation.
         experiment_raw = _mapping(raw["experiment"], "experiment")
         _exact_keys(
             experiment_raw,
@@ -249,7 +253,7 @@ class ExperimentConfig:
             ),
         )
 
-        # tasks_file 保存预先选定的 instance ID，避免见到结果后替换题目。
+        # tasks_file holds the pre-selected instance IDs, preventing tasks from being swapped after results are seen.
         dataset_raw = _mapping(raw["dataset"], "dataset")
         _exact_keys(dataset_raw, "dataset", {"name", "split", "tasks_file"})
         dataset = DatasetSettings(
@@ -258,7 +262,7 @@ class ExperimentConfig:
             tasks_file=_relative_path(dataset_raw["tasks_file"], "dataset.tasks_file"),
         )
 
-        # 当前研究问题限定为 Ollama 本地推理，不接受云端 provider。
+        # The current research question is limited to local Ollama inference; cloud providers are not accepted.
         model_raw = _mapping(raw["model"], "model")
         _exact_keys(
             model_raw,
@@ -282,14 +286,15 @@ class ExperimentConfig:
                 minimum=1,
             ),
         )
-        # 输出预算必须显著小于总窗口，否则工具结果会挤占输入空间并导致 auto-compact
-        # 在少数轮次内反复触发，Claude Code 会以 rapid_refill_breaker 终止运行。
+        # The output budget must be significantly smaller than the total window; otherwise tool
+        # results crowd out the input space and trigger auto-compact repeatedly within a few turns,
+        # causing Claude Code to terminate the run with rapid_refill_breaker.
         if model.max_output_tokens >= model.context_length:
             raise ConfigurationError(
                 "model.max_output_tokens must be smaller than model.context_length"
             )
 
-        # 固定 Agent 框架和 prompt 文件，确保跨任务只改变 issue 内容。
+        # Pin the Agent framework and prompt file so that only the issue content varies across tasks.
         agent_raw = _mapping(raw["agent"], "agent")
         _required_and_optional_keys(
             agent_raw,
@@ -330,8 +335,9 @@ class ExperimentConfig:
                 agent_raw["prompt_template"],
                 "agent.prompt_template",
             ),
-            # 旧的冻结配置没有这些字段，默认值保持原来的单会话行为；新的 v2
-            # 配置显式保留测试规划与验证预算，并启用工具输出护栏。
+            # Old frozen configurations lack these fields, and the defaults preserve the original
+            # single-session behavior; new v2 configurations explicitly retain the test-planning and
+            # verification budgets and enable the tool-output guardrails.
             verification_turns=_integer(
                 agent_raw.get("verification_turns", 0),
                 "agent.verification_turns",
@@ -361,8 +367,9 @@ class ExperimentConfig:
                 "agent.visible_test_timeout_seconds",
                 minimum=0,
             ),
-            # 旧配置未声明时沿用原来的统一测试超时，保证历史 fingerprint 对应的
-            # 运行语义不变；新 v2 配置显式缩短相邻回归测试的等待上限。
+            # When old configurations do not declare it, reuse the original unified test timeout so the
+            # run semantics behind historical fingerprints stay unchanged; new v2 configurations explicitly
+            # shorten the wait ceiling for adjacent regression tests.
             visible_regression_test_timeout_seconds=_integer(
                 agent_raw.get(
                     "visible_regression_test_timeout_seconds",
@@ -371,7 +378,7 @@ class ExperimentConfig:
                 "agent.visible_regression_test_timeout_seconds",
                 minimum=0,
             ),
-            # 0 仅为旧配置的兼容关闭值；新架构配置必须显式给出总墙钟预算。
+            # 0 is only a compatibility-off value for old configurations; new architecture configurations must give an explicit total wall-clock budget.
             task_timeout_seconds=_integer(
                 agent_raw.get("task_timeout_seconds", 0),
                 "agent.task_timeout_seconds",
@@ -411,7 +418,7 @@ class ExperimentConfig:
                 "verification requires visible_test_sandbox"
             )
 
-        # 环境准备可以联网下载依赖；正式求解必须离线以降低答案泄漏风险。
+        # Environment preparation may use the network to download dependencies; formal solving must stay offline to reduce answer-leakage risk.
         network_raw = _mapping(raw["network"], "network")
         _exact_keys(
             network_raw,
@@ -433,7 +440,7 @@ class ExperimentConfig:
                 "network.formal_solving must be false to prevent solution leakage"
             )
 
-        # 并发和镜像缓存会影响资源消耗与运行时间，因此也纳入 fingerprint。
+        # Concurrency and image caching affect resource consumption and runtime, so they are included in the fingerprint as well.
         evaluation_raw = _mapping(raw["evaluation"], "evaluation")
         _exact_keys(evaluation_raw, "evaluation", {"max_workers", "cache_level"})
         cache_level = _string(evaluation_raw["cache_level"], "evaluation.cache_level")
@@ -450,7 +457,7 @@ class ExperimentConfig:
             cache_level=cache_level,
         )
 
-        # 所有可写目录必须位于项目相对路径下，方便迁移与清理。
+        # All writable directories must live under project-relative paths for easy migration and cleanup.
         storage_raw = _mapping(raw["storage"], "storage")
         _exact_keys(
             storage_raw,
@@ -466,7 +473,7 @@ class ExperimentConfig:
             runs=_relative_path(storage_raw["runs"], "storage.runs"),
         )
 
-        # 配置文件位于 ``configs/``，其父目录的父目录即项目根目录。
+        # The config file lives under ``configs/``; its parent's parent is the project root.
         project_root = source_path.parent.parent
         prompt_path = project_root / agent.prompt_template
         tasks_path = project_root / dataset.tasks_file
@@ -475,7 +482,7 @@ class ExperimentConfig:
         if not tasks_path.is_file():
             raise ConfigurationError(f"tasks file does not exist: {tasks_path}")
 
-        # 对键排序并移除无意义空白，使 YAML 键顺序不影响 fingerprint。
+        # Sort keys and strip insignificant whitespace so YAML key order does not affect the fingerprint.
         canonical = json.dumps(
             raw,
             ensure_ascii=False,
@@ -499,18 +506,18 @@ class ExperimentConfig:
 
     @property
     def prompt_template_path(self) -> Path:
-        """返回解析到项目根目录下的 Prompt 模板绝对路径。"""
+        """Return the absolute path of the Prompt template resolved against the project root."""
 
         return self.project_root / self.agent.prompt_template
 
     @property
     def tasks_path(self) -> Path:
-        """返回解析到项目根目录下的固定任务清单绝对路径。"""
+        """Return the absolute path of the pinned task list resolved against the project root."""
 
         return self.project_root / self.dataset.tasks_file
 
     def require_frozen(self) -> None:
-        """阻止未冻结配置进入正式评测阶段。"""
+        """Prevent unfrozen configurations from entering the formal evaluation phase."""
 
         if not self.experiment.configuration_frozen:
             raise ConfigurationError(
@@ -518,7 +525,7 @@ class ExperimentConfig:
             )
 
     def to_metadata(self) -> dict[str, Any]:
-        """返回每次运行必须随产物保存的实验配置摘要。"""
+        """Return the experiment configuration summary that must be saved with every run's artifacts."""
 
         return {
             "config_fingerprint": self.fingerprint,

@@ -1,4 +1,4 @@
-"""验证批量脚本的固定顺序、可选题数约束和 predictions 合并。"""
+"""Verify the batch script's fixed ordering, optional task-count constraint, and predictions merging."""
 
 import json
 from pathlib import Path
@@ -18,7 +18,7 @@ from scripts.run_batch import (
 
 
 def make_snapshot(count: int) -> SWEbenchLoader:
-    """构造具有稳定顺序的安全任务快照。"""
+    """Build a safe task snapshot with stable ordering."""
 
     return SWEbenchLoader(
         SWEbenchTask(
@@ -32,7 +32,7 @@ def make_snapshot(count: int) -> SWEbenchLoader:
 
 
 def test_select_fixed_tasks_uses_frozen_id_order(tmp_path: Path) -> None:
-    """批量次序必须来自冻结 ID 文件，而不是快照文件的偶然行顺序。"""
+    """The batch order must come from the frozen ID file, not from the incidental line order of the snapshot file."""
 
     ids_path = tmp_path / "ids.json"
     ids_path.write_text(
@@ -50,7 +50,7 @@ def test_select_fixed_tasks_uses_frozen_id_order(tmp_path: Path) -> None:
 
 
 def test_select_fixed_tasks_defaults_to_frozen_list_length(tmp_path: Path) -> None:
-    """未声明题数时应接受任意非空冻结清单，防止批处理被旧十题默认值锁死。"""
+    """When no task count is declared, any non-empty frozen list must be accepted, to prevent batching from being locked to the old ten-task default."""
 
     ids_path = tmp_path / "ids.json"
     ids_path.write_text(
@@ -64,7 +64,7 @@ def test_select_fixed_tasks_defaults_to_frozen_list_length(tmp_path: Path) -> No
 
 
 def test_select_fixed_tasks_rejects_wrong_count(tmp_path: Path) -> None:
-    """用户显式声明题数时，缺题或多题必须在启动第一个 Agent 前失败。"""
+    """When the user declares a task count explicitly, missing or extra tasks must fail before the first Agent starts."""
 
     ids_path = tmp_path / "ids.json"
     ids_path.write_text(json.dumps(["owner__repo-0"]), encoding="utf-8")
@@ -74,7 +74,7 @@ def test_select_fixed_tasks_rejects_wrong_count(tmp_path: Path) -> None:
 
 
 def test_select_fixed_tasks_rejects_empty_list(tmp_path: Path) -> None:
-    """空冻结清单必须立即失败，避免最终汇总时发生除零或产生伪批次。"""
+    """An empty frozen list must fail immediately, to avoid division by zero or a spurious batch during final aggregation."""
 
     ids_path = tmp_path / "ids.json"
     ids_path.write_text("[]", encoding="utf-8")
@@ -84,7 +84,7 @@ def test_select_fixed_tasks_rejects_empty_list(tmp_path: Path) -> None:
 
 
 def test_write_batch_predictions_preserves_one_record_per_task(tmp_path: Path) -> None:
-    """合并文件必须保持逐题顺序，并保留代表 Agent 失败的空 patch。"""
+    """The merged file must keep per-task order and preserve empty patches that represent Agent failures."""
 
     paths = []
     for index, patch in enumerate(("diff-one", "")):
@@ -114,7 +114,7 @@ def test_write_batch_predictions_preserves_one_record_per_task(tmp_path: Path) -
 
 
 def test_resume_manifest_accepts_only_complete_contiguous_runs(tmp_path: Path) -> None:
-    """断点恢复只能跳过 manifest 已登记且 prediction 完整落盘的连续题目。"""
+    """Resume may only skip contiguous tasks that are registered in the manifest and whose predictions are fully written."""
 
     tasks = tuple(make_snapshot(2))
     batch_path = tmp_path / "batch"
@@ -159,7 +159,7 @@ def test_resume_manifest_accepts_only_complete_contiguous_runs(tmp_path: Path) -
 
 
 def test_resume_manifest_rejects_changed_experiment_identity(tmp_path: Path) -> None:
-    """配置 fingerprint 变化后不得复用旧批次，以免结果失去可比性。"""
+    """After the config fingerprint changes, an old batch must not be reused, so that results do not lose comparability."""
 
     tasks = tuple(make_snapshot(1))
     batch_path = tmp_path / "batch"
@@ -192,7 +192,7 @@ def test_resume_manifest_rejects_changed_experiment_identity(tmp_path: Path) -> 
 
 
 def test_retry_run_id_preserves_interrupted_attempt(tmp_path: Path) -> None:
-    """中断题的旧目录必须保留，并为重跑分配递增的 retry ID。"""
+    """The old directory of an interrupted task must be preserved, and a retry run must be assigned an incrementing retry ID."""
 
     runs_root = tmp_path / "runs"
     workspaces_root = tmp_path / "workspaces"
@@ -209,7 +209,7 @@ def test_retry_run_id_preserves_interrupted_attempt(tmp_path: Path) -> None:
 
 
 def test_resume_skips_official_result_from_same_harness(tmp_path: Path) -> None:
-    """汇总阶段中断后，同一 harness 已导入的结果应跳过而不是报覆盖错误。"""
+    """After interruption during the aggregation phase, results already imported by the same harness should be skipped rather than raising an overwrite error."""
 
     run_path = tmp_path / "run"
     run_path.mkdir()

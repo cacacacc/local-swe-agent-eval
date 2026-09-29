@@ -1,4 +1,4 @@
-"""校验 SWE-bench harness 报告，并把官方判定关联到既有运行产物。"""
+"""Validate SWE-bench harness reports and associate official verdicts with existing run artifacts."""
 
 from __future__ import annotations
 
@@ -10,11 +10,11 @@ from typing import Any, Mapping
 
 
 class EvaluationImportError(RuntimeError):
-    """当官方报告与运行产物不匹配或会覆盖既有判定时抛出。"""
+    """Raised when an official report does not match the run artifacts or would overwrite an existing verdict."""
 
 
 def _load_mapping(path: Path, label: str) -> tuple[dict[str, Any], bytes]:
-    """读取 UTF-8 JSON object，并保留原始字节供来源哈希审计。"""
+    """Read a UTF-8 JSON object and keep the raw bytes for provenance-hash auditing."""
 
     try:
         raw = path.read_bytes()
@@ -27,7 +27,7 @@ def _load_mapping(path: Path, label: str) -> tuple[dict[str, Any], bytes]:
 
 
 def _id_set(report: Mapping[str, Any], field: str) -> set[str]:
-    """读取报告中的 instance ID 数组，拒绝宽松类型转换造成的误关联。"""
+    """Read the instance ID array from the report, rejecting loose type coercion that would cause mismatches."""
 
     value = report.get(field)
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
@@ -42,10 +42,11 @@ def import_official_evaluation(
     harness_run_id: str,
     dataset: str,
 ) -> Path:
-    """把单个 instance 的官方判定原子写入 ``result.json``。
+    """Atomically write a single instance's official verdict into ``result.json``.
 
-    harness 汇总报告可以包含多题，但目标 run 的 instance 必须出现在 submitted
-    列表及某个最终分类中。导入器不接受覆盖，以免重用 run ID 后静默篡改实验结果。
+    The harness summary report may cover multiple tasks, but the target run's instance must appear in the submitted
+    list and in some final classification. The importer does not accept overwrites, so reusing a run ID cannot silently
+    tamper with experiment results.
     """
 
     run_directory = Path(run_path).resolve()
@@ -76,10 +77,10 @@ def import_official_evaluation(
     ambiguous_ids = _id_set(report, "ambiguous_failure_ids")
     empty_patch_ids = _id_set(report, "empty_patch_ids")
 
-    # resolved 与 unresolved 是正式测试判定，优先级高于 harness 的附加诊断集合。
-    # 同一题可能同时位于 unresolved_ids 与 ambiguous_failure_ids（例如日志启发式
-    # 误报 no_tests_collected，但 report.json 已记录 FAIL_TO_PASS）；此时必须保留
-    # “测试已运行但未解决”的事实，不能降级成 evaluation_error。
+    # resolved and unresolved are the official test verdicts, with priority over the harness's extra diagnostic sets.
+    # One task may appear in both unresolved_ids and ambiguous_failure_ids (for example when a log heuristic
+    # falsely reports no_tests_collected while report.json already records FAIL_TO_PASS); here we must preserve
+    # the fact that "tests ran but were not resolved" and must not downgrade it to evaluation_error.
     if instance_id in resolved_ids:
         status = "resolved"
         resolved = True

@@ -1,4 +1,4 @@
-"""验证 Git 缓存、离线准备和 detached worktree 的隔离语义。"""
+"""Verify the isolation semantics of the Git cache, offline preparation, and detached worktrees."""
 
 from pathlib import Path
 import subprocess
@@ -10,7 +10,7 @@ from benchmark.task import SWEbenchTask
 
 
 def run_git(path: Path, *arguments: str) -> str:
-    """测试辅助函数：在临时仓库执行 Git，并在失败时立即终止测试。"""
+    """Test helper: run Git in the temporary repository and abort the test immediately on failure."""
 
     result = subprocess.run(
         ["git", "-C", str(path), *arguments],
@@ -22,7 +22,7 @@ def run_git(path: Path, *arguments: str) -> str:
 
 
 def make_local_cache(tmp_path: Path) -> tuple[Path, str, str]:
-    """创建含基线和后续提交的本地缓存，用于验证历史不可泄漏。"""
+    """Create a local cache containing a baseline and later commits, to verify that history cannot leak."""
 
     source = tmp_path / "source"
     source.mkdir()
@@ -51,7 +51,7 @@ def make_local_cache(tmp_path: Path) -> tuple[Path, str, str]:
 
 
 def make_task(commit: str) -> SWEbenchTask:
-    """构造指向临时仓库 commit 的最小合法任务。"""
+    """Build a minimal valid task pointing at the temporary repository commit."""
 
     return SWEbenchTask(
         instance_id="example__project-123",
@@ -62,7 +62,7 @@ def make_task(commit: str) -> SWEbenchTask:
 
 
 def test_prepare_creates_single_commit_repository_without_future_history(tmp_path) -> None:
-    """Agent 仓库只能看到基线 tree、单个本地提交且没有 remote。"""
+    """The Agent repository may only see the baseline tree, a single local commit, and no remote."""
 
     cache_root, commit, future_commit = make_local_cache(tmp_path)
     workspace_root = tmp_path / "workspaces"
@@ -74,7 +74,7 @@ def test_prepare_creates_single_commit_repository_without_future_history(tmp_pat
     assert run_git(prepared.path, "rev-parse", "HEAD") == prepared.workspace_base_commit
     assert run_git(prepared.path, "rev-list", "--all", "--count") == "1"
     assert run_git(prepared.path, "remote") == ""
-    # 即使共享 cache 含有未来修复对象，隔离仓库也不能通过对象哈希读取它。
+    # Even if the shared cache contains future fix objects, the isolated repository must not be able to read them by object hash.
     future_lookup = subprocess.run(
         ["git", "-C", str(prepared.path), "cat-file", "-e", future_commit],
         capture_output=True,
@@ -86,7 +86,7 @@ def test_prepare_creates_single_commit_repository_without_future_history(tmp_pat
 
 
 def test_prepare_refuses_to_overwrite_existing_workspace(tmp_path) -> None:
-    """同一任务再次准备时不得覆盖已有工作区。"""
+    """Preparing the same task again must not overwrite the existing workspace."""
 
     cache_root, commit, _ = make_local_cache(tmp_path)
     workspace_root = tmp_path / "workspaces"
@@ -99,7 +99,7 @@ def test_prepare_refuses_to_overwrite_existing_workspace(tmp_path) -> None:
 
 
 def test_offline_prepare_requires_cached_repository(tmp_path) -> None:
-    """离线模式缺少缓存时必须失败，而不是隐式 clone。"""
+    """Offline mode without a cache must fail instead of implicitly cloning."""
 
     manager = RepositoryManager(tmp_path / "cache", tmp_path / "workspaces")
 

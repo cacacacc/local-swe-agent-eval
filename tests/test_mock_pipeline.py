@@ -1,4 +1,4 @@
-"""端到端验证 Mock Agent 的产物集合、覆盖保护和失败留痕。"""
+"""Verify end-to-end the Mock Agent's artifact set, overwrite protection, and failure trail."""
 
 import json
 from pathlib import Path
@@ -13,7 +13,7 @@ from tracking.run_manager import RunArtifactError
 
 
 def run_git(path: Path, *arguments: str) -> str:
-    """测试辅助函数：在临时仓库运行 Git 并返回去除首尾空白的输出。"""
+    """Test helper: run Git in the temporary repository and return the output with surrounding whitespace stripped."""
 
     result = subprocess.run(
         ["git", "-C", str(path), *arguments],
@@ -25,7 +25,7 @@ def run_git(path: Path, *arguments: str) -> str:
 
 
 def make_repository(tmp_path: Path) -> tuple[Path, str]:
-    """创建带一个基线 commit 的最小临时 Git 仓库。"""
+    """Create a minimal temporary Git repository with one baseline commit."""
 
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -39,7 +39,7 @@ def make_repository(tmp_path: Path) -> tuple[Path, str]:
 
 
 def make_task(commit: str) -> SWEbenchTask:
-    """创建与临时仓库基线 commit 对应的 Mock 任务。"""
+    """Create a Mock task matching the temporary repository's baseline commit."""
 
     return SWEbenchTask(
         instance_id="example__project-456",
@@ -50,7 +50,7 @@ def make_task(commit: str) -> SWEbenchTask:
 
 
 def test_mock_pipeline_writes_complete_non_evaluation_run(tmp_path) -> None:
-    """成功运行必须产生完整产物，但不能伪造官方评测结果。"""
+    """A successful run must produce the full artifact set, but must not fabricate an official evaluation result."""
 
     repository, commit = make_repository(tmp_path)
     task = make_task(commit)
@@ -76,7 +76,7 @@ def test_mock_pipeline_writes_complete_non_evaluation_run(tmp_path) -> None:
     assert metadata["status"] == "completed"
     assert metadata["model"] == "mock-no-llm"
     assert metadata["event_count"] == 3
-    # Agent 正常退出只代表流水线完成，official_evaluation 仍应为空。
+    # A normal Agent exit only means the pipeline finished; official_evaluation must still be empty.
     assert result == {
         "schema_version": 1,
         "run_status": "completed",
@@ -93,13 +93,13 @@ def test_mock_pipeline_writes_complete_non_evaluation_run(tmp_path) -> None:
         "test_run",
         "agent_exit",
     ]
-    # trajectory 只能保存可观察事件，不能记录隐藏推理文本。
+    # The trajectory may only store observable events, not hidden reasoning text.
     assert "reasoning" not in json.dumps(trajectory).lower()
     assert "chain_of_thought" not in json.dumps(trajectory).lower()
 
 
 def test_mock_pipeline_refuses_to_overwrite_prior_run(tmp_path) -> None:
-    """重复 run 不能覆盖第一次运行留下的证据。"""
+    """A repeated run must not overwrite the evidence left by the first run."""
 
     repository, commit = make_repository(tmp_path)
     task = make_task(commit)
@@ -111,7 +111,7 @@ def test_mock_pipeline_refuses_to_overwrite_prior_run(tmp_path) -> None:
 
 
 def test_mock_pipeline_records_agent_failure(tmp_path) -> None:
-    """Agent 失败时仍需落盘 metadata、result 和错误事件。"""
+    """When the Agent fails, metadata, result, and error events must still be written."""
 
     repository, commit = make_repository(tmp_path)
     task = make_task(commit)

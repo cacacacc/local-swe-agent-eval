@@ -1,4 +1,4 @@
-"""验证 Claude Code 命令边界、外联限制、轨迹清洗和测试输出提取。"""
+"""Verify Claude Code command boundaries, outbound network restrictions, trajectory cleaning, and test output extraction."""
 
 import json
 
@@ -13,7 +13,7 @@ from agent.claude_runner import (
 
 
 def make_runner() -> ClaudeCodeRunner:
-    """构造与正式实验关键上限一致、但不会实际启动进程的 runner。"""
+    """Build a runner that matches the key limits of the official experiment but does not actually start a process."""
 
     return ClaudeCodeRunner(
         model="qwen3.5:9b",
@@ -25,7 +25,7 @@ def make_runner() -> ClaudeCodeRunner:
 
 
 def test_command_fixes_model_turn_limit_and_noninteractive_isolation() -> None:
-    """命令必须固定本地模型、turn 上限，并隔离用户插件与会话历史。"""
+    """The command must pin the local model and turn limit, and isolate user plugins and session history."""
 
     command = make_runner().command("Solve the task")
 
@@ -36,12 +36,12 @@ def test_command_fixes_model_turn_limit_and_noninteractive_isolation() -> None:
     assert "--bare" in command
     assert "--no-session-persistence" in command
     assert "WebFetch" in command and "WebSearch" in command
-    # Prompt 必须位于可变长的工具列表之前，防止被 CLI 当成规则吞掉。
+    # The prompt must appear before the variable-length tool list so the CLI does not swallow it as a rule.
     assert command.index("Solve the task") < command.index("--disallowed-tools")
 
 
 def test_environment_removes_cloud_credentials_and_keeps_only_local_endpoint() -> None:
-    """子进程不能继承云密钥，常见网络客户端也只能绕过代理访问本机。"""
+    """The subprocess must not inherit cloud credentials, and common network clients may only reach the local machine by bypassing proxies."""
 
     environment = make_runner().environment(
         {
@@ -66,7 +66,7 @@ def test_environment_removes_cloud_credentials_and_keeps_only_local_endpoint() -
 
 
 def test_runner_rejects_remote_model_endpoint() -> None:
-    """配置错误时必须在启动 Agent 前拒绝远程模型服务。"""
+    """On misconfiguration, remote model services must be rejected before the Agent starts."""
 
     with pytest.raises(ClaudeCodeError, match="local HTTP"):
         ClaudeCodeRunner(
@@ -80,7 +80,7 @@ def test_runner_rejects_remote_model_endpoint() -> None:
 
 
 def test_stream_parser_removes_thinking_and_extracts_test_output() -> None:
-    """轨迹不得保存隐藏推理，但必须关联测试命令和对应工具结果。"""
+    """The trajectory must not store hidden reasoning, but must associate test commands with their tool results."""
 
     tool_call = {
         "type": "assistant",
@@ -120,7 +120,7 @@ def test_stream_parser_removes_thinking_and_extracts_test_output() -> None:
 
 
 def test_summary_counts_turns_tools_and_final_usage_without_double_counting() -> None:
-    """报告指标必须来自结构化事件，并采用最终 result 的累计 token usage。"""
+    """Reported metrics must come from structured events and use the cumulative token usage of the final result."""
 
     events = [
         {
@@ -179,7 +179,7 @@ def test_summary_counts_turns_tools_and_final_usage_without_double_counting() ->
 
 
 def test_summary_preserves_observable_terminal_reason() -> None:
-    """终止原因必须进入结构化指标，避免分析时依赖截断后的日志文本。"""
+    """The termination reason must enter structured metrics to avoid relying on truncated log text during analysis."""
 
     metrics = ClaudeCodeRunner._summarize(
         [
@@ -202,7 +202,7 @@ def test_summary_preserves_observable_terminal_reason() -> None:
 
 
 def test_combine_phase_results_uses_verification_exit_and_sums_metrics() -> None:
-    """实现阶段耗尽后，独立验证阶段仍可修复，并保留两个阶段的审计指标。"""
+    """After the implementation phase is exhausted, an independent verification phase can still repair the task, and the audit metrics of both phases must be preserved."""
 
     implementation = ClaudeCodeResult(
         exit_code=1,
@@ -257,7 +257,7 @@ def test_combine_phase_results_uses_verification_exit_and_sums_metrics() -> None
 
 
 def test_verification_runner_disables_bash_at_cli_boundary() -> None:
-    """验证会话必须由 CLI 禁用 Bash，不能只依赖模型遵循 Prompt。"""
+    """The verification session must disable Bash at the CLI level, not merely rely on the model following the prompt."""
 
     runner = ClaudeCodeRunner(
         model="qwen3.5:9b",
@@ -274,7 +274,7 @@ def test_verification_runner_disables_bash_at_cli_boundary() -> None:
 
 
 def test_runner_can_expose_only_one_tool_for_each_recovery_gate_step() -> None:
-    """Recovery 状态机的每个 CLI 调用只能暴露当前步骤所需工具。"""
+    """Each CLI call in the Recovery state machine may only expose the tools required for the current step."""
 
     runner = ClaudeCodeRunner(
         model="qwen3.5:9b",
@@ -294,7 +294,7 @@ def test_runner_can_expose_only_one_tool_for_each_recovery_gate_step() -> None:
 
 
 def test_runner_uses_explicit_persistent_session_for_read_edit_state_machine() -> None:
-    """Edit 步骤必须恢复明确 UUID，不能接入目录中的任意最近会话。"""
+    """The Edit step must resume an explicit UUID, not attach to an arbitrary recent session in the directory."""
 
     session_id = "12345678-1234-5678-1234-567812345678"
     read_runner = ClaudeCodeRunner(
@@ -331,7 +331,7 @@ def test_runner_uses_explicit_persistent_session_for_read_edit_state_machine() -
 
 
 def test_runner_rejects_unscoped_session_continuation() -> None:
-    """会话恢复必须同时提供合法 UUID 并显式开启持久化。"""
+    """Session resume must supply a valid UUID and explicitly enable persistence."""
 
     with pytest.raises(ValueError, match="requires session_id"):
         ClaudeCodeRunner(
@@ -346,7 +346,7 @@ def test_runner_rejects_unscoped_session_continuation() -> None:
 
 
 def test_reading_visible_test_script_is_not_counted_as_execution() -> None:
-    """读取调度脚本只是探索行为，不能增加任何测试调用指标。"""
+    """Reading the scheduler script is only exploration and must not increase any test-call metrics."""
 
     metrics = ClaudeCodeRunner._summarize(
         [

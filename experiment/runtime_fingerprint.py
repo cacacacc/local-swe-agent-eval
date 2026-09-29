@@ -1,8 +1,9 @@
-"""采集本地实验运行时版本、内容哈希和 Ollama 模型身份。
+"""Collect runtime versions, content hashes, and Ollama model identity for local experiments.
 
-配置 fingerprint 只能证明 YAML 参数一致；它不能证明两次运行使用了同一个二进制、
-Git 提交或模型文件。本模块把这些可变化的外部状态规范化并再次计算 SHA-256，供每道
-任务的 metadata 保存，从而让最终报告可以追溯实际运行环境。
+The configuration fingerprint only proves the YAML parameters match; it cannot prove
+that two runs used the same binary, Git commit, or model file. This module normalizes
+that changeable external state and computes a SHA-256 again, saving it in each task's
+metadata so the final report can trace the actual runtime environment.
 """
 
 from __future__ import annotations
@@ -19,11 +20,11 @@ from urllib.request import Request, urlopen
 
 
 class RuntimeFingerprintError(RuntimeError):
-    """当必需版本或本地模型身份无法可靠采集时抛出。"""
+    """Raised when a required version or the local model identity cannot be collected reliably."""
 
 
 def _sha256_file(path: Path) -> str:
-    """以二进制方式计算文件 SHA-256，避免平台换行转换改变读取结果。"""
+    """Compute a file's SHA-256 in binary mode so platform newline conversion cannot change the read result."""
 
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -33,7 +34,7 @@ def _sha256_file(path: Path) -> str:
 
 
 class RuntimeFingerprintCollector:
-    """从本机命令和 Ollama loopback API 构建稳定的运行时指纹。"""
+    """Build a stable runtime fingerprint from local commands and the Ollama loopback API."""
 
     def __init__(
         self,
@@ -44,7 +45,7 @@ class RuntimeFingerprintCollector:
         base_url: str,
         command_timeout_seconds: int = 30,
     ) -> None:
-        """保存采集目标，并再次限制模型 API 只能指向本机。"""
+        """Store the collection targets and re-confirm that the model API may only point at the local machine."""
 
         self.project_root = Path(project_root).resolve()
         self.prompt_path = Path(prompt_path).resolve()
@@ -60,7 +61,7 @@ class RuntimeFingerprintCollector:
             raise RuntimeFingerprintError("Ollama fingerprint endpoint must be local")
 
     def collect(self) -> dict[str, Any]:
-        """采集所有必需字段，并对规范化结果计算总 fingerprint。"""
+        """Collect all required fields and compute the overall fingerprint over the normalized result."""
 
         values: dict[str, Any] = {
             "schema_version": 1,
@@ -98,7 +99,7 @@ class RuntimeFingerprintCollector:
         return values
 
     def _ollama_model(self) -> dict[str, Any]:
-        """从 `/api/tags` 读取精确 digest，拒绝仅按易变 tag 记录模型。"""
+        """Read the exact digest from `/api/tags`, refusing to record the model by a mutable tag alone."""
 
         request = Request(f"{self.base_url}/api/tags", method="GET")
         try:
@@ -130,7 +131,7 @@ class RuntimeFingerprintCollector:
         raise RuntimeFingerprintError(f"Ollama model is not installed: {self.model_name}")
 
     def _run(self, command: Sequence[str]) -> str:
-        """执行只读版本命令，并把失败统一转换为带上下文的领域错误。"""
+        """Run a read-only version command and translate failures uniformly into contextual domain errors."""
 
         try:
             result = subprocess.run(

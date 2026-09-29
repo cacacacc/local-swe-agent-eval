@@ -1,11 +1,11 @@
-"""验证跨仓库测试输出的失败签名解析与可信度边界。"""
+"""Verify failure-signature parsing and reliability bounds across repository test output."""
 
 from agent.test_outcome import parse_test_outcome
 from agent.test_sandbox import VisibleTestResult
 
 
 def _failed(output: str) -> VisibleTestResult:
-    """构造已真实启动、以非零状态结束的测试结果。"""
+    """Build a test result that actually started and ended with a non-zero status."""
 
     return VisibleTestResult(
         exit_code=1,
@@ -17,7 +17,7 @@ def _failed(output: str) -> VisibleTestResult:
 
 
 def test_parse_pytest_failure_signatures() -> None:
-    """pytest 的 FAILED/ERROR 摘要必须归一化为稳定测试 ID。"""
+    """pytest's FAILED/ERROR summary must be normalized into a stable test ID."""
 
     outcome = parse_test_outcome(
         ("python", "-m", "pytest", "tests/test_widget.py"),
@@ -38,7 +38,7 @@ def test_parse_pytest_failure_signatures() -> None:
 
 
 def test_parse_django_unittest_failure_signatures() -> None:
-    """Django runtests.py 的 unittest 标题必须保留测试方法和类名。"""
+    """Django runtests.py unittest headings must preserve the test method and class name."""
 
     outcome = parse_test_outcome(
         ("python", "tests/runtests.py", "admin_views"),
@@ -59,7 +59,7 @@ def test_parse_django_unittest_failure_signatures() -> None:
 
 
 def test_django_signature_removes_process_specific_object_address() -> None:
-    """同一 subTest 的对象地址变化不能被误报为 candidate 新增失败。"""
+    """An object-address change in the same subTest must not be misreported as a new candidate failure."""
 
     baseline = parse_test_outcome(
         ("python", "tests/runtests.py", "utils_tests"),
@@ -88,7 +88,7 @@ def test_django_signature_removes_process_specific_object_address() -> None:
 
 
 def test_parse_sympy_failure_signature() -> None:
-    """SymPy bin/test 的下划线失败标题必须提取文件与测试函数。"""
+    """SymPy bin/test underscore failure headings must extract the file and test function."""
 
     outcome = parse_test_outcome(
         ("python", "bin/test", "sympy/core/tests/test_numbers.py"),
@@ -105,7 +105,7 @@ def test_parse_sympy_failure_signature() -> None:
 
 
 def test_unparsed_nonzero_result_is_not_reliable() -> None:
-    """没有测试 ID 的非零退出不得伪装成可比较的既有测试失败。"""
+    """A non-zero exit without a test ID must not masquerade as a comparable existing test failure."""
 
     outcome = parse_test_outcome(
         ("python", "-m", "pytest", "tests/test_widget.py"),

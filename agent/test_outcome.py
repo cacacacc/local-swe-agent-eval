@@ -1,8 +1,10 @@
-"""把不同仓库的测试输出规范化为可比较的失败签名。
+"""Normalize test output from different repositories into comparable failure signatures.
 
-Docker 沙箱只负责可靠执行并保留输出；本模块再按实际 argv 识别 pytest、Django
-unittest 与 SymPy ``bin/test`` 的失败摘要。调度器比较签名集合而不是只比较退出码，
-因此 baseline 已有无关失败时，candidate 新增的失败仍能触发聚焦修复。
+The Docker sandbox only executes reliably and preserves the output; this module then
+identifies the failure summaries of pytest, Django unittest, and SymPy ``bin/test``
+based on the actual argv. The scheduler compares signature sets rather than only exit
+codes, so when the baseline already has unrelated failures, new failures introduced by
+the candidate can still trigger focused repair.
 """
 
 from __future__ import annotations
@@ -26,15 +28,16 @@ _SYMPY_FAILURE = re.compile(
     r"^_{3,}\s+([^\s]+\.py:[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]\n]+\])?)\s+_{3,}\s*$",
     flags=re.MULTILINE,
 )
-# unittest 的 subTest 参数有时会包含默认对象 repr，其中内存地址每个 Python
-# 进程都不同。保留对象类型和其余稳定参数，只替换地址，避免 baseline/candidate
-# 对同一测试生成不同签名。
+# unittest subTest arguments sometimes include a default object repr whose memory
+# address differs across Python processes. Keep the object type and the other stable
+# arguments and replace only the address, so baseline/candidate do not generate
+# different signatures for the same test.
 _VOLATILE_HEX_ADDRESS = re.compile(r"(?<=\bat )0x[0-9a-fA-F]+\b")
 
 
 @dataclass(frozen=True, slots=True)
 class TestOutcome:
-    """一次测试的规范化状态、失败测试集合与解析可信度。"""
+    """The normalized status, failure test set, and parsing confidence of one test run."""
 
     status: str
     failure_signatures: frozenset[str] = frozenset()
@@ -46,10 +49,12 @@ def parse_test_outcome(
     argv: Sequence[str],
     result: VisibleTestResult,
 ) -> TestOutcome:
-    """按测试入口解析结果；无法可靠定位失败时明确返回不可信状态。
+    """Parse the result according to the test entry point; return an explicit untrusted status when failures cannot be located reliably.
 
-    成功退出无需失败摘要即可可靠判定。超时同样是确定状态，但没有可与另一次失败
-    做集合差分的测试 ID；基础设施错误和未启动命令则完全不构成测试证据。
+    A successful exit can be judged reliably without a failure summary. Timeout is
+    likewise a definite state but has no test ID that could be set-subtracted against
+    another failure; infrastructure errors and commands that never started do not
+    constitute test evidence at all.
     """
 
     parser, pattern = _select_parser(argv)
@@ -69,14 +74,15 @@ def parse_test_outcome(
         status="failed",
         failure_signatures=signatures,
         parser=parser,
-        # 非零退出但没有测试 ID 时，可能是收集错误、进程崩溃或未覆盖的输出格式。
-        # 此时不能仅凭相同退出码声称 candidate 没有增加回归。
+        # A non-zero exit without any test ID may be a collection error, a process
+        # crash, or an uncovered output format. In that case we cannot claim the
+        # candidate added no regression based on the same exit code alone.
         reliable=bool(signatures),
     )
 
 
 def _select_parser(argv: Sequence[str]) -> tuple[str, re.Pattern[str]]:
-    """根据父进程生成的 argv 选择稳定解析器，未知命令使用 pytest 风格兜底。"""
+    """Select a stable parser from the parent-generated argv, falling back to pytest style for unknown commands."""
 
     normalized = tuple(argv)
     if len(normalized) >= 2 and normalized[1] == "tests/runtests.py":
@@ -89,7 +95,7 @@ def _select_parser(argv: Sequence[str]) -> tuple[str, re.Pattern[str]]:
 
 
 def _normalize_signature(value: str) -> str:
-    """移除进程相关地址并压缩空白，生成跨容器稳定的失败测试 ID。"""
+    """Remove process-related addresses and collapse whitespace into a stable cross-container failing test ID."""
 
     without_addresses = _VOLATILE_HEX_ADDRESS.sub("0xADDR", value)
     return " ".join(without_addresses.strip().split())

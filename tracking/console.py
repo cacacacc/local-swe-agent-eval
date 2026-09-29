@@ -1,4 +1,4 @@
-"""提供无第三方依赖的终端阶段面板、进度条、心跳和汇总表。"""
+"""Terminal stage panel, progress bars, heartbeats, and summary tables with no third-party dependencies."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import Iterator, Sequence, TextIO
 
 
 def format_duration(seconds: float) -> str:
-    """把墙钟秒数格式化为适合终端快速扫描的 ``HH:MM:SS``。"""
+    """Format wall-clock seconds as ``HH:MM:SS`` for quick terminal scanning."""
 
     total = max(0, int(seconds))
     hours, remainder = divmod(total, 3600)
@@ -19,7 +19,7 @@ def format_duration(seconds: float) -> str:
 
 
 class ConsoleReporter:
-    """以稳定文本展示长时间实验进度；非交互输出不会产生周期性噪声。"""
+    """Show long-running experiment progress as stable text; non-interactive output produces no periodic noise."""
 
     def __init__(
         self,
@@ -27,18 +27,18 @@ class ConsoleReporter:
         *,
         heartbeat_seconds: float = 30.0,
     ) -> None:
-        """保存输出流；长操作在真实 TTY 中统一每 30 秒报告一次状态。"""
+        """Store the output stream; long operations report status every 30 seconds on a real TTY."""
 
         self.stream = sys.stdout if stream is None else stream
         self.heartbeat_seconds = heartbeat_seconds
 
     def line(self, text: str = "") -> None:
-        """立即打印一行，避免长任务因缓冲让操作者误以为卡死。"""
+        """Print a line immediately so buffering does not make long tasks look stuck."""
 
         print(text, file=self.stream, flush=True)
 
     def banner(self, title: str, subtitle: str | None = None) -> None:
-        """打印流水线标题框，标明当前 run 或 batch 身份。"""
+        """Print a pipeline banner identifying the current run or batch."""
 
         width = max(60, len(title) + 4, len(subtitle or "") + 4)
         self.line("=" * width)
@@ -48,33 +48,33 @@ class ConsoleReporter:
         self.line("=" * width)
 
     def stage(self, current: int, total: int, label: str) -> None:
-        """打印阶段进度条；阶段数固定，便于区分 Agent 与 Docker 耗时。"""
+        """Print a stage progress bar; the fixed stage count separates Agent and Docker time."""
 
         completed = max(0, min(current - 1, total))
         bar = "█" * completed + "░" * (total - completed)
-        self.line(f"\n[{bar}] 阶段 {current}/{total}  {label}")
+        self.line(f"\n[{bar}] Stage {current}/{total}  {label}")
 
     def task(self, current: int, total: int, instance_id: str) -> None:
-        """打印批量求解的题目级进度条和当前 instance ID。"""
+        """Print a per-task progress bar for batch solving plus the current instance ID."""
 
         width = 20
         filled = int(width * (current - 1) / total)
         bar = "█" * filled + "░" * (width - filled)
-        self.line(f"\n[{bar}] 题目 {current}/{total}  {instance_id}")
+        self.line(f"\n[{bar}] Task {current}/{total}  {instance_id}")
 
     @contextmanager
     def activity(self, label: str) -> Iterator[None]:
-        """包裹长操作并显示耗时；TTY 中每隔一段时间打印仍在运行的心跳。"""
+        """Wrap a long operation and show its elapsed time; on a TTY print a periodic "still running" heartbeat."""
 
         started = time.monotonic()
         stopped = Event()
         self.line(f"  ▶ {label}")
 
         def heartbeat() -> None:
-            # Event.wait 同时承担可中断 sleep，结束时无需等待完整心跳周期。
+            # Event.wait doubles as an interruptible sleep, so we never wait a full heartbeat cycle at exit.
             while not stopped.wait(self.heartbeat_seconds):
                 elapsed = format_duration(time.monotonic() - started)
-                self.line(f"  … {label}，已运行 {elapsed}")
+                self.line(f"  … {label}, running ({elapsed})")
 
         interactive = bool(getattr(self.stream, "isatty", lambda: False)())
         worker = Thread(target=heartbeat, daemon=True) if interactive else None
@@ -84,18 +84,18 @@ class ConsoleReporter:
             yield
         except Exception:
             elapsed = format_duration(time.monotonic() - started)
-            self.line(f"  ✗ {label}失败（{elapsed}）")
+            self.line(f"  ✗ {label} failed ({elapsed})")
             raise
         else:
             elapsed = format_duration(time.monotonic() - started)
-            self.line(f"  ✓ {label}完成（{elapsed}）")
+            self.line(f"  ✓ {label} completed ({elapsed})")
         finally:
             stopped.set()
             if worker is not None:
                 worker.join(timeout=1)
 
     def table(self, headers: Sequence[str], rows: Sequence[Sequence[object]]) -> None:
-        """打印对齐的纯文本表；无需 Rich 也能在 WSL、日志和 CI 中阅读。"""
+        """Print an aligned plain-text table; readable in WSL, logs, and CI without Rich."""
 
         rendered = [[str(cell) for cell in row] for row in rows]
         widths = [len(header) for header in headers]

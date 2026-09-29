@@ -1,16 +1,16 @@
-# 仓库开发约定
+# Repository Development Conventions
 
-## 中文注释
+## English Comments
 
-- 新增或修改 Python 模块时，模块、公开类和重要函数必须包含准确的中文 docstring。
-- 关键控制流、安全边界、可复现性设计和不直观实现必须添加中文行内注释，重点解释“为什么这样设计”。
-- 不添加逐行翻译代码、重复变量名称或已经显而易见的机械注释；代码变化后必须同步更新相关注释。
-- 测试函数应说明它保护的行为或防止的回归，复杂测试准备步骤需要中文解释。
-- YAML 等实验配置中的重要参数组应使用中文注释说明用途，但不得在注释中记录未经验证的实验结果。
-- 标识符、命令、文件格式、第三方 API 名称和必要的技术术语保留英文，以便与代码及官方文档对应。
+- When adding or modifying Python modules, the module, public classes, and important functions must include accurate English docstrings.
+- Key control flow, security boundaries, reproducibility design, and non-obvious implementations must include English inline comments that focus on explaining *why* the code is designed this way.
+- Do not add line-by-line code translations, comments that repeat variable names, or mechanically obvious comments; update related comments whenever the code changes.
+- Test functions should state the behavior they protect or the regression they prevent; complex test setup steps need an English explanation.
+- Important parameter groups in YAML and other experiment configs should use English comments to describe their purpose, but must not record unverified experimental results in comments.
+- Identifiers, commands, file formats, third-party API names, and necessary technical terms stay in English to match the code and official documentation.
 
-## 修改后验证
+## Post-change Verification
 
-- Python 变更后运行完整测试：`python -m pytest -q`。
-- 实验配置变更后同时运行两份配置校验，并确认 fingerprint 的变化符合预期。
-- 提交前运行 `git diff --check`，避免引入无意义的空白错误。
+- After Python changes, run the full test suite: `python -m pytest -q`.
+- After experiment config changes, run both config validations and confirm the fingerprint changes match expectations.
+- Before committing, run `git diff --check` to avoid introducing meaningless whitespace errors.

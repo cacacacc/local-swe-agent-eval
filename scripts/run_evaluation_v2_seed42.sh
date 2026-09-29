@@ -1,31 +1,31 @@
 #!/usr/bin/env bash
 
-# 一键启动 evaluation v2 的固定题集；默认 seed 42，seed43 wrapper 会覆盖种子。
+# One-shot launcher for evaluation v2's frozen task set; seed 42 by default, and the seed43 wrapper overrides the seed.
 #
-# 用法：
+# Usage:
 #   ./scripts/run_evaluation_v2_seed42.sh 15
 #   ./scripts/run_evaluation_v2_seed42.sh 20
 #   ./scripts/run_evaluation_v2_seed42.sh 30
 #
-# 入口会把项目的 .venv 放到 PATH 最前面，因此调用者无需提前激活虚拟环境。
-# 正式运行前会按需启动 Docker Desktop 和 Ollama，并等待服务真正可用；脚本
-# 不会安装软件，也不会修改 Docker Desktop 的 WSL Integration 等主机设置。
+# The entry point puts the project's .venv at the front of PATH, so callers need not activate the virtualenv first.
+# Before the official run it starts Docker Desktop and Ollama on demand and waits until they are truly usable; the script
+# installs no software and does not modify host settings such as Docker Desktop's WSL Integration.
 #
-# 可通过环境变量覆盖本机相关路径或运行标识：
-#   BATCH_ID                批次 ID；默认包含所选题数
-#   RESUME_BATCH            设为 1 时继续已有 BATCH_ID，跳过已完整落盘的题目
-#   TASK_SEED               内部题集种子；默认 42，当前还支持新的 30 题 seed 43
-#   SWEBENCH_ROOT           SWE-bench 仓库；默认 $HOME/src/SWE-bench
-#   LOCAL_MODEL_BASE_URL    Ollama 地址；默认 http://localhost:11434
+# Host-specific paths and run identifiers can be overridden via environment variables:
+#   BATCH_ID                batch ID; includes the chosen task count by default
+#   RESUME_BATCH            set to 1 to continue an existing BATCH_ID, skipping tasks already fully persisted
+#   TASK_SEED               internal task-set seed; 42 by default, and the new 30-task seed 43 is also supported
+#   SWEBENCH_ROOT           SWE-bench repo; defaults to $HOME/src/SWE-bench
+#   LOCAL_MODEL_BASE_URL    Ollama address; defaults to http://localhost:11434
 
 set -Eeuo pipefail
 
-# 只接受仓库中已经冻结并验证的题集规模，防止拼写错误指向不存在的配置。
+# Accept only task-set sizes already frozen and verified in the repo, so a typo cannot point to a nonexistent config.
 TASK_COUNT="${1:-20}"
 case "${TASK_COUNT}" in
     15|20|30) ;;
     *)
-        printf '用法：%s {15|20|30}\n' "$0" >&2
+        printf 'Usage: %s {15|20|30}\n' "$0" >&2
         exit 2
         ;;
 esac
@@ -34,20 +34,20 @@ TASK_SEED="${TASK_SEED:-42}"
 case "${TASK_SEED}:${TASK_COUNT}" in
     42:15|42:20|42:30|43:30) ;;
     *)
-        printf '不支持的题集组合：seed=%s tasks=%s\n' "${TASK_SEED}" "${TASK_COUNT}" >&2
+        printf 'Unsupported task-set combination: seed=%s tasks=%s\n' "${TASK_SEED}" "${TASK_COUNT}" >&2
         exit 2
         ;;
 esac
 
-# 以脚本自身位置定位项目，避免要求用户从仓库根目录执行命令。
+# Locate the project from the script's own location so users need not run from the repo root.
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 PYTHON_BIN="${PROJECT_ROOT}/.venv/bin/python"
 CONFIG_PATH="${PROJECT_ROOT}/configs/evaluation_v2_${TASK_COUNT}_seed${TASK_SEED}.yaml"
 TASKS_PATH="${PROJECT_ROOT}/prepared/evaluation_tasks_${TASK_COUNT}_seed${TASK_SEED}.jsonl"
 SWEBENCH_ROOT="${SWEBENCH_ROOT:-${HOME}/src/SWE-bench}"
-# 新的缓存/总预算协议会改变 config fingerprint，默认批次名必须与旧结果隔离；
-# 显式设置 BATCH_ID 时仍尊重调用者的实验命名。
+# The new cache/total-budget protocol changes the config fingerprint, so the default batch name must stay isolated from old results;
+# when BATCH_ID is set explicitly, the caller's experiment naming is still respected.
 BATCH_ID="${BATCH_ID:-evaluation-v2-qwen35-${TASK_COUNT}-seed${TASK_SEED}-budget-cache-v1}"
 LOCAL_MODEL_BASE_URL="${LOCAL_MODEL_BASE_URL:-http://localhost:11434}"
 RESUME_BATCH="${RESUME_BATCH:-0}"
@@ -56,19 +56,19 @@ case "${RESUME_BATCH}" in
     0) RESUME_ARGS=() ;;
     1) RESUME_ARGS=(--resume) ;;
     *)
-        printf 'RESUME_BATCH 只允许为 0 或 1，当前值：%s\n' "${RESUME_BATCH}" >&2
+        printf 'RESUME_BATCH may only be 0 or 1, current value: %s\n' "${RESUME_BATCH}" >&2
         exit 2
         ;;
 esac
 
 fail() {
-    # 所有预检错误采用统一格式，并保证失败时不会继续创建实验目录。
-    printf '启动检查失败：%s\n' "$1" >&2
+    # All precheck errors share one format and guarantee no experiment directory is created after a failure.
+    printf 'Startup check failed: %s\n' "$1" >&2
     exit 1
 }
 
 ollama_ready() {
-    # 使用项目 Python 探测 API，避免要求宿主机额外安装 curl。
+    # Use the project Python to probe the API so the host need not install curl.
     "${PYTHON_BIN}" -c '
 import sys
 import urllib.request
@@ -81,8 +81,8 @@ with urllib.request.urlopen(f"{base_url}/api/tags", timeout=3) as response:
 }
 
 wait_for_docker() {
-    # Docker Desktop 启动通常需要数十秒；同时检查命令与 daemon，才能覆盖
-    # WSL Integration 尚未挂载客户端以及 daemon 尚未就绪两种状态。
+    # Docker Desktop usually takes tens of seconds to start; checking both the command and the daemon covers
+    # both the state where WSL Integration has not yet mounted the client and the state where the daemon is not ready.
     local attempt
     for ((attempt = 1; attempt <= 45; attempt++)); do
         if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
@@ -109,10 +109,10 @@ start_docker_if_needed() {
         return
     fi
 
-    printf 'Docker 尚未就绪，正在启动 Docker Desktop...\n'
+    printf 'Docker not ready yet, starting Docker Desktop...\n'
     if command -v powershell.exe >/dev/null 2>&1; then
-        # WSL 无法直接管理 Windows 服务；通过 Windows 启动已安装的 Desktop，
-        # 随后仍以 docker info 为准等待，而不是假定进程出现即代表可用。
+        # WSL cannot manage Windows services directly; launch the installed Desktop via Windows,
+        # then keep waiting on docker info rather than assuming the process appearing means it is usable.
         powershell.exe -NoProfile -NonInteractive -Command \
             'Start-Process "$Env:ProgramFiles\Docker\Docker\Docker Desktop.exe"' \
             >/dev/null 2>&1 || true
@@ -120,14 +120,14 @@ start_docker_if_needed() {
 
     if ! wait_for_docker; then
         cat >&2 <<'EOF'
-启动检查失败：Docker Desktop 启动后仍无法访问 Docker daemon。
+Startup check failed: Docker daemon is still unreachable after starting Docker Desktop.
 
-请确认 Windows 已安装 Docker Desktop，并在以下位置启用当前发行版：
+Confirm Docker Desktop is installed on Windows and enable the current distro at:
   Settings -> Resources -> WSL Integration
 EOF
         exit 1
     fi
-    printf 'Docker 已就绪。\n'
+    printf 'Docker is ready.\n'
 }
 
 start_ollama_if_needed() {
@@ -135,55 +135,55 @@ start_ollama_if_needed() {
         return
     fi
 
-    printf 'Ollama 尚未就绪，正在启动服务...\n'
+    printf 'Ollama not ready yet, starting the service...\n'
     if command -v ollama >/dev/null 2>&1; then
-        # 日志放在 /tmp，避免把宿主服务日志写进实验仓库或提交到 Git。
+        # Logs go to /tmp so host service logs are not written into the experiment repo or committed to Git.
         nohup ollama serve >/tmp/local-swe-agent-eval-ollama.log 2>&1 &
     elif command -v powershell.exe >/dev/null 2>&1; then
         powershell.exe -NoProfile -NonInteractive -Command \
             'Start-Process -WindowStyle Hidden ollama -ArgumentList "serve"' \
             >/dev/null 2>&1 || true
     else
-        fail "找不到 ollama 或 powershell.exe，无法自动启动 Ollama。"
+        fail "Cannot find ollama or powershell.exe, so Ollama cannot be started automatically."
     fi
 
     if ! wait_for_ollama; then
-        fail "自动启动 Ollama 后仍无法访问 ${LOCAL_MODEL_BASE_URL}；请检查 Ollama 安装和服务日志。"
+        fail "Still cannot reach ${LOCAL_MODEL_BASE_URL} after starting Ollama; check the Ollama install and service logs."
     fi
-    printf 'Ollama 已就绪。\n'
+    printf 'Ollama is ready.\n'
 }
 
 if [[ ! -x "${PYTHON_BIN}" ]]; then
-    fail "找不到项目虚拟环境 ${PYTHON_BIN}，请先创建并安装项目依赖。"
+    fail "Cannot find the project virtualenv ${PYTHON_BIN}; create it and install project dependencies first."
 fi
 
-# Bash 脚本不能修改调用它的父 shell，但把 .venv/bin 放到当前脚本 PATH 的
-# 最前面与激活环境对本次评测的效果一致，子进程调用 `python` 时也不会失效。
+# A Bash script cannot modify the parent shell that invoked it, but putting .venv/bin at the front of the
+# current script's PATH is equivalent to activating the env for this evaluation and still works when subprocesses call `python`.
 export PATH="${PROJECT_ROOT}/.venv/bin:${PATH}"
 
 if [[ ! -f "${CONFIG_PATH}" || ! -f "${TASKS_PATH}" ]]; then
-    fail "${TASK_COUNT} 题配置或准备后的任务文件不存在，请先完成数据准备。"
+    fail "The ${TASK_COUNT}-task config or prepared task file does not exist; finish data preparation first."
 fi
 
 start_docker_if_needed
 
 if ! command -v claude >/dev/null 2>&1; then
-    fail "找不到 claude 命令；请先安装 Claude Code，并确认它位于 PATH。"
+    fail "Cannot find the claude command; install Claude Code and confirm it is on PATH."
 fi
 
 if [[ ! -x "${SWEBENCH_ROOT}/.venv/bin/swebench" ]]; then
-    fail "找不到 ${SWEBENCH_ROOT}/.venv/bin/swebench，请检查 SWEBENCH_ROOT 或安装 SWE-bench。"
+    fail "Cannot find ${SWEBENCH_ROOT}/.venv/bin/swebench; check SWEBENCH_ROOT or install SWE-bench."
 fi
 
 start_ollama_if_needed
 
-printf '启动检查通过，开始运行 %s 题批次：%s\n' "${TASK_COUNT}" "${BATCH_ID}"
+printf 'Startup checks passed, starting the %s-task batch: %s\n' "${TASK_COUNT}" "${BATCH_ID}"
 
-# Python 的模块入口依赖仓库根目录位于 import path；这里显式切换目录，确保
-# 用户从任意工作目录调用本脚本时行为一致。
+# Python's module entry point relies on the repo root being on the import path; switching directory explicitly here ensures
+# consistent behavior when users invoke this script from any working directory.
 cd -- "${PROJECT_ROOT}"
 
-# exec 让批处理直接接管当前终端，Ctrl-C 和退出码可准确传递给调用者。
+# exec lets the batch take over the current terminal directly, so Ctrl-C and exit codes pass accurately to the caller.
 exec "${PYTHON_BIN}" -m scripts.run_batch \
     --config "${CONFIG_PATH}" \
     --tasks "${TASKS_PATH}" \

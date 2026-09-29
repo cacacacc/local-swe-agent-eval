@@ -1,4 +1,4 @@
-"""串行求解配置中冻结的题目，再批量官方评测并逐题导回结果。"""
+"""Serially solve the frozen tasks in the config, then run batch official evaluation and import results per task."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ _SAFE_BATCH_ID = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 def _write_json(path: Path, value: Any) -> None:
-    """原子写入批次状态，进程异常时避免留下半截 JSON。"""
+    """Atomically write batch state, avoiding a half-written JSON if the process fails."""
 
     temporary = path.with_name(f".{path.name}.tmp")
     serialized = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
@@ -47,11 +47,12 @@ def _load_resume_manifest(
     tasks: Sequence[SWEbenchTask],
     runs_root: Path,
 ) -> dict[str, Any]:
-    """加载并严格校验断点批次，防止把其他实验的产物混入当前运行。
+    """Load and strictly validate the checkpoint batch, preventing artifacts from other experiments from mixing into the current run.
 
-    Resume 只信任已经原子写入 ``batch.json`` 的连续题目记录。即使中断时某道题
-    留下了部分目录，也不会把不完整产物视为完成；后续会使用新的 retry run ID
-    重跑该题，从而保留现场且不覆盖用户数据。
+    Resume only trusts consecutive task records that have been atomically written to ``batch.json``.
+    Even if a task left a partial directory at interruption time, incomplete artifacts are not
+    treated as complete; the task is later rerun with a new retry run ID, preserving the
+    previous state without overwriting user data.
     """
 
     manifest_path = batch_path / "batch.json"
@@ -86,8 +87,9 @@ def _load_resume_manifest(
     if not isinstance(runs, list):
         raise AutomatedRunError("resumable batch manifest has invalid runs list")
 
-    # 只接受从第 1 题开始的连续记录，避免跳题、重复题或手工修改 manifest 后产生
-    # 顺序错位；每条 prediction 也必须存在，才能安全重建批量评测输入。
+    # Only accept consecutive records starting from task 1, avoiding order misalignment
+    # caused by skipped tasks, duplicated tasks, or manually edited manifests; each
+    # prediction must also exist before the batch evaluation input can be safely rebuilt.
     for expected_index, entry in enumerate(runs, start=1):
         if not isinstance(entry, dict) or expected_index > len(tasks):
             raise AutomatedRunError("resumable batch contains an invalid run entry")
@@ -125,7 +127,7 @@ def _next_attempt_run_id(
     runs_root: Path,
     workspaces_root: Path,
 ) -> str:
-    """为未完成题选择不覆盖旧现场的 run ID。"""
+    """Choose a run ID for an incomplete task that does not overwrite the previous state."""
 
     for attempt in range(100):
         suffix = "" if attempt == 0 else f"-retry-{attempt:02d}"
@@ -143,10 +145,11 @@ def select_fixed_tasks(
     *,
     expected_count: int | None = None,
 ) -> tuple[SWEbenchTask, ...]:
-    """按冻结 ID 文件顺序选择任务，并按需校验调用方声明的题数。
+    """Select tasks in the order of the frozen ID file and optionally validate the caller-declared task count.
 
-    冻结 ID 文件本身是实验题集的权威来源，因此默认不假设固定为十题。
-    ``expected_count`` 只作为用户显式要求的额外防误操作边界。
+    The frozen ID file itself is the authoritative source for the experiment task set,
+    so it is not assumed to be exactly ten tasks by default. ``expected_count`` only
+    serves as an extra anti-mistake boundary explicitly requested by the user.
     """
 
     try:
@@ -170,7 +173,7 @@ def write_batch_predictions(
     destination: Path,
     prediction_paths: Sequence[Path],
 ) -> None:
-    """合并逐题 JSONL，并验证每个文件恰好包含一个 JSON object。"""
+    """Merge per-task JSONL and verify each file contains exactly one JSON object."""
 
     records: list[dict[str, Any]] = []
     for prediction_path in prediction_paths:
@@ -201,7 +204,7 @@ def write_batch_predictions(
 
 
 def _result_row(run_path: Path, task: SWEbenchTask) -> dict[str, Any]:
-    """读取已导回的单题结果，生成批次汇总所需的最小稳定字段。"""
+    """Read the imported per-task result and generate the minimal stable fields needed for the batch summary."""
 
     result_path = run_path / "result.json"
     result = json.loads(result_path.read_text(encoding="utf-8"))
@@ -221,7 +224,7 @@ def _result_row(run_path: Path, task: SWEbenchTask) -> dict[str, Any]:
 
 
 def _official_result_is_imported(run_path: Path, harness_run_id: str) -> bool:
-    """判断同一 harness 的官方结果是否已导入，支持在汇总阶段继续执行。"""
+    """Check whether the same harness's official result has been imported, supporting continuation at the summary stage."""
 
     result_path = run_path / "result.json"
     try:
@@ -241,7 +244,7 @@ def _official_result_is_imported(run_path: Path, harness_run_id: str) -> bool:
 
 
 def run_batch(arguments: argparse.Namespace) -> Path:
-    """完成冻结题集流水线，并返回包含主要指标的批次汇总路径。"""
+    """Run the frozen task-set pipeline and return the batch summary path containing the main metrics."""
 
     if not _SAFE_BATCH_ID.fullmatch(arguments.batch_id):
         raise AutomatedRunError("--batch-id contains unsafe characters")
@@ -251,7 +254,7 @@ def run_batch(arguments: argparse.Namespace) -> Path:
         raise AutomatedRunError("evaluation timeout must be positive")
 
     config = ExperimentConfig.load(arguments.config)
-    # 正式批处理代表主要实验结果，不能在 Dev 参数仍可变化时误启动。
+    # Formal batch runs represent the primary experiment results and must not be started by mistake while Dev parameters are still mutable.
     if config.experiment.phase != "evaluation":
         raise AutomatedRunError("batch script requires an evaluation configuration")
     config.require_frozen()
@@ -276,12 +279,13 @@ def run_batch(arguments: argparse.Namespace) -> Path:
 
     reporter = ConsoleReporter()
     reporter.banner(
-        "Local SWE-bench 正式批量实验",
+        "Local SWE-bench formal batch experiment",
         f"batch={arguments.batch_id}  tasks={len(tasks)}  model={config.model.name}",
     )
-    # 在创建 batch 产物和运行第一个 Agent 之前一次性准备全部镜像。这样缺失镜像
-    # 只会导致环境准备失败，不会留下“前四题完成、第五码住”的半截实验。
-    with reporter.activity("预检并按需下载全部 SWE-bench 测试镜像"):
+    # Prepare all images once before creating batch artifacts and running the first Agent.
+    # A missing image then only fails environment preparation, without leaving a half-run
+    # experiment where "the first four tasks finished and the fifth is stuck".
+    with reporter.activity("Precheck and download all SWE-bench test images as needed"):
         for task in tasks:
             prepare_visible_test_image(
                 task,
@@ -305,7 +309,7 @@ def run_batch(arguments: argparse.Namespace) -> Path:
         manifest["status"] = "running"
         manifest["finished_at"] = None
         manifest.pop("error", None)
-        reporter.line(f"  ↻ 从第 {len(manifest['runs']) + 1} 题继续")
+        reporter.line(f"  ↻  Resuming from task {len(manifest['runs']) + 1}")
     else:
         try:
             batch_path.mkdir(parents=True, exist_ok=False)
@@ -327,14 +331,14 @@ def run_batch(arguments: argparse.Namespace) -> Path:
         }
     _write_json(batch_path / "batch.json", manifest)
 
-    reporter.stage(1, 3, "串行运行本地 Agent")
+    reporter.stage(1, 3, "Run local Agent serially")
     run_paths = [Path(entry["run_path"]) for entry in manifest["runs"]]
     prediction_paths = [run_path / "prediction.jsonl" for run_path in run_paths]
     completed_count = len(run_paths)
     try:
         for index, task in enumerate(tasks, start=1):
             if index <= completed_count:
-                reporter.task(index, len(tasks), f"{task.instance_id}（已完成，跳过）")
+                reporter.task(index, len(tasks), f"{task.instance_id} (completed, skipped)")
                 continue
             reporter.task(index, len(tasks), task.instance_id)
             base_run_id = f"{arguments.batch_id}-{index:02d}"
@@ -347,12 +351,12 @@ def run_batch(arguments: argparse.Namespace) -> Path:
                 config.project_root / config.storage.repository_cache,
                 config.project_root / config.storage.workspaces / run_id,
             )
-            with reporter.activity("准备 worktree"):
+            with reporter.activity("Prepare worktree"):
                 prepared = manager.prepare(
                     task,
                     allow_network=arguments.allow_network_preparation,
                 )
-            with reporter.activity("Claude Code 求解"):
+            with reporter.activity("Claude Code solving"):
                 run_path = run_claude_task(
                     task,
                     prepared.path,
@@ -361,7 +365,7 @@ def run_batch(arguments: argparse.Namespace) -> Path:
                     base_url=arguments.base_url,
                     workspace_base_commit=prepared.workspace_base_commit,
                 )
-            # 空 patch 仍必须进入正式 harness，才能诚实计入 empty patch rate。
+            # An empty patch must still enter the formal harness so the empty patch rate is counted honestly.
             prediction_path = write_prediction(
                 run_path,
                 task,
@@ -382,9 +386,9 @@ def run_batch(arguments: argparse.Namespace) -> Path:
 
         aggregate_predictions = batch_path / "predictions.jsonl"
         write_batch_predictions(aggregate_predictions, prediction_paths)
-        reporter.line(f"\n  ✓ 已合并 {len(tasks)} 条 prediction：{aggregate_predictions}")
+        reporter.line(f"\n  ✓ Merged {len(tasks)} predictions: {aggregate_predictions}")
 
-        reporter.stage(2, 3, "使用 Docker workers 批量官方评测")
+        reporter.stage(2, 3, "Run batch official evaluation with Docker workers")
         swebench_root = arguments.swebench_root.resolve()
         executable = arguments.swebench_executable
         if executable is None:
@@ -402,7 +406,7 @@ def run_batch(arguments: argparse.Namespace) -> Path:
             timeout_seconds=arguments.evaluation_timeout,
             harness_run_id=harness_run_id,
         )
-        with reporter.activity(f"官方评测（{workers} workers）"):
+        with reporter.activity(f"Official evaluation ({workers} workers)"):
             run_harness(command, swebench_root, batch_path / "official_evaluation.log")
 
         report_path = (
@@ -411,7 +415,7 @@ def run_batch(arguments: argparse.Namespace) -> Path:
         if not report_path.is_file():
             raise AutomatedRunError(f"official report is missing: {report_path}")
 
-        reporter.stage(3, 3, "逐题导回并汇总官方判定")
+        reporter.stage(3, 3, "Import and summarize official verdicts per task")
         rows: list[dict[str, Any]] = []
         for task, run_path in zip(tasks, run_paths):
             if not _official_result_is_imported(run_path, harness_run_id):
@@ -460,15 +464,16 @@ def run_batch(arguments: argparse.Namespace) -> Path:
         reporter.line(f"summary={summary_path}")
         return summary_path
     except KeyboardInterrupt:
-        # Ctrl-C 属于用户主动暂停而不是实验失败。当前题只有在 prediction 与 manifest
-        # 都已原子落盘后才算完成；否则下次会用 retry ID 从该题重新开始。
+        # Ctrl-C is a deliberate user pause, not an experiment failure. The current task
+        # counts as complete only after both the prediction and manifest are atomically
+        # written to disk; otherwise the next run restarts from that task with a retry ID.
         manifest["status"] = "interrupted"
         manifest["finished_at"] = datetime.now(timezone.utc).isoformat()
         manifest["error"] = "KeyboardInterrupt: interrupted by user"
         _write_json(batch_path / "batch.json", manifest)
         reporter.line(
-            f"\n  已保存断点：完成 {len(manifest['runs'])}/{len(tasks)} 题；"
-            "使用同一 batch ID 和 --resume 可继续。"
+            f"\n  Checkpoint saved: {len(manifest['runs'])}/{len(tasks)} tasks completed; "
+            "continue with the same batch ID and --resume."
         )
         raise
     except Exception as error:
@@ -480,7 +485,7 @@ def run_batch(arguments: argparse.Namespace) -> Path:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """声明正式批量运行参数；题数默认取冻结清单，workers 取实验配置。"""
+    """Declare formal batch run parameters; the task count defaults to the frozen list and workers to the experiment config."""
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
@@ -494,7 +499,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--expected-tasks",
         type=int,
-        help="可选的题数断言；省略时以配置中的冻结任务清单为准",
+        help="Optional task-count assertion; when omitted, the frozen task list in the config is authoritative",
     )
     parser.add_argument("--evaluation-timeout", type=int, default=1800)
     parser.add_argument("--evaluation-workers", type=int)
@@ -502,13 +507,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="继续同一 batch ID，跳过 batch.json 中已经完整落盘的题目",
+        help="Continue the same batch ID, skipping tasks already fully written in batch.json",
     )
     return parser
 
 
 def main() -> int:
-    """执行正式批量实验，并打印最终 summary.json 路径。"""
+    """Run the formal batch experiment and print the final summary.json path."""
 
     summary_path = run_batch(build_parser().parse_args())
     print(f"batch_summary={summary_path}")

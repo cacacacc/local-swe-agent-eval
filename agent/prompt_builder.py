@@ -169,39 +169,56 @@ def build_verification_phase_prompt(
     )
 
 
-def build_recovery_edit_gate_prompt(
+def build_recovery_read_gate_prompt(
     base_prompt: str,
     *,
-    recovery_turns: int,
     implementation_handoff: str,
     source_context: str,
 ) -> str:
-    """构造 Recovery 的两步 Read→Edit 阶段，配合 CLI 仅开放这两个工具。
+    """构造 Recovery 状态机的第一步，要求且只允许一次目标源码 Read。
 
-    此阶段位于任何新的探索之前。父进程提供 Implementation 已定位的公开结论和
-    源码片段；模型先在同一会话 Read 目标文件以满足 Claude Code 的编辑前置条件，
-    下一 turn 必须 Edit。Grep/Glob/Bash/Write 和子代理均不会进入工具白名单。
+    父进程随后会校验实际工具事件；只有读取仓库内既有源码才会进入同一 session
+    的 Edit-only 第二步。Prompt 因而只负责给模型上下文，顺序由父进程实施。
     """
 
     handoff = implementation_handoff.strip() or "No visible diagnosis was recorded."
     context = source_context.strip() or "No safe source excerpt was available."
     return (
         f"{base_prompt.rstrip()}\n\n"
-        "Current phase: empty-patch recovery implementation — mandatory Read-Edit gate\n"
-        f"- You have exactly two ordered actions within at most {recovery_turns} turns.\n"
-        "- Turn 1: call Read exactly once on the most relevant existing source file named "
-        "in the handoff or source context. Do not Edit before this Read.\n"
-        "- Turn 2: call Edit immediately on that same file. Do not call Read a second time.\n"
-        "- Read and Edit are the only available tools. Grep, Glob, Bash, Write, and "
-        "subagents are unavailable.\n"
-        "- Use the handoff and source excerpts below to make the smallest plausible "
-        "product-source change. Do not respond with an explanation only.\n"
+        "Current phase: empty-patch recovery — mandatory Read step\n"
+        "- This invocation has exactly one action: call Read exactly once on the most "
+        "relevant existing product-source file named below.\n"
+        "- Read is the only available tool. Do not answer with text, request another "
+        "tool, or read a test, reproduction, generated, or control file.\n"
+        "- The parent process validates the tool event and will resume this exact session "
+        "with only Edit available if the path is valid.\n"
         "<implementation_handoff>\n"
         f"{handoff}\n"
         "</implementation_handoff>\n"
         "<source_context>\n"
         f"{context}\n"
         "</source_context>\n"
+        "- Do not create a Git commit, test file, reproduction file, or control file.\n"
+    )
+
+
+def build_recovery_edit_gate_prompt(
+    base_prompt: str,
+    *,
+    target_file: str,
+) -> str:
+    """构造 Recovery 状态机的第二步，只允许 Edit 第一步读取的同一文件。"""
+
+    return (
+        f"{base_prompt.rstrip()}\n\n"
+        "Current phase: empty-patch recovery — mandatory Edit step\n"
+        f"- The validated Read step selected `{target_file}`.\n"
+        "- This invocation has exactly one action: call Edit exactly once on that same "
+        "file and leave the smallest plausible product-source fix.\n"
+        "- Edit is the only available tool. Do not answer with text, request Read, or "
+        "modify a different path.\n"
+        "- Use the issue, handoff, and source content already present in this resumed "
+        "session. If evidence is incomplete, still make the safest minimal Edit.\n"
         "- Do not create a Git commit, test file, reproduction file, or control file.\n"
     )
 
@@ -246,15 +263,16 @@ def build_recovery_implementation_prompt(
         "<implementation_handoff>\n"
         f"{handoff}\n"
         "</implementation_handoff>\n"
-        "- The mandatory Read-Edit gate did not produce an existing-source patch. Do not "
+        "- The mandatory Read-Edit state machine did not produce a validated existing-"
+        "source patch. Do not "
         "repeat searches or file reads already summarized in the handoff.\n"
         f"{budget_note}"
         f"- You have at most {recovery_turns} turns to make a minimal concrete source "
         "change that addresses the issue.\n"
         "- Bash is disabled in this phase. Use only targeted Read, Grep, and Glob for "
         "inspection; do not run tests or package installers.\n"
-        "- The earlier gate already enforced an immediate Edit attempt. Use the remaining "
-        "calls only to correct that attempt, then Edit existing product source.\n"
+        "- The earlier gate either failed sequence validation or produced no usable patch. "
+        "Use the remaining calls to make and correct one concrete product-source Edit.\n"
         "- Modify existing product source. A reproduction script, generated environment, "
         "test-only change, explanation, or empty working tree is not a fix.\n"
         "- Do not create a Git commit or `.agent-test-plan.json`.\n"

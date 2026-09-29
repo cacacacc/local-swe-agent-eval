@@ -18,6 +18,8 @@ from scripts.run_claude import (
     _execute_scheduled_test,
     _scheduled_test_result,
     _should_run_verification,
+    _validate_recovery_edit_step,
+    _validate_recovery_read_step,
     _verification_policy,
     run_claude_task,
 )
@@ -31,18 +33,36 @@ def _result(
     test_output: str = "",
     *,
     host_test_calls: int = 0,
+    tool_calls: tuple[tuple[str, dict[str, object]], ...] = (),
 ) -> ClaudeCodeResult:
     """构造不启动真实 Claude Code 的最小结果。"""
 
+    events = tuple(
+        {
+            "event_type": "assistant",
+            "details": {
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": name,
+                            "input": tool_input,
+                        }
+                    ]
+                }
+            },
+        }
+        for name, tool_input in tool_calls
+    )
     return ClaudeCodeResult(
         exit_code=exit_code,
         agent_log="done\n",
         test_output=test_output,
-        events=(),
+        events=events,
         timed_out=False,
         metrics={
             "agent_turns": 1,
-            "tool_calls": 0,
+            "tool_calls": len(tool_calls),
             "host_test_calls": host_test_calls,
             "token_usage": {},
         },
@@ -64,6 +84,40 @@ def test_patch_gate_rejects_generic_success_with_empty_diff() -> None:
         "host_test_valid": False,
     }
     assert validated.events[-1]["event_type"] == "patch_validation"
+
+
+def test_recovery_gate_requires_one_read_then_edit_on_the_same_source(
+    tmp_path: Path,
+) -> None:
+    """状态机必须拒绝测试文件 Read 和改到另一源码文件的 Edit。"""
+
+    source = tmp_path / "src" / "widget.py"
+    other = tmp_path / "src" / "other.py"
+    test_file = tmp_path / "tests" / "test_widget.py"
+    source.parent.mkdir(parents=True)
+    test_file.parent.mkdir(parents=True)
+    for path in (source, other, test_file):
+        path.write_text("value = 1\n", encoding="utf-8")
+
+    rejected_read = _validate_recovery_read_step(
+        _result(tool_calls=(("Read", {"file_path": str(test_file)}),)),
+        tmp_path,
+    )
+    valid_read = _validate_recovery_read_step(
+        _result(tool_calls=(("Read", {"file_path": str(source)}),)),
+        tmp_path,
+    )
+    wrong_edit = _validate_recovery_edit_step(
+        _result(tool_calls=(("Edit", {"file_path": str(other)}),)),
+        tmp_path,
+        expected_target="src/widget.py",
+    )
+
+    assert rejected_read.valid is False
+    assert valid_read.valid is True
+    assert valid_read.target_file == "src/widget.py"
+    assert wrong_edit.valid is False
+    assert wrong_edit.error == "Edit target differs from the validated Read target"
 
 
 def test_recovery_handoff_keeps_visible_findings_without_tool_results() -> None:
@@ -895,6 +949,146 @@ def test_nonempty_patch_reaches_verification_when_parent_plan_is_missing(
     assert result["metrics"]["visible_test_missing"] == 2
 
 
+def test_verification_reserves_three_turns_to_repair_final_new_regression(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """主 Verification 新增回归时必须用保留的 3 turns 修复并再次复测。"""
+
+    repository = tmp_path / "repository"
+    source = repository / "src" / "widget.py"
+    target_test = repository / "tests" / "test_widget.py"
+    regression_test = repository / "tests" / "test_neighbor.py"
+    source.parent.mkdir(parents=True)
+    target_test.parent.mkdir(parents=True)
+    source.write_text("value = 1\n", encoding="utf-8")
+    target_test.write_text("def test_widget(): pass\n", encoding="utf-8")
+    regression_test.write_text("def test_neighbor(): pass\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "base",
+        ],
+        check=True,
+    )
+    base_commit = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    calls: list[str] = []
+    runner_options: list[dict[str, object]] = []
+
+    class FakeAgent:
+        """主 Verification 制造回归，post-test repair 再修复。"""
+
+        def run(self, worktree, prompt):
+            if "Focused repair mode" in prompt:
+                calls.append("post_repair")
+                source.write_text("value = 4\n", encoding="utf-8")
+            elif "Current phase: verification" in prompt:
+                calls.append("verification")
+                source.write_text("value = 3\n", encoding="utf-8")
+            else:
+                calls.append("implementation")
+                source.write_text("value = 2\n", encoding="utf-8")
+            return _result()
+
+    class FakeSandbox:
+        """只让主 Verification 的 value=3 candidate 产生确定性新增失败。"""
+
+        timeout_seconds = 120
+
+        def __init__(self, **kwargs):
+            pass
+
+        def resolve_image(self, instance_id):
+            return "swebench/example:latest"
+
+        def image_digest(self, image):
+            return "sha256:test"
+
+        def run(
+            self,
+            repository,
+            *,
+            instance_id,
+            base_commit,
+            command,
+            apply_patch,
+            timeout_seconds,
+        ):
+            regressed = (
+                apply_patch
+                and command[-1] == "tests/test_widget.py"
+                and source.read_text(encoding="utf-8") == "value = 3\n"
+            )
+            return VisibleTestResult(
+                exit_code=1 if regressed else 0,
+                output=(
+                    "FAILED tests/test_widget.py::test_widget - AssertionError\n"
+                    if regressed
+                    else "1 passed\n"
+                ),
+                image="swebench/example:latest",
+                timed_out=False,
+                command_started=True,
+            )
+
+    def fake_runner(*args, **kwargs):
+        """记录 30+7+3 的模型预算分配。"""
+
+        runner_options.append(dict(kwargs))
+        return FakeAgent()
+
+    monkeypatch.setattr("scripts.run_claude._runner", fake_runner)
+    monkeypatch.setattr("scripts.run_claude.VisibleTestSandbox", FakeSandbox)
+    monkeypatch.setattr(
+        "scripts.run_claude.RuntimeFingerprintCollector.collect",
+        lambda self: {"schema_version": 1},
+    )
+    task = SWEbenchTask(
+        instance_id="owner__project-post-test-repair",
+        repo="owner/project",
+        base_commit=base_commit,
+        problem_statement="Fix widget behavior.",
+    )
+
+    run_path = run_claude_task(
+        task,
+        repository,
+        ExperimentConfig.load(PROJECT_ROOT / "configs" / "dev_v2.yaml"),
+        tmp_path / "runs",
+        base_url="http://localhost:11434",
+        workspace_base_commit=base_commit,
+    )
+
+    result = json.loads((run_path / "result.json").read_text(encoding="utf-8"))
+    phases = result["metrics"]["phases"]
+    assert calls == ["implementation", "verification", "post_repair"]
+    assert runner_options[0]["turns"] == 30
+    assert runner_options[1]["turns"] == 7
+    assert runner_options[2]["turns"] == 3
+    assert runner_options[2]["allow_bash"] is False
+    assert runner_options[2]["available_tools"] == ("Read", "Edit")
+    assert phases["scheduled_test_final"]["visible_test_new_regressions"] == 1
+    assert "verification_post_test_repair" in phases
+    assert "scheduled_test_post_repair" in phases
+    assert phases["scheduled_test_post_repair"]["visible_test_new_regressions"] == 0
+    assert source.read_text(encoding="utf-8") == "value = 4\n"
+
+
 def test_empty_patch_reuses_verification_budget_for_recovery(
     tmp_path: Path,
     monkeypatch,
@@ -933,12 +1127,20 @@ def test_empty_patch_reuses_verification_budget_for_recovery(
     runner_options: list[dict[str, object]] = []
 
     class FakeAgent:
-        """首轮不修改文件，Recovery 会话交付一个既有源码修改。"""
+        """首轮不修改文件，状态机按 Read→Edit 交付既有源码修改。"""
 
         def run(self, worktree, prompt):
-            if "empty-patch recovery implementation" in prompt:
-                calls.append("recovery")
+            if "mandatory Read step" in prompt:
+                calls.append("read")
+                return _result(
+                    tool_calls=(("Read", {"file_path": str(source)}),)
+                )
+            if "mandatory Edit step" in prompt:
+                calls.append("edit")
                 source.write_text("value = 2\n", encoding="utf-8")
+                return _result(
+                    tool_calls=(("Edit", {"file_path": str(source)}),)
+                )
             elif "Current phase: verification" in prompt:
                 calls.append("verification")
             else:
@@ -989,13 +1191,19 @@ def test_empty_patch_reuses_verification_budget_for_recovery(
     )
 
     result = json.loads((run_path / "result.json").read_text(encoding="utf-8"))
-    assert calls == ["implementation", "recovery"]
+    assert calls == ["implementation", "read", "edit"]
     assert "allow_bash" not in runner_options[0]
     assert runner_options[1]["allow_bash"] is False
-    assert runner_options[1]["available_tools"] == ("Read", "Edit")
-    assert runner_options[1]["turns"] == 2
+    assert runner_options[1]["available_tools"] == ("Read",)
+    assert runner_options[1]["turns"] == 1
+    assert runner_options[2]["available_tools"] == ("Edit",)
+    assert runner_options[2]["turns"] == 1
+    assert runner_options[1]["session_id"] == runner_options[2]["session_id"]
+    assert runner_options[1]["persist_session"] is True
+    assert runner_options[2]["resume_session"] is True
     assert result["run_status"] == "completed"
     assert result["patch_generated"] is True
+    assert "recovery_read_gate" in result["metrics"]["phases"]
     assert "recovery_edit_gate" in result["metrics"]["phases"]
     assert "recovery_fallback" not in result["metrics"]["phases"]
     assert "scheduled_test_recovery" in result["metrics"]["phases"]
@@ -1041,14 +1249,22 @@ def test_recovery_fallback_uses_only_budget_left_after_edit_gate(
     runner_options: list[dict[str, object]] = []
 
     class FakeAgent:
-        """Edit gate 不落盘，fallback 使用剩余预算完成修改。"""
+        """Read 合法但 Edit 不落盘，fallback 使用剩余预算完成修改。"""
 
         def run(self, worktree, prompt):
             if "empty-patch recovery fallback" in prompt:
                 calls.append("fallback")
                 source.write_text("value = 2\n", encoding="utf-8")
-            elif "mandatory Read-Edit gate" in prompt:
-                calls.append("gate")
+            elif "mandatory Read step" in prompt:
+                calls.append("read")
+                return _result(
+                    tool_calls=(("Read", {"file_path": str(source)}),)
+                )
+            elif "mandatory Edit step" in prompt:
+                calls.append("second_read_rejected")
+                return _result(
+                    tool_calls=(("Read", {"file_path": str(source)}),)
+                )
             else:
                 calls.append("implementation")
             return _result()
@@ -1097,13 +1313,26 @@ def test_recovery_fallback_uses_only_budget_left_after_edit_gate(
     )
 
     result = json.loads((run_path / "result.json").read_text(encoding="utf-8"))
-    assert calls == ["implementation", "gate", "fallback"]
-    assert runner_options[1]["turns"] == 2
-    assert runner_options[2]["turns"] == 5
+    assert calls == ["implementation", "read", "second_read_rejected", "fallback"]
+    assert runner_options[1]["turns"] == 1
+    assert runner_options[2]["turns"] == 1
+    assert runner_options[3]["turns"] == 5
     assert runner_options[1]["allow_bash"] is False
     assert runner_options[2]["allow_bash"] is False
-    assert runner_options[1]["available_tools"] == ("Read", "Edit")
-    assert "available_tools" not in runner_options[2]
+    assert runner_options[3]["allow_bash"] is False
+    assert runner_options[1]["available_tools"] == ("Read",)
+    assert runner_options[2]["available_tools"] == ("Edit",)
+    assert "available_tools" not in runner_options[3]
+    assert (
+        result["metrics"]["phases"]["recovery_edit_gate"]["recovery_gate"][
+            "valid"
+        ]
+        is False
+    )
+    assert result["metrics"]["phases"]["recovery_edit_gate"][
+        "recovery_gate"
+    ]["tool_sequence"] == ["Read"]
+    assert "recovery_read_gate" in result["metrics"]["phases"]
     assert "recovery_edit_gate" in result["metrics"]["phases"]
     assert "recovery_fallback" in result["metrics"]["phases"]
     assert result["patch_generated"] is True
@@ -1151,15 +1380,23 @@ def test_recovery_new_failure_signature_enters_focused_repair_and_retests(
     runner_options: list[dict[str, object]] = []
 
     class FakeAgent:
-        """gate 先产生带回归的 patch，聚焦阶段再完成窄修复。"""
+        """Read→Edit gate 产生带回归的 patch，聚焦阶段再完成窄修复。"""
 
         def run(self, worktree, prompt):
             if "Focused repair mode" in prompt:
                 calls.append("repair")
                 source.write_text("value = 3\n", encoding="utf-8")
-            elif "mandatory Read-Edit gate" in prompt:
-                calls.append("gate")
+            elif "mandatory Read step" in prompt:
+                calls.append("read")
+                return _result(
+                    tool_calls=(("Read", {"file_path": str(source)}),)
+                )
+            elif "mandatory Edit step" in prompt:
+                calls.append("edit")
                 source.write_text("value = 2\n", encoding="utf-8")
+                return _result(
+                    tool_calls=(("Edit", {"file_path": str(source)}),)
+                )
             else:
                 calls.append("implementation")
             return _result()
@@ -1235,11 +1472,12 @@ def test_recovery_new_failure_signature_enters_focused_repair_and_retests(
 
     result = json.loads((run_path / "result.json").read_text(encoding="utf-8"))
     phases = result["metrics"]["phases"]
-    assert calls == ["implementation", "gate", "repair"]
-    assert runner_options[1]["turns"] == 2
-    assert runner_options[2]["turns"] == 3
-    assert runner_options[2]["allow_bash"] is False
-    assert runner_options[2]["available_tools"] == ("Read", "Edit")
+    assert calls == ["implementation", "read", "edit", "repair"]
+    assert runner_options[1]["turns"] == 1
+    assert runner_options[2]["turns"] == 1
+    assert runner_options[3]["turns"] == 3
+    assert runner_options[3]["allow_bash"] is False
+    assert runner_options[3]["available_tools"] == ("Read", "Edit")
     assert "scheduled_test_recovery" in phases
     assert "recovery_regression_repair" in phases
     assert "scheduled_test_recovery_final" in phases

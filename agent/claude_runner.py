@@ -17,6 +17,7 @@ import signal
 import subprocess
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlparse
+from uuid import UUID
 
 
 class ClaudeCodeError(RuntimeError):
@@ -332,8 +333,11 @@ class ClaudeCodeRunner:
         executable: str = "claude",
         allow_bash: bool = True,
         available_tools: Sequence[str] | None = None,
+        session_id: str | None = None,
+        resume_session: bool = False,
+        persist_session: bool = False,
     ) -> None:
-        """验证实验上限、工具门禁和 endpoint，拒绝远程模型服务。"""
+        """验证实验上限、工具门禁、临时会话状态和本地 endpoint。"""
 
         if (
             timeout_seconds <= 0
@@ -346,6 +350,15 @@ class ClaudeCodeRunner:
             )
         if max_output_tokens >= context_length:
             raise ValueError("max_output_tokens must be smaller than context_length")
+        if resume_session and session_id is None:
+            raise ValueError("resume_session requires session_id")
+        if (session_id is not None or resume_session) and not persist_session:
+            raise ValueError("session continuation requires persist_session")
+        if session_id is not None:
+            try:
+                UUID(session_id)
+            except ValueError as error:
+                raise ValueError("session_id must be a valid UUID") from error
         parsed_url = urlparse(base_url)
         if parsed_url.scheme != "http" or parsed_url.hostname not in {
             "localhost",
@@ -370,6 +383,9 @@ class ClaudeCodeRunner:
             if available_tools is not None
             else None
         )
+        self.session_id = session_id
+        self.resume_session = resume_session
+        self.persist_session = persist_session
 
     def command(self, prompt: str) -> list[str]:
         """构造无 shell 插值的固定命令，避免题目文本被解释为命令。"""
@@ -399,11 +415,24 @@ class ClaudeCodeRunner:
             # ``--tools`` 是真正的可用工具白名单。使用单个逗号分隔参数，避免其
             # 可变长解析吞掉后续固定 CLI 选项。
             command.extend(("--tools", ",".join(self.available_tools)))
+        if self.session_id is not None:
+            # Recovery gate 的 Read 与 Edit 是两个不同工具白名单的 CLI 调用；
+            # 显式 session ID 让第二步继承第一步已读取文件的上下文，同时避免
+            # ``--continue`` 意外接入用户或其他题目的最近会话。
+            command.extend(
+                (
+                    "--resume" if self.resume_session else "--session-id",
+                    self.session_id,
+                )
+            )
+        session_options = (
+            () if self.persist_session else ("--no-session-persistence",)
+        )
         command.extend(
             (
                 "--permission-mode",
                 "bypassPermissions",
-                "--no-session-persistence",
+                *session_options,
                 "--no-chrome",
                 "--disable-slash-commands",
                 "--disallowed-tools",

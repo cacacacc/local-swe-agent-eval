@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import time
 from typing import Any, Mapping, MutableMapping, Sequence
+from uuid import uuid4
 
 from agent.claude_runner import (
     ClaudeCodeResult,
@@ -25,6 +26,7 @@ from agent.prompt_builder import (
     build_implementation_phase_prompt,
     build_recovery_edit_gate_prompt,
     build_recovery_implementation_prompt,
+    build_recovery_read_gate_prompt,
     build_verification_phase_prompt,
 )
 from agent.test_plan import (
@@ -129,8 +131,11 @@ def _runner(
     base_url: str,
     allow_bash: bool = True,
     available_tools: Sequence[str] | None = None,
+    session_id: str | None = None,
+    resume_session: bool = False,
+    persist_session: bool = False,
 ) -> ClaudeCodeRunner:
-    """按阶段预算构造 Claude Code，并传递 CLI 工具黑白名单。"""
+    """按阶段预算构造 Claude Code，并传递工具及临时会话边界。"""
 
     return ClaudeCodeRunner(
         model=config.model.name,
@@ -141,6 +146,9 @@ def _runner(
         base_url=base_url,
         allow_bash=allow_bash,
         available_tools=available_tools,
+        session_id=session_id,
+        resume_session=resume_session,
+        persist_session=persist_session,
     )
 
 
@@ -188,6 +196,13 @@ def _patch_modifies_existing_source(patch: str) -> bool:
     文件的修改也不算产品修复，避免模型通过改测试绕过交付要求。
     """
 
+    return bool(_existing_source_patch_projection(patch))
+
+
+def _existing_source_patch_projection(patch: str) -> str:
+    """只保留既有产品源码 diff，供 gate 前后比较真实实现变化。"""
+
+    accepted: list[str] = []
     for section in re.split(r"(?=^diff --git )", patch, flags=re.MULTILINE):
         match = re.match(r"diff --git a/(.+?) b/(.+?)\n", section)
         if match is None or "new file mode " in section:
@@ -204,8 +219,186 @@ def _patch_modifies_existing_source(patch: str) -> bool:
         # 文档、日志和任意既有临时文件同样不能满足“修复产品源码”的要求；
         # 显式后缀白名单适配 SWE-bench 中常见的 Python/C/前端与模板源码。
         if not is_test and path.suffix.lower() in _SOURCE_SUFFIXES and "@@" in section:
-            return True
-    return False
+            accepted.append(section)
+    return "".join(accepted)
+
+
+@dataclass(frozen=True, slots=True)
+class _RecoveryGateValidation:
+    """父进程对 Recovery Read/Edit 单步工具事件的审计结论。"""
+
+    valid: bool
+    step: str
+    tool_sequence: tuple[str, ...]
+    target_file: str | None = None
+    error: str | None = None
+
+
+def _validate_recovery_read_step(
+    result: ClaudeCodeResult,
+    repository: Path,
+) -> _RecoveryGateValidation:
+    """只接受一次指向仓库内既有产品源码的 Read。"""
+
+    calls = _observable_tool_calls(result)
+    sequence = tuple(name for name, _ in calls)
+    if len(calls) != 1 or calls[0][0] != "Read":
+        return _RecoveryGateValidation(
+            valid=False,
+            step="read",
+            tool_sequence=sequence,
+            error="read step must contain exactly one Read tool call",
+        )
+    relative = _validated_gate_source_path(
+        repository,
+        calls[0][1].get("file_path"),
+    )
+    if relative is None:
+        return _RecoveryGateValidation(
+            valid=False,
+            step="read",
+            tool_sequence=sequence,
+            error="Read target is not an existing product-source file",
+        )
+    return _RecoveryGateValidation(
+        valid=True,
+        step="read",
+        tool_sequence=sequence,
+        target_file=relative,
+    )
+
+
+def _validate_recovery_edit_step(
+    result: ClaudeCodeResult,
+    repository: Path,
+    *,
+    expected_target: str,
+) -> _RecoveryGateValidation:
+    """只接受一次修改第一步同一源码文件的 Edit。"""
+
+    calls = _observable_tool_calls(result)
+    sequence = tuple(name for name, _ in calls)
+    if len(calls) != 1 or calls[0][0] != "Edit":
+        return _RecoveryGateValidation(
+            valid=False,
+            step="edit",
+            tool_sequence=sequence,
+            target_file=expected_target,
+            error="edit step must contain exactly one Edit tool call",
+        )
+    relative = _validated_gate_source_path(
+        repository,
+        calls[0][1].get("file_path"),
+    )
+    if relative != expected_target:
+        return _RecoveryGateValidation(
+            valid=False,
+            step="edit",
+            tool_sequence=sequence,
+            target_file=relative,
+            error="Edit target differs from the validated Read target",
+        )
+    return _RecoveryGateValidation(
+        valid=True,
+        step="edit",
+        tool_sequence=sequence,
+        target_file=relative,
+    )
+
+
+def _observable_tool_calls(
+    result: ClaudeCodeResult,
+) -> list[tuple[str, Mapping[str, Any]]]:
+    """按轨迹顺序提取模型请求的工具和参数，不依赖自然语言声明。"""
+
+    calls: list[tuple[str, Mapping[str, Any]]] = []
+    for event in result.events:
+        if event.get("event_type") != "assistant":
+            continue
+        details = event.get("details")
+        message = details.get("message") if isinstance(details, Mapping) else None
+        content = message.get("content") if isinstance(message, Mapping) else None
+        if not isinstance(content, Sequence) or isinstance(content, (str, bytes)):
+            continue
+        for block in content:
+            if not isinstance(block, Mapping) or block.get("type") != "tool_use":
+                continue
+            name = block.get("name")
+            tool_input = block.get("input")
+            if isinstance(name, str) and isinstance(tool_input, Mapping):
+                calls.append((name, tool_input))
+    return calls
+
+
+def _validated_gate_source_path(
+    repository: Path,
+    raw_path: Any,
+) -> str | None:
+    """把工具路径约束到 worktree 内的既有非测试源码并返回 POSIX 相对路径。"""
+
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return None
+    root = repository.resolve()
+    candidate = Path(raw_path)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    candidate = candidate.resolve()
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError:
+        return None
+    lowered_parts = {part.lower() for part in relative.parts}
+    name = relative.name.lower()
+    is_test = bool(lowered_parts & {"test", "tests", "testing"}) or (
+        name.startswith("test_")
+        or name.endswith("_test.py")
+        or name.endswith(".test.js")
+        or name.endswith(".test.ts")
+    )
+    if (
+        is_test
+        or relative.suffix.lower() not in _SOURCE_SUFFIXES
+        or not candidate.is_file()
+    ):
+        return None
+    return relative.as_posix()
+
+
+def _annotate_recovery_gate_result(
+    result: ClaudeCodeResult,
+    validation: _RecoveryGateValidation,
+) -> ClaudeCodeResult:
+    """把状态机判定加入 phase 指标和事件，供结果分析直接审计。"""
+
+    details = {
+        "step": validation.step,
+        "valid": validation.valid,
+        "tool_sequence": list(validation.tool_sequence),
+        "target_file": validation.target_file,
+        "error": validation.error,
+        "raw_exit_code": result.exit_code,
+    }
+    metrics = dict(result.metrics)
+    metrics["recovery_gate"] = details
+    events = list(result.events)
+    events.append(
+        {
+            "sequence": len(events) + 1,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "event_type": "recovery_gate_validation",
+            "details": details,
+        }
+    )
+    # 单步会话在工具调用完成后常以 max_turns 结束；若父进程已从结构化事件证明
+    # 唯一允许动作成功发出，该退出码属于状态机边界而非交付失败。原值仍保存在
+    # recovery_gate.raw_exit_code 和 Claude terminal_reason 中供审计。
+    exit_code = 0 if validation.valid else result.exit_code
+    return replace(
+        result,
+        exit_code=exit_code,
+        events=tuple(events),
+        metrics=metrics,
+    )
 
 
 def _should_run_verification(patch: str) -> bool:
@@ -1241,27 +1434,80 @@ def run_claude_task(
                     * regression_repair_turns
                     // config.agent.verification_turns,
                 )
-                edit_gate_prompt = build_recovery_edit_gate_prompt(
+                gate_read_timeout = max(1, edit_gate_timeout // 2)
+                gate_edit_timeout = max(
+                    1,
+                    edit_gate_timeout - gate_read_timeout,
+                )
+                gate_session_id = str(uuid4())
+                read_gate_prompt = build_recovery_read_gate_prompt(
                     prompt,
-                    recovery_turns=edit_gate_turns,
                     implementation_handoff=recovery_handoff,
                     source_context=source_context,
                 )
-                edit_gate_result = _runner(
+                read_gate_result = _runner(
                     config,
-                    turns=edit_gate_turns,
-                    timeout_seconds=task_budget.limit(edit_gate_timeout),
+                    turns=1,
+                    timeout_seconds=task_budget.limit(gate_read_timeout),
                     base_url=base_url,
                     allow_bash=False,
-                    available_tools=("Read", "Edit"),
-                ).run(repository, edit_gate_prompt)
-                phases.append(("recovery_edit_gate", edit_gate_result))
+                    available_tools=("Read",),
+                    session_id=gate_session_id,
+                    persist_session=True,
+                ).run(repository, read_gate_prompt)
+                read_validation = _validate_recovery_read_step(
+                    read_gate_result,
+                    repository,
+                )
+                read_gate_result = _annotate_recovery_gate_result(
+                    read_gate_result,
+                    read_validation,
+                )
+                phases.append(("recovery_read_gate", read_gate_result))
                 task_budget.ensure_remaining()
 
+                recovery_result = read_gate_result
+                gate_valid = False
+                if read_validation.valid and edit_gate_turns >= 2:
+                    assert read_validation.target_file is not None
+                    edit_gate_prompt = build_recovery_edit_gate_prompt(
+                        prompt,
+                        target_file=read_validation.target_file,
+                    )
+                    edit_gate_result = _runner(
+                        config,
+                        turns=1,
+                        timeout_seconds=task_budget.limit(gate_edit_timeout),
+                        base_url=base_url,
+                        allow_bash=False,
+                        available_tools=("Edit",),
+                        session_id=gate_session_id,
+                        resume_session=True,
+                        persist_session=True,
+                    ).run(repository, edit_gate_prompt)
+                    edit_validation = _validate_recovery_edit_step(
+                        edit_gate_result,
+                        repository,
+                        expected_target=read_validation.target_file,
+                    )
+                    edit_gate_result = _annotate_recovery_gate_result(
+                        edit_gate_result,
+                        edit_validation,
+                    )
+                    phases.append(("recovery_edit_gate", edit_gate_result))
+                    task_budget.ensure_remaining()
+                    recovery_result = edit_gate_result
+                    gate_valid = edit_validation.valid
+
                 recovered_patch = session.collect_patch(repository)
-                recovery_result = edit_gate_result
+                gate_patch = recovered_patch
+                gate_source_patch = _existing_source_patch_projection(gate_patch)
+                recovery_patch_valid = (
+                    gate_valid
+                    and bool(gate_source_patch)
+                )
                 if (
-                    not _patch_modifies_existing_source(recovered_patch)
+                    not recovery_patch_valid
                     and fallback_turns > 0
                 ):
                     fallback_prompt = build_recovery_implementation_prompt(
@@ -1281,12 +1527,21 @@ def run_claude_task(
                     phases.append(("recovery_fallback", fallback_result))
                     task_budget.ensure_remaining()
                     recovery_result = fallback_result
+                    recovered_patch = session.collect_patch(repository)
+                    # 无效 gate 可能已经留下错误源码 diff；fallback 必须实际改变
+                    # 工作树，不能仅靠继承该 diff 绕过状态机判定。
+                    fallback_source_patch = _existing_source_patch_projection(
+                        recovered_patch
+                    )
+                    recovery_patch_valid = bool(fallback_source_patch) and (
+                        fallback_source_patch != gate_source_patch
+                    )
 
                 consume_test_plan(repository)
                 recovered_patch = session.collect_patch(repository)
                 repair_budget_available = regression_repair_turns > 0
                 if (
-                    not _patch_modifies_existing_source(recovered_patch)
+                    not recovery_patch_valid
                     and repair_budget_available
                 ):
                     # 前两段仍没有产品源码 patch 时，保留修复预算已无测试可修；此时
@@ -1445,9 +1700,28 @@ def run_claude_task(
                     )
                 )
                 task_budget.ensure_remaining()
+                # Verification 的总 turns 不变。主会话最多使用 7 turns，最后 3
+                # turns 专门保留给主会话结束后才被 Docker 证明的新回归。
+                post_test_repair_turns = min(
+                    3,
+                    max(0, config.agent.verification_turns - 1),
+                )
+                primary_verification_turns = (
+                    config.agent.verification_turns - post_test_repair_turns
+                )
+                primary_verification_timeout = max(
+                    1,
+                    verification_timeout
+                    * primary_verification_turns
+                    // config.agent.verification_turns,
+                )
+                post_test_repair_timeout = max(
+                    1,
+                    verification_timeout - primary_verification_timeout,
+                )
                 verification_prompt = build_verification_phase_prompt(
                     prompt,
-                    verification_turns=config.agent.verification_turns,
+                    verification_turns=primary_verification_turns,
                     max_file_read_lines=config.agent.max_file_read_lines,
                     max_tool_output_chars=config.agent.max_tool_output_chars,
                     candidate_patch=candidate_patch_for_prompt,
@@ -1465,8 +1739,10 @@ def run_claude_task(
                 # 同时禁用 Grep/Glob，把会话限制在失败证据和已修改文件内。
                 verification_result = _runner(
                     config,
-                    turns=config.agent.verification_turns,
-                    timeout_seconds=task_budget.limit(verification_timeout),
+                    turns=primary_verification_turns,
+                    timeout_seconds=task_budget.limit(
+                        primary_verification_timeout
+                    ),
                     base_url=base_url,
                     allow_bash=False,
                     available_tools=verification_available_tools,
@@ -1503,10 +1779,77 @@ def run_claude_task(
                     ("scheduled_test_final", _scheduled_test_result(final_evidence))
                 )
                 task_budget.ensure_remaining()
+
+                final_model_result = verification_result
+                if final_evidence.has_new_regression and post_test_repair_turns > 0:
+                    # 只有主 Verification 之后的新回归能使用这段预算；缺失计划、
+                    # baseline 固有失败和无法比较的输出仍只记证据，不触发盲修。
+                    post_repair_prompt = build_verification_phase_prompt(
+                        prompt,
+                        verification_turns=post_test_repair_turns,
+                        max_file_read_lines=config.agent.max_file_read_lines,
+                        max_tool_output_chars=config.agent.max_tool_output_chars,
+                        candidate_patch=truncate_output(
+                            final_patch,
+                            config.agent.max_tool_output_chars,
+                        ),
+                        scheduled_test_evidence=truncate_output(
+                            final_evidence.repair_prompt_text(),
+                            config.agent.max_tool_output_chars,
+                        ),
+                        focused_new_regression=True,
+                    )
+                    post_repair_result = _runner(
+                        config,
+                        turns=post_test_repair_turns,
+                        timeout_seconds=task_budget.limit(
+                            post_test_repair_timeout
+                        ),
+                        base_url=base_url,
+                        allow_bash=False,
+                        available_tools=("Read", "Edit"),
+                    ).run(repository, post_repair_prompt)
+                    phases.append(
+                        ("verification_post_test_repair", post_repair_result)
+                    )
+                    task_budget.ensure_remaining()
+                    final_model_result = post_repair_result
+
+                    consume_test_plan(repository)
+                    post_repair_patch = session.collect_patch(repository)
+                    post_repair_request = generate_repository_test_plan(
+                        repository,
+                        repo=task.repo,
+                        patch=post_repair_patch,
+                    )
+                    post_repair_evidence = _execute_scheduled_test(
+                        repository,
+                        task=task,
+                        workspace_base_commit=patch_base_commit,
+                        sandbox=test_sandbox,
+                        request=post_repair_request,
+                        candidate_patch=post_repair_patch,
+                        cache=test_cache,
+                        target_timeout_seconds=(
+                            config.agent.visible_test_timeout_seconds
+                        ),
+                        regression_timeout_seconds=(
+                            config.agent.visible_regression_test_timeout_seconds
+                        ),
+                        task_budget=task_budget,
+                    )
+                    phases.append(
+                        (
+                            "scheduled_test_post_repair",
+                            _scheduled_test_result(post_repair_evidence),
+                        )
+                    )
+                    task_budget.ensure_remaining()
+
                 result = combine_phase_results(tuple(phases))
                 # 测试缺失、启动失败和非零退出码都只记录证据；模型会话状态仍由
-                # verification 决定，正确性最终只由官方 SWE-bench harness 裁决。
-                result = replace(result, exit_code=verification_result.exit_code)
+                # 最后实际运行的模型修复阶段决定，正确性仍由官方 harness 裁决。
+                result = replace(result, exit_code=final_model_result.exit_code)
         else:
             # 已冻结的正式基线配置继续走原来的单会话路径，保证历史 fingerprint
             # 对应的实验协议不被后续架构开发悄悄改写。

@@ -26,6 +26,10 @@ _SYMPY_FAILURE = re.compile(
     r"^_{3,}\s+([^\s]+\.py:[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]\n]+\])?)\s+_{3,}\s*$",
     flags=re.MULTILINE,
 )
+# unittest 的 subTest 参数有时会包含默认对象 repr，其中内存地址每个 Python
+# 进程都不同。保留对象类型和其余稳定参数，只替换地址，避免 baseline/candidate
+# 对同一测试生成不同签名。
+_VOLATILE_HEX_ADDRESS = re.compile(r"(?<=\bat )0x[0-9a-fA-F]+\b")
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +89,7 @@ def _select_parser(argv: Sequence[str]) -> tuple[str, re.Pattern[str]]:
 
 
 def _normalize_signature(value: str) -> str:
-    """压缩测试 ID 内的空白，使 baseline/candidate 输出可稳定做集合差分。"""
+    """移除进程相关地址并压缩空白，生成跨容器稳定的失败测试 ID。"""
 
-    return " ".join(value.strip().split())
+    without_addresses = _VOLATILE_HEX_ADDRESS.sub("0xADDR", value)
+    return " ".join(without_addresses.strip().split())

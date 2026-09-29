@@ -273,24 +273,76 @@ def test_verification_runner_disables_bash_at_cli_boundary() -> None:
     assert "Bash" in command[command.index("--disallowed-tools") + 1 :]
 
 
-def test_runner_can_expose_only_read_and_edit_for_recovery_gate() -> None:
-    """Recovery gate 必须通过 CLI 白名单只暴露有序读写所需的两个工具。"""
+def test_runner_can_expose_only_one_tool_for_each_recovery_gate_step() -> None:
+    """Recovery 状态机的每个 CLI 调用只能暴露当前步骤所需工具。"""
 
     runner = ClaudeCodeRunner(
         model="qwen3.5:9b",
         timeout_seconds=60,
-        max_turns=2,
+        max_turns=1,
         context_length=32768,
         max_output_tokens=8192,
         allow_bash=False,
-        available_tools=("Read", "Edit"),
+        available_tools=("Read",),
     )
 
     command = runner.command("Edit now")
     available = command[command.index("--tools") + 1]
 
-    assert available == "Read,Edit"
+    assert available == "Read"
     assert "Bash" in command[command.index("--disallowed-tools") + 1 :]
+
+
+def test_runner_uses_explicit_persistent_session_for_read_edit_state_machine() -> None:
+    """Edit 步骤必须恢复明确 UUID，不能接入目录中的任意最近会话。"""
+
+    session_id = "12345678-1234-5678-1234-567812345678"
+    read_runner = ClaudeCodeRunner(
+        model="qwen3.5:9b",
+        timeout_seconds=60,
+        max_turns=1,
+        context_length=32768,
+        max_output_tokens=8192,
+        allow_bash=False,
+        available_tools=("Read",),
+        session_id=session_id,
+        persist_session=True,
+    )
+    edit_runner = ClaudeCodeRunner(
+        model="qwen3.5:9b",
+        timeout_seconds=60,
+        max_turns=1,
+        context_length=32768,
+        max_output_tokens=8192,
+        allow_bash=False,
+        available_tools=("Edit",),
+        session_id=session_id,
+        resume_session=True,
+        persist_session=True,
+    )
+
+    read_command = read_runner.command("Read once")
+    edit_command = edit_runner.command("Edit once")
+    assert read_command[read_command.index("--session-id") + 1] == session_id
+    assert edit_command[edit_command.index("--resume") + 1] == session_id
+    assert "--no-session-persistence" not in read_command
+    assert "--no-session-persistence" not in edit_command
+    assert edit_command[edit_command.index("--tools") + 1] == "Edit"
+
+
+def test_runner_rejects_unscoped_session_continuation() -> None:
+    """会话恢复必须同时提供合法 UUID 并显式开启持久化。"""
+
+    with pytest.raises(ValueError, match="requires session_id"):
+        ClaudeCodeRunner(
+            model="qwen3.5:9b",
+            timeout_seconds=60,
+            max_turns=1,
+            context_length=32768,
+            max_output_tokens=8192,
+            resume_session=True,
+            persist_session=True,
+        )
 
 
 def test_reading_visible_test_script_is_not_counted_as_execution() -> None:

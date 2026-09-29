@@ -58,6 +58,35 @@ def test_parse_django_unittest_failure_signatures() -> None:
     )
 
 
+def test_django_signature_removes_process_specific_object_address() -> None:
+    """同一 subTest 的对象地址变化不能被误报为 candidate 新增失败。"""
+
+    baseline = parse_test_outcome(
+        ("python", "tests/runtests.py", "utils_tests"),
+        _failed(
+            "ERROR: test_strip_tags_files (utils_tests.test_html.TestUtilsHtml) "
+            "[<object object at 0x71d623463b40>] (filename='strip_tags1.html')\n"
+        ),
+    )
+    candidate = parse_test_outcome(
+        ("python", "tests/runtests.py", "utils_tests"),
+        _failed(
+            "ERROR: test_strip_tags_files (utils_tests.test_html.TestUtilsHtml) "
+            "[<object object at 0x7bc37109fb40>] (filename='strip_tags1.html')\n"
+        ),
+    )
+
+    expected = frozenset(
+        {
+            "test_strip_tags_files (utils_tests.test_html.TestUtilsHtml) "
+            "[<object object at 0xADDR>] (filename='strip_tags1.html')"
+        }
+    )
+    assert baseline.failure_signatures == expected
+    assert candidate.failure_signatures == expected
+    assert candidate.failure_signatures - baseline.failure_signatures == frozenset()
+
+
 def test_parse_sympy_failure_signature() -> None:
     """SymPy bin/test 的下划线失败标题必须提取文件与测试函数。"""
 

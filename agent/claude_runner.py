@@ -62,6 +62,8 @@ def combine_phase_results(
     total_visible_test_rejected = 0
     total_visible_test_parent_generated = 0
     total_visible_test_executions = 0
+    total_visible_test_valid_executions = 0
+    total_visible_test_infrastructure_errors = 0
     total_visible_test_passed = 0
     total_visible_test_baseline_executions = 0
     total_visible_test_baseline_passed = 0
@@ -75,6 +77,7 @@ def combine_phase_results(
     any_baseline_timed_out = False
     any_candidate_timed_out = False
     task_budget_exhausted = False
+    test_evidence_available = False
 
     for phase_name, result in phases:
         events.append(
@@ -118,6 +121,15 @@ def combine_phase_results(
         )
         total_visible_test_executions += int(
             result.metrics.get("visible_test_executions", 0)
+        )
+        total_visible_test_valid_executions += int(
+            result.metrics.get("visible_test_valid_executions", 0)
+        )
+        total_visible_test_infrastructure_errors += int(
+            result.metrics.get("visible_test_infrastructure_errors", 0)
+        )
+        test_evidence_available = test_evidence_available or bool(
+            result.metrics.get("test_evidence_available", False)
         )
         total_visible_test_passed += int(
             result.metrics.get("visible_test_passed", 0)
@@ -173,6 +185,11 @@ def combine_phase_results(
         "visible_test_rejected": total_visible_test_rejected,
         "visible_test_parent_generated": total_visible_test_parent_generated,
         "visible_test_executions": total_visible_test_executions,
+        "visible_test_valid_executions": total_visible_test_valid_executions,
+        "visible_test_infrastructure_errors": (
+            total_visible_test_infrastructure_errors
+        ),
+        "test_evidence_available": test_evidence_available,
         "visible_test_passed": total_visible_test_passed,
         "visible_test_baseline_executions": total_visible_test_baseline_executions,
         "visible_test_baseline_passed": total_visible_test_baseline_passed,
@@ -525,6 +542,9 @@ class ClaudeCodeRunner:
             "visible_test_rejected": 0,
             "visible_test_parent_generated": 0,
             "visible_test_executions": 0,
+            "visible_test_valid_executions": 0,
+            "visible_test_infrastructure_errors": 0,
+            "test_evidence_available": False,
             "visible_test_passed": 0,
             "visible_test_baseline_executions": 0,
             "visible_test_baseline_passed": 0,

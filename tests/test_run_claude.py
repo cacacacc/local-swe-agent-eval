@@ -303,6 +303,9 @@ def test_scheduler_metrics_require_a_real_sandbox_result(
 
     assert evidence.metrics()["visible_test_requests"] == 1
     assert evidence.metrics()["visible_test_executions"] == 2
+    assert evidence.metrics()["visible_test_valid_executions"] == 4
+    assert evidence.metrics()["visible_test_infrastructure_errors"] == 0
+    assert evidence.metrics()["test_evidence_available"] is True
     assert evidence.metrics()["visible_test_passed"] == 2
     assert evidence.metrics()["visible_test_baseline_executions"] == 2
     assert evidence.metrics()["visible_test_baseline_passed"] == 2
@@ -443,6 +446,69 @@ def test_scheduler_reruns_failed_candidate_but_reuses_baseline(
     assert calls.count(True) == 4
     assert all(execution.baseline_result.cache_hit for execution in final.executions)
     assert all(not execution.result.cache_hit for execution in final.executions)
+
+
+def test_scheduler_does_not_cache_infrastructure_errors(tmp_path: Path) -> None:
+    """runner 缺失的基线和候选都必须重跑，且不得形成可比较测试证据。"""
+
+    request = StructuredTestPlanRequest(
+        status="generated",
+        target_argv=("python", "-m", "pytest", "tests/test_target.py"),
+        regression_argv=("python", "-m", "pytest", "tests/test_neighbor.py"),
+        origin="parent",
+    )
+    calls: list[bool] = []
+
+    class FakeSandbox:
+        """稳定返回缺少 pytest 的启动错误，验证该结果不会污染调度缓存。"""
+
+        timeout_seconds = 900
+
+        def run(self, repository, *, apply_patch, **kwargs):
+            calls.append(apply_patch)
+            return VisibleTestResult(
+                exit_code=1,
+                output="python: No module named pytest\n",
+                image="swebench/example:latest",
+                timed_out=False,
+                command_started=True,
+                duration_seconds=1.0,
+                infrastructure_error=(
+                    "test runner unavailable: pytest module is not installed"
+                ),
+            )
+
+    task = SWEbenchTask(
+        instance_id="owner__repo-infrastructure-error",
+        repo="owner/repo",
+        base_commit="b" * 40,
+        problem_statement="Fix it.",
+    )
+    cache = {}
+    arguments = {
+        "task": task,
+        "workspace_base_commit": "a" * 40,
+        "sandbox": FakeSandbox(),
+        "request": request,
+        "candidate_patch": "same patch",
+        "cache": cache,
+        "target_timeout_seconds": 900,
+        "regression_timeout_seconds": 300,
+    }
+
+    initial = _execute_scheduled_test(tmp_path, **arguments)
+    final = _execute_scheduled_test(tmp_path, **arguments)
+
+    assert len(calls) == 8
+    assert cache == {}
+    assert initial.ready_for_verification is False
+    assert final.metrics()["visible_test_comparisons"] == 0
+    assert final.metrics()["visible_test_infrastructure_errors"] == 4
+    assert final.metrics()["test_evidence_available"] is False
+    assert all(
+        execution.comparison == "comparison_unavailable"
+        for execution in final.executions
+    )
 
 
 def test_scheduler_records_exhausted_task_budget_without_starting_docker(

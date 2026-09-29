@@ -168,7 +168,58 @@ def test_sandbox_applies_only_current_patch_and_disables_network(
     assert result.output == "1 passed\n"
     assert result.duration_seconds >= 0
     assert result.cache_hit is False
+    assert result.infrastructure_error is None
+    assert result.evidence_valid is True
     assert docker_timeouts == [5]
+
+
+def test_sandbox_marks_missing_pytest_as_infrastructure_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pytest runner 未安装不能被误判成真正执行后的测试失败。"""
+
+    repository = tmp_path / "repo"
+    repository.mkdir()
+
+    def fake_run(command, **kwargs):
+        command = [str(item) for item in command]
+        if command[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[:2] == ["docker", "run"]:
+            shell_command = command[command.index("bash") + 2]
+            marker = shell_command.split("printf '%s\\n' ", 1)[1].split(" &&", 1)[0]
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                stdout=(
+                    f"{marker}\n"
+                    "/opt/miniconda3/envs/testbed/bin/python: "
+                    "No module named pytest\n"
+                ),
+                stderr="",
+            )
+        if command[:3] == ["docker", "rm", "--force"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr("agent.test_sandbox.subprocess.run", fake_run)
+    result = VisibleTestSandbox(
+        timeout_seconds=30,
+        max_output_chars=12000,
+    ).run(
+        repository,
+        instance_id="sympy__sympy-17630",
+        base_commit="0123456789abcdef0123456789abcdef01234567",
+        command=("python", "-m", "pytest", "sympy/core/tests/test_basic.py"),
+        apply_patch=False,
+    )
+
+    assert result.command_started is True
+    assert result.infrastructure_error == (
+        "test runner unavailable: pytest module is not installed"
+    )
+    assert result.evidence_valid is False
 
 
 def test_sandbox_does_not_count_patch_apply_failure_as_test_execution(
@@ -264,3 +315,5 @@ def test_sandbox_runs_unmodified_baseline_without_collecting_patch(
     assert result.command_started is True
     assert result.exit_code == 1
     assert result.output == "1 failed\n"
+    assert result.infrastructure_error is None
+    assert result.evidence_valid is True

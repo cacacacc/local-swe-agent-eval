@@ -164,6 +164,36 @@ def test_parent_uses_django_runner_and_dotted_labels(tmp_path: Path) -> None:
     )
 
 
+def test_parent_uses_sympy_native_runner_without_pytest(tmp_path: Path) -> None:
+    """SymPy 官方镜像未必安装 pytest，父进程必须调用仓库自带的 ``bin/test``。"""
+
+    test_directory = tmp_path / "sympy" / "matrices" / "expressions" / "tests"
+    test_directory.mkdir(parents=True)
+    target = test_directory / "test_blockmatrix.py"
+    target.write_text("def test_blockmatrix(): pass\n", encoding="utf-8")
+    regression = test_directory / "test_adjoint.py"
+    regression.write_text("def test_adjoint(): pass\n", encoding="utf-8")
+    request = generate_repository_test_plan(
+        tmp_path,
+        repo="sympy/sympy",
+        patch=(
+            "diff --git a/sympy/matrices/expressions/blockmatrix.py "
+            "b/sympy/matrices/expressions/blockmatrix.py\n"
+            "--- a/sympy/matrices/expressions/blockmatrix.py\n"
+            "+++ b/sympy/matrices/expressions/blockmatrix.py\n"
+            "@@ -1 +1 @@\n-old\n+new\n"
+        ),
+    )
+
+    prefix = ("python", "bin/test", "--no-colors", "-C")
+    assert request.status == "generated"
+    assert request.target_argv == (*prefix, target.relative_to(tmp_path).as_posix())
+    assert request.regression_argv == (
+        *prefix,
+        regression.relative_to(tmp_path).as_posix(),
+    )
+
+
 def test_parent_adapts_django_root_test_to_distinct_neighbor(tmp_path: Path) -> None:
     """Django 根级测试没有 app 时也必须选择另一个模块作为相邻回归。"""
 

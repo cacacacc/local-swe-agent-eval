@@ -34,6 +34,13 @@ class VisibleTestResult:
     command_started: bool
     duration_seconds: float = 0.0
     cache_hit: bool = False
+    infrastructure_error: str | None = None
+
+    @property
+    def evidence_valid(self) -> bool:
+        """仅在测试命令真实启动且 runner 基础设施可用时返回 ``True``。"""
+
+        return self.command_started and self.infrastructure_error is None
 
 
 def image_candidates(instance_id: str) -> tuple[str, str]:
@@ -57,6 +64,47 @@ def truncate_output(output: str, maximum_chars: int) -> str:
     head_size = min(2000, available // 3)
     tail_size = available - head_size
     return f"{output[:head_size]}{marker}{output[-tail_size:]}"
+
+
+def _detect_infrastructure_error(
+    command: Sequence[str],
+    output: str,
+    *,
+    exit_code: int,
+    command_started: bool,
+    timed_out: bool,
+) -> str | None:
+    """识别测试框架未安装或入口不存在，而不吞掉普通测试失败。
+
+    这里只接受与启动命令直接相关的窄匹配。测试代码内部任意依赖的
+    ``ModuleNotFoundError`` 可能是候选 patch 引入的真实回归，不能笼统归为环境
+    故障；当前重点识别曾让 SymPy 产生假证据的 pytest runner 缺失，以及解释器或
+    runner 脚本根本无法执行的情况。
+    """
+
+    if not command_started or timed_out or exit_code == 0:
+        return None
+    normalized = output.lower()
+    if (
+        len(command) >= 3
+        and command[0] in {"python", "python3"}
+        and tuple(command[1:3]) == ("-m", "pytest")
+        and re.search(r"no module named ['\"]?pytest(?:['\"]|\b)", normalized)
+    ):
+        return "test runner unavailable: pytest module is not installed"
+    if re.search(
+        r"(?:exec:\s*)?(?:python3?|pytest|[^\s:]+):\s*(?:command\s+)?not found",
+        normalized,
+    ):
+        return "test executable is not available in the image"
+    if (
+        command[0] in {"python", "python3"}
+        and len(command) >= 2
+        and "can't open file" in normalized
+        and ("no such file or directory" in normalized or "[errno 2]" in normalized)
+    ):
+        return "test runner script is not available in the image"
+    return None
 
 
 class VisibleTestSandbox:
@@ -260,6 +308,13 @@ class VisibleTestSandbox:
 
         command_started = started_marker in output
         output = output.replace(f"{started_marker}\n", "", 1)
+        infrastructure_error = _detect_infrastructure_error(
+            command,
+            output,
+            exit_code=exit_code,
+            command_started=command_started,
+            timed_out=timed_out,
+        )
         return VisibleTestResult(
             exit_code=exit_code,
             output=truncate_output(output, self.max_output_chars),
@@ -268,6 +323,7 @@ class VisibleTestSandbox:
             command_started=command_started,
             duration_seconds=round(time.monotonic() - started_monotonic, 6),
             cache_hit=False,
+            infrastructure_error=infrastructure_error,
         )
 
     @staticmethod

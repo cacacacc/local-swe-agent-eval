@@ -124,9 +124,10 @@ def generate_repository_test_plan(
     ``test_patch``。目标测试取与修改源码文件名最接近的现有测试模块并采用
     fail-fast；回归测试选择同目录或共同路径最深的另一个测试模块，避免用取消
     ``-x`` 的同一命令冒充相邻回归。Django 的回归命令运行目标测试 app。
-    Django 使用项目自己的 ``tests/runtests.py``，其余
-    SWE-bench Python 仓库使用 pytest。无法找到可信测试时返回 ``missing``，
-    调用方仍应把这一事实交给 Verification，而不能把它当作硬门禁。
+    Django 使用项目自己的 ``tests/runtests.py``，SymPy 使用不依赖 pytest 的
+    ``bin/test``，其余 SWE-bench Python 仓库使用 pytest。无法找到可信测试时
+    返回 ``missing``，调用方仍应把这一事实交给 Verification，而不能把它当作
+    硬门禁。
     """
 
     repository_path = Path(repository).resolve()
@@ -151,6 +152,8 @@ def generate_repository_test_plan(
     target, regression = selected
     if repo == "django/django":
         commands = _django_commands(target, regression)
+    elif repo == "sympy/sympy":
+        commands = _sympy_commands(target, regression)
     else:
         commands = _pytest_commands(target, regression)
     if commands is None:
@@ -327,6 +330,30 @@ def _pytest_commands(
     return (
         ("python", "-m", "pytest", "-x", target.as_posix()),
         ("python", "-m", "pytest", regression_path.as_posix()),
+    )
+
+
+def _sympy_commands(
+    target: Path,
+    regression: Path | None,
+) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+    """为不预装 pytest 的 SymPy 镜像生成项目原生测试命令。
+
+    SWE-bench 的旧版 SymPy 镜像只保证 ``bin/test`` 可用。``--no-colors`` 让持久化
+    日志不含终端控制字符，``-C`` 关闭 runner 自身缓存，防止基线与候选在同一实验
+    中受到仓库内部缓存影响；父进程自己的结果缓存仍由 patch digest 严格控制。
+    """
+
+    regression_path = regression
+    if regression_path is None and target.parent != Path("."):
+        regression_path = target.parent
+    if regression_path is None:
+        return None
+
+    prefix = ("python", "bin/test", "--no-colors", "-C")
+    return (
+        (*prefix, target.as_posix()),
+        (*prefix, regression_path.as_posix()),
     )
 
 

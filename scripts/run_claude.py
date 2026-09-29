@@ -402,8 +402,8 @@ class ScheduledTestExecution:
             or self.error is not None
             or self.baseline_result is None
             or self.result is None
-            or not self.baseline_result.command_started
-            or not self.result.command_started
+            or not self.baseline_result.evidence_valid
+            or not self.result.evidence_valid
         ):
             return "comparison_unavailable"
         baseline_passed = self.baseline_result.exit_code == 0
@@ -427,13 +427,16 @@ class ScheduledTestEvidence:
 
     @property
     def ready_for_verification(self) -> bool:
-        """兼容指标：判断两条命令是否真实进入 Docker，不再充当硬门禁。"""
+        """判断两条命令是否形成有效对照证据，不再充当硬门禁。"""
 
         return (
             self.request.accepted
             and len(self.executions) == len(self.request.commands) == 2
             and all(
-                execution.result is not None and execution.result.command_started
+                execution.baseline_result is not None
+                and execution.baseline_result.evidence_valid
+                and execution.result is not None
+                and execution.result.evidence_valid
                 for execution in self.executions
             )
         )
@@ -462,6 +465,18 @@ class ScheduledTestEvidence:
             and not item.baseline_result.cache_hit
             for item in self.executions
         )
+        valid_executions = sum(
+            result.evidence_valid and not result.cache_hit
+            for item in self.executions
+            for result in (item.baseline_result, item.result)
+            if result is not None
+        )
+        infrastructure_errors = sum(
+            result.infrastructure_error is not None and not result.cache_hit
+            for item in self.executions
+            for result in (item.baseline_result, item.result)
+            if result is not None
+        )
         rejected = self.request.status == "rejected" or any(
             item.baseline_error is not None
             or item.error is not None
@@ -470,6 +485,14 @@ class ScheduledTestEvidence:
                 and not item.baseline_result.command_started
             )
             or (item.result is not None and not item.result.command_started)
+            or (
+                item.baseline_result is not None
+                and item.baseline_result.infrastructure_error is not None
+            )
+            or (
+                item.result is not None
+                and item.result.infrastructure_error is not None
+            )
             for item in self.executions
         )
         return {
@@ -487,6 +510,14 @@ class ScheduledTestEvidence:
                 self.request.origin == "parent" and self.request.accepted
             ),
             "visible_test_executions": patched_executed,
+            # executions 保留“实际启动过容器命令”的历史语义；valid_executions
+            # 进一步排除 runner 缺失等环境错误，供新实验判断证据是否可信。
+            "visible_test_valid_executions": valid_executions,
+            "visible_test_infrastructure_errors": infrastructure_errors,
+            "test_evidence_available": any(
+                item.comparison != "comparison_unavailable"
+                for item in self.executions
+            ),
             "visible_test_passed": sum(
                 item.result is not None and item.result.exit_code == 0
                 and item.result.command_started and not item.result.cache_hit
@@ -593,6 +624,8 @@ class ScheduledTestEvidence:
                         f"Timed out: {execution.baseline_result.timed_out}",
                         f"Duration seconds: {execution.baseline_result.duration_seconds}",
                         f"Cache hit: {execution.baseline_result.cache_hit}",
+                        "Infrastructure error: "
+                        f"{execution.baseline_result.infrastructure_error}",
                         "Output:",
                         # 两条命令各有 baseline/patched 输出；再次按单块限长，避免
                         # 总证据截断时恰好丢掉位于中间的 patched target traceback。
@@ -614,6 +647,7 @@ class ScheduledTestEvidence:
                         f"Timed out: {execution.result.timed_out}",
                         f"Duration seconds: {execution.result.duration_seconds}",
                         f"Cache hit: {execution.result.cache_hit}",
+                        f"Infrastructure error: {execution.result.infrastructure_error}",
                         "Output:",
                         truncate_output(execution.result.output, 2400).rstrip(),
                     )
@@ -661,9 +695,9 @@ def _execute_scheduled_test(
 ) -> ScheduledTestEvidence:
     """对双命令分别运行基线与 patched 容器，形成可比较证据。
 
-    baseline 使用空 patch 的稳定缓存键，因此 Initial/Final 不会重复运行。候选
-    结果只有在 patch 完全相同且上次真实通过时才复用；失败和超时仍会重跑，避免
-    把一次偶发 Docker 故障固化成最终证据。
+    baseline 使用空 patch 的稳定缓存键，因此有效结果在 Initial/Final 间不会重复
+    运行。候选结果只有在 patch 完全相同且上次真实通过时才复用；基础设施错误永不
+    写入或读取缓存，失败和超时也会重跑，避免把偶发环境故障固化成最终证据。
     """
 
     request = consume_test_plan(repository) if request is None else request
@@ -696,11 +730,10 @@ def _execute_scheduled_test(
                 timeout_key,
             )
             cached = cache.get(key) if cache is not None else None
-            can_reuse = cached is not None and (
+            can_reuse = cached is not None and cached.evidence_valid and (
                 not apply_patch
                 or (
-                    cached.command_started
-                    and cached.exit_code == 0
+                    cached.exit_code == 0
                     and not cached.timed_out
                 )
             )
@@ -727,7 +760,9 @@ def _execute_scheduled_test(
             if timeout_override is not None:
                 run_options["timeout_seconds"] = timeout_override
             result = sandbox.run(repository, **run_options)
-            if cache is not None:
+            # runner 缺失等结果没有测试语义，缓存后只会让 Final 阶段重复相信同一份
+            # 假证据；允许后续阶段重试，也便于环境被修复后立即得到真实结果。
+            if cache is not None and result.evidence_valid:
                 cache[key] = result
             return result
 
@@ -808,6 +843,11 @@ def _scheduled_test_result(evidence: ScheduledTestEvidence) -> ClaudeCodeResult:
                     if execution.baseline_result is not None
                     else False
                 ),
+                "baseline_infrastructure_error": (
+                    execution.baseline_result.infrastructure_error
+                    if execution.baseline_result is not None
+                    else None
+                ),
                 "error": execution.error,
                 "exit_code": (
                     execution.result.exit_code
@@ -841,6 +881,11 @@ def _scheduled_test_result(evidence: ScheduledTestEvidence) -> ClaudeCodeResult:
                     execution.result.cache_hit
                     if execution.result is not None
                     else False
+                ),
+                "candidate_infrastructure_error": (
+                    execution.result.infrastructure_error
+                    if execution.result is not None
+                    else None
                 ),
                 "duration_seconds": round(
                     sum(

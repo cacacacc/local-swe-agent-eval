@@ -110,8 +110,9 @@ def build_verification_phase_prompt(
     candidate_patch: str = "",
     scheduled_test_evidence: str = "",
     focused_new_regression: bool = False,
+    handoff_text: str = "",
 ) -> str:
-    """Inject the candidate patch and test evidence, building the repair Prompt based on whether a new regression occurred."""
+    """Inject current patch, test evidence, and cumulative stage state into the repair prompt."""
     patch_block = (
         "Candidate patch collected relative to the task base commit\n"
         "<candidate_patch>\n"
@@ -123,6 +124,14 @@ def build_verification_phase_prompt(
         "<visible_test_evidence>\n"
         f"{scheduled_test_evidence.rstrip()}\n"
         "</visible_test_evidence>\n"
+    )
+    handoff_block = (
+        "Parent-maintained stage handoff\n"
+        "<phase_handoff>\n"
+        f"{handoff_text.rstrip()}\n"
+        "</phase_handoff>\n"
+        if handoff_text.strip()
+        else ""
     )
     focus_block = ""
     if focused_new_regression:
@@ -147,6 +156,7 @@ def build_verification_phase_prompt(
         f"- You have at most {verification_turns} turns. Do not restart broad exploration.\n"
         f"{patch_block}"
         f"{test_block}"
+        f"{handoff_block}"
         f"{focus_block}"
         "- The patch above is authoritative even if plain `git diff` is empty because an "
         "earlier agent may have committed it. Do not inspect Git history.\n"

@@ -909,6 +909,7 @@ def test_nonempty_patch_reaches_verification_when_parent_plan_is_missing(
     ).stdout.strip()
 
     calls: list[str] = []
+    verification_prompts: list[str] = []
 
     class FakeAgent:
         """The first run produces a patch; the second proves Verification actually started."""
@@ -918,6 +919,8 @@ def test_nonempty_patch_reaches_verification_when_parent_plan_is_missing(
             calls.append(phase)
             if phase == "implementation":
                 source.write_text("value = 2\n", encoding="utf-8")
+            else:
+                verification_prompts.append(prompt)
             return _result()
 
     class FakeSandbox:
@@ -962,6 +965,13 @@ def test_nonempty_patch_reaches_verification_when_parent_plan_is_missing(
     assert "verification" in result["metrics"]["phases"]
     assert "test_protocol_gate" not in result["metrics"]["phases"]
     assert result["metrics"]["visible_test_missing"] == 2
+    handoff = json.loads((run_path / "handoff.json").read_text(encoding="utf-8"))
+    assert [entry["stage"] for entry in handoff["history"]] == [
+        "implementation", "scheduled_test_initial", "verification", "scheduled_test_final"
+    ]
+    assert handoff["current"]["test"]["status"] == "unavailable"
+    assert "<phase_handoff>" in verification_prompts[0]
+    assert "Current patch test: unavailable" in verification_prompts[0]
 
 
 def test_verification_reserves_three_turns_to_repair_final_new_regression(

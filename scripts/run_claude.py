@@ -20,6 +20,7 @@ from agent.claude_runner import (
     ClaudeCodeRunner,
     combine_phase_results,
 )
+from agent.handoff import HandoffLedger
 from agent.prompt_builder import (
     PromptBuilder,
     build_implementation_phase_prompt,
@@ -1328,6 +1329,43 @@ def run_claude_task(
     task_budget = _TaskBudget.start(config.agent.task_timeout_seconds)
     test_cache: dict[_TestCacheKey, VisibleTestResult] = {}
     phases: list[tuple[str, ClaudeCodeResult]] = []
+    handoff = HandoffLedger()
+
+    def append_model_phase(name: str, phase_result: ClaudeCodeResult) -> None:
+        """Save model output and the actual worktree patch before another stage can edit it."""
+
+        phases.append((name, phase_result))
+        # A model-written control file is never part of the candidate handed to the next stage.
+        consume_test_plan(repository)
+        handoff.record_model(
+            name,
+            patch=session.collect_patch(repository),
+            exit_code=phase_result.exit_code,
+            agent_reported=_build_recovery_handoff(
+                phase_result,
+                maximum_chars=min(config.agent.max_tool_output_chars, 1200),
+            ),
+        )
+        session.write_handoff(handoff.snapshot())
+
+    def append_test_phase(name: str, evidence: ScheduledTestEvidence, patch: str) -> None:
+        """Attach parent-owned comparisons to the patch revision they actually exercised."""
+
+        phases.append((name, _scheduled_test_result(evidence)))
+        handoff.record_test(
+            name,
+            patch=patch,
+            plan_status=evidence.request.status,
+            comparisons=[
+                {
+                    "label": item.label,
+                    "comparison": item.comparison,
+                    "first_new_failure": next(iter(sorted(item.new_failure_signatures)), ""),
+                }
+                for item in evidence.executions
+            ],
+        )
+        session.write_handoff(handoff.snapshot())
     try:
         if config.agent.verification_turns:
             implementation_turns = (
@@ -1360,7 +1398,7 @@ def run_claude_task(
                 timeout_seconds=task_budget.limit(implementation_timeout),
                 base_url=base_url,
             ).run(repository, implementation_prompt)
-            phases.append(("implementation", implementation_result))
+            append_model_phase("implementation", implementation_result)
             task_budget.ensure_remaining()
 
             # Clean up control files an older model may have left behind, but never adopt their commands. The real test plan is
@@ -1371,13 +1409,7 @@ def run_claude_task(
                 # An empty patch cannot enter Verification, but its reserved turns must
                 # not go to waste. A multi-turn Read/Edit gate can repair cross-file
                 # defects while the parent audits the complete tool trajectory.
-                recovery_handoff = _build_recovery_handoff(
-                    implementation_result,
-                    maximum_chars=min(
-                        config.agent.max_tool_output_chars,
-                        6000,
-                    ),
-                )
+                recovery_handoff = handoff.render_for_prompt()
                 source_context = _build_recovery_source_context(
                     implementation_result,
                     repository,
@@ -1443,7 +1475,7 @@ def run_claude_task(
                     recovery_gate_result,
                     gate_validation,
                 )
-                phases.append(("recovery_read_edit_gate", recovery_gate_result))
+                append_model_phase("recovery_read_edit_gate", recovery_gate_result)
                 task_budget.ensure_remaining()
 
                 recovery_result = recovery_gate_result
@@ -1459,7 +1491,7 @@ def run_claude_task(
                         recovery_turns=fallback_turns,
                         max_file_read_lines=config.agent.max_file_read_lines,
                         max_tool_output_chars=config.agent.max_tool_output_chars,
-                        implementation_handoff=recovery_handoff,
+                        implementation_handoff=handoff.render_for_prompt(),
                     )
                     fallback_result = _runner(
                         config,
@@ -1468,7 +1500,7 @@ def run_claude_task(
                         base_url=base_url,
                         allow_bash=False,
                     ).run(repository, fallback_prompt)
-                    phases.append(("recovery_fallback", fallback_result))
+                    append_model_phase("recovery_fallback", fallback_result)
                     task_budget.ensure_remaining()
                     recovery_result = fallback_result
                     recovered_patch = session.collect_patch(repository)
@@ -1495,7 +1527,7 @@ def run_claude_task(
                         recovery_turns=regression_repair_turns,
                         max_file_read_lines=config.agent.max_file_read_lines,
                         max_tool_output_chars=config.agent.max_tool_output_chars,
-                        implementation_handoff=recovery_handoff,
+                        implementation_handoff=handoff.render_for_prompt(),
                         last_chance=True,
                     )
                     last_chance_result = _runner(
@@ -1507,7 +1539,7 @@ def run_claude_task(
                         base_url=base_url,
                         allow_bash=False,
                     ).run(repository, last_chance_prompt)
-                    phases.append(("recovery_last_chance", last_chance_result))
+                    append_model_phase("recovery_last_chance", last_chance_result)
                     task_budget.ensure_remaining()
                     recovery_result = last_chance_result
                     repair_budget_available = False
@@ -1535,12 +1567,7 @@ def run_claude_task(
                     ),
                     task_budget=task_budget,
                 )
-                phases.append(
-                    (
-                        "scheduled_test_recovery",
-                        _scheduled_test_result(recovery_evidence),
-                    )
-                )
+                append_test_phase("scheduled_test_recovery", recovery_evidence, recovered_patch)
                 task_budget.ensure_remaining()
 
                 if recovery_evidence.has_new_regression and repair_budget_available:
@@ -1561,6 +1588,7 @@ def run_claude_task(
                             config.agent.max_tool_output_chars,
                         ),
                         focused_new_regression=True,
+                        handoff_text=handoff.render_for_prompt(),
                     )
                     repair_result = _runner(
                         config,
@@ -1572,7 +1600,7 @@ def run_claude_task(
                         allow_bash=False,
                         available_tools=("Read", "Edit"),
                     ).run(repository, repair_prompt)
-                    phases.append(("recovery_regression_repair", repair_result))
+                    append_model_phase("recovery_regression_repair", repair_result)
                     task_budget.ensure_remaining()
                     recovery_result = repair_result
 
@@ -1599,11 +1627,8 @@ def run_claude_task(
                         ),
                         task_budget=task_budget,
                     )
-                    phases.append(
-                        (
-                            "scheduled_test_recovery_final",
-                            _scheduled_test_result(final_recovery_evidence),
-                        )
+                    append_test_phase(
+                        "scheduled_test_recovery_final", final_recovery_evidence, recovered_patch
                     )
                     task_budget.ensure_remaining()
 
@@ -1637,12 +1662,7 @@ def run_claude_task(
                     ),
                     task_budget=task_budget,
                 )
-                phases.append(
-                    (
-                        "scheduled_test_initial",
-                        _scheduled_test_result(initial_evidence),
-                    )
-                )
+                append_test_phase("scheduled_test_initial", initial_evidence, candidate_patch)
                 task_budget.ensure_remaining()
                 # Verification's total turns stay unchanged. The main session uses at most 7 turns, and the last 3
                 # turns are reserved specifically for regressions Docker only proves after the main session ends.
@@ -1674,6 +1694,7 @@ def run_claude_task(
                         config.agent.max_tool_output_chars,
                     ),
                     focused_new_regression=initial_evidence.has_new_regression,
+                    handoff_text=handoff.render_for_prompt(),
                 )
                 verification_phase, verification_available_tools = (
                     _verification_policy(initial_evidence)
@@ -1691,7 +1712,7 @@ def run_claude_task(
                     allow_bash=False,
                     available_tools=verification_available_tools,
                 ).run(repository, verification_prompt)
-                phases.append((verification_phase, verification_result))
+                append_model_phase(verification_phase, verification_result)
                 task_budget.ensure_remaining()
 
                 # The verification phase has no authority to replace commands; the parent regenerates them from the final repaired patch,
@@ -1719,9 +1740,7 @@ def run_claude_task(
                     ),
                     task_budget=task_budget,
                 )
-                phases.append(
-                    ("scheduled_test_final", _scheduled_test_result(final_evidence))
-                )
+                append_test_phase("scheduled_test_final", final_evidence, final_patch)
                 task_budget.ensure_remaining()
 
                 final_model_result = verification_result
@@ -1742,6 +1761,7 @@ def run_claude_task(
                             config.agent.max_tool_output_chars,
                         ),
                         focused_new_regression=True,
+                        handoff_text=handoff.render_for_prompt(),
                     )
                     post_repair_result = _runner(
                         config,
@@ -1753,9 +1773,7 @@ def run_claude_task(
                         allow_bash=False,
                         available_tools=("Read", "Edit"),
                     ).run(repository, post_repair_prompt)
-                    phases.append(
-                        ("verification_post_test_repair", post_repair_result)
-                    )
+                    append_model_phase("verification_post_test_repair", post_repair_result)
                     task_budget.ensure_remaining()
                     final_model_result = post_repair_result
 
@@ -1782,11 +1800,8 @@ def run_claude_task(
                         ),
                         task_budget=task_budget,
                     )
-                    phases.append(
-                        (
-                            "scheduled_test_post_repair",
-                            _scheduled_test_result(post_repair_evidence),
-                        )
+                    append_test_phase(
+                        "scheduled_test_post_repair", post_repair_evidence, post_repair_patch
                     )
                     task_budget.ensure_remaining()
 
@@ -1803,7 +1818,7 @@ def run_claude_task(
                 timeout_seconds=task_budget.limit(config.agent.timeout_seconds),
                 base_url=base_url,
             ).run(repository, prompt)
-            phases.append(("implementation", result))
+            append_model_phase("implementation", result)
             task_budget.ensure_remaining()
         patch = session.collect_patch(repository)
         result = _apply_patch_gate(result, patch)

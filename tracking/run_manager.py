@@ -103,6 +103,13 @@ class RunSession:
             *patch_pathspecs(),
         )
 
+    def write_handoff(self, snapshot: Mapping[str, Any]) -> None:
+        """Persist each stage's latest handoff atomically before the next stage starts."""
+
+        if self._finished:
+            raise RunArtifactError(f"run has already been finalized: {self.path}")
+        self._write_json("handoff.json", snapshot)
+
     def finalize(
         self,
         *,

@@ -257,6 +257,13 @@ individual source reads to 200 lines and command output to roughly 12,000
 characters. Source-read size is currently an auditable prompt constraint; the
 visible-test wrapper enforces its output limit in code.
 
+The parent writes a cumulative `handoff.json` after every model and scheduled-test
+stage. It records the current patch digest, changed files, test comparisons, and
+earlier stage summaries; the next model stage receives a bounded summary. Test
+evidence is tied to the patch digest, so editing the patch marks earlier results
+pending until parent-owned tests run again. Model-reported findings are labeled
+unverified and never substitute for Docker test evidence.
+
 Project tests run through the cached official instance image rather than the
 orchestration repository's Python environment. Parent-scheduled calls apply the
 current Git patch to the image's `/testbed`. The wrapper starts Docker with

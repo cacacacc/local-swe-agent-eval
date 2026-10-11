@@ -430,10 +430,8 @@ class ClaudeCodeRunner:
             # the fixed CLI options that follow.
             command.extend(("--tools", ",".join(self.available_tools)))
         if self.session_id is not None:
-            # The Recovery gate's Read and Edit are two CLI invocations with different
-            # tool allowlists; an explicit session ID lets the second step inherit the
-            # context of files read in the first step, while avoiding ``--continue``
-            # accidentally attaching to the user's or another task's most recent session.
+            # Explicit IDs support intentionally resumed phases without ``--continue``
+            # accidentally attaching to another task's most recent session.
             command.extend(
                 (
                     "--resume" if self.resume_session else "--session-id",

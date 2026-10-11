@@ -18,8 +18,7 @@ from scripts.run_claude import (
     _execute_scheduled_test,
     _scheduled_test_result,
     _should_run_verification,
-    _validate_recovery_edit_step,
-    _validate_recovery_read_step,
+    _validate_recovery_read_edit_gate,
     _verification_policy,
     run_claude_task,
 )
@@ -86,10 +85,10 @@ def test_patch_gate_rejects_generic_success_with_empty_diff() -> None:
     assert validated.events[-1]["event_type"] == "patch_validation"
 
 
-def test_recovery_gate_requires_one_read_then_edit_on_the_same_source(
+def test_recovery_gate_requires_each_edited_source_to_be_read_first(
     tmp_path: Path,
 ) -> None:
-    """The state machine must reject a Read of a test file and an Edit of a different source file."""
+    """The multi-file gate must accept ordered source pairs and reject unsafe paths or write-first sequences."""
 
     source = tmp_path / "src" / "widget.py"
     other = tmp_path / "src" / "other.py"
@@ -99,25 +98,41 @@ def test_recovery_gate_requires_one_read_then_edit_on_the_same_source(
     for path in (source, other, test_file):
         path.write_text("value = 1\n", encoding="utf-8")
 
-    rejected_read = _validate_recovery_read_step(
-        _result(tool_calls=(("Read", {"file_path": str(test_file)}),)),
+    rejected_test = _validate_recovery_read_edit_gate(
+        _result(
+            tool_calls=(
+                ("Read", {"file_path": str(test_file)}),
+                ("Edit", {"file_path": str(test_file)}),
+            )
+        ),
         tmp_path,
     )
-    valid_read = _validate_recovery_read_step(
-        _result(tool_calls=(("Read", {"file_path": str(source)}),)),
+    valid_multi_file = _validate_recovery_read_edit_gate(
+        _result(
+            tool_calls=(
+                ("Read", {"file_path": str(source)}),
+                ("Edit", {"file_path": str(source)}),
+                ("Read", {"file_path": str(other)}),
+                ("Edit", {"file_path": str(other)}),
+            )
+        ),
         tmp_path,
     )
-    wrong_edit = _validate_recovery_edit_step(
-        _result(tool_calls=(("Edit", {"file_path": str(other)}),)),
+    write_first = _validate_recovery_read_edit_gate(
+        _result(
+            tool_calls=(
+                ("Read", {"file_path": str(source)}),
+                ("Edit", {"file_path": str(other)}),
+            )
+        ),
         tmp_path,
-        expected_target="src/widget.py",
     )
 
-    assert rejected_read.valid is False
-    assert valid_read.valid is True
-    assert valid_read.target_file == "src/widget.py"
-    assert wrong_edit.valid is False
-    assert wrong_edit.error == "Edit target differs from the validated Read target"
+    assert rejected_test.valid is False
+    assert valid_multi_file.valid is True
+    assert valid_multi_file.target_files == ("src/widget.py", "src/other.py")
+    assert write_first.valid is False
+    assert write_first.error == "Edit target was not read earlier in the gate"
 
 
 def test_recovery_handoff_keeps_visible_findings_without_tool_results() -> None:
@@ -1127,19 +1142,17 @@ def test_empty_patch_reuses_verification_budget_for_recovery(
     runner_options: list[dict[str, object]] = []
 
     class FakeAgent:
-        """The first round changes no files; the state machine delivers an existing-source edit via Read→Edit."""
+        """The first round changes no files; the multi-file gate delivers a source edit."""
 
         def run(self, worktree, prompt):
-            if "mandatory Read step" in prompt:
-                calls.append("read")
-                return _result(
-                    tool_calls=(("Read", {"file_path": str(source)}),)
-                )
-            if "mandatory Edit step" in prompt:
-                calls.append("edit")
+            if "Multi-file Read/Edit Gate" in prompt:
+                calls.append("recovery_gate")
                 source.write_text("value = 2\n", encoding="utf-8")
                 return _result(
-                    tool_calls=(("Edit", {"file_path": str(source)}),)
+                    tool_calls=(
+                        ("Read", {"file_path": str(source)}),
+                        ("Edit", {"file_path": str(source)}),
+                    )
                 )
             elif "Current phase: verification" in prompt:
                 calls.append("verification")
@@ -1191,31 +1204,25 @@ def test_empty_patch_reuses_verification_budget_for_recovery(
     )
 
     result = json.loads((run_path / "result.json").read_text(encoding="utf-8"))
-    assert calls == ["implementation", "read", "edit"]
+    assert calls == ["implementation", "recovery_gate"]
     assert "allow_bash" not in runner_options[0]
     assert runner_options[1]["allow_bash"] is False
-    assert runner_options[1]["available_tools"] == ("Read",)
-    assert runner_options[1]["turns"] == 1
-    assert runner_options[2]["available_tools"] == ("Edit",)
-    assert runner_options[2]["turns"] == 1
-    assert runner_options[1]["session_id"] == runner_options[2]["session_id"]
-    assert runner_options[1]["persist_session"] is True
-    assert runner_options[2]["resume_session"] is True
+    assert runner_options[1]["available_tools"] == ("Read", "Edit")
+    assert runner_options[1]["turns"] == 4
     assert result["run_status"] == "completed"
     assert result["patch_generated"] is True
-    assert "recovery_read_gate" in result["metrics"]["phases"]
-    assert "recovery_edit_gate" in result["metrics"]["phases"]
-    assert "recovery_fallback" not in result["metrics"]["phases"]
+    assert "recovery_read_edit_gate" in result["metrics"]["phases"]
+    assert "recovery_last_chance" not in result["metrics"]["phases"]
     assert "scheduled_test_recovery" in result["metrics"]["phases"]
     assert "verification" not in result["metrics"]["phases"]
     assert result["metrics"]["visible_test_missing"] == 1
 
 
-def test_recovery_fallback_uses_only_budget_left_after_edit_gate(
+def test_recovery_retains_fallback_and_last_chance_after_invalid_gate(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """When the forced Edit produces no patch, the fallback may only use Recovery's remaining turns."""
+    """An invalid gate must retain fallback before reusing the final repair turns."""
 
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -1249,19 +1256,16 @@ def test_recovery_fallback_uses_only_budget_left_after_edit_gate(
     runner_options: list[dict[str, object]] = []
 
     class FakeAgent:
-        """The Read is valid but the Edit is not persisted; the fallback uses the remaining budget to finish the change."""
+        """A read-only gate is invalid, so the last-chance phase finishes the change."""
 
         def run(self, worktree, prompt):
-            if "empty-patch recovery fallback" in prompt:
-                calls.append("fallback")
+            if "empty-patch recovery last chance" in prompt:
+                calls.append("last_chance")
                 source.write_text("value = 2\n", encoding="utf-8")
-            elif "mandatory Read step" in prompt:
-                calls.append("read")
-                return _result(
-                    tool_calls=(("Read", {"file_path": str(source)}),)
-                )
-            elif "mandatory Edit step" in prompt:
-                calls.append("second_read_rejected")
+            elif "empty-patch recovery fallback" in prompt:
+                calls.append("fallback")
+            elif "Multi-file Read/Edit Gate" in prompt:
+                calls.append("recovery_gate")
                 return _result(
                     tool_calls=(("Read", {"file_path": str(source)}),)
                 )
@@ -1313,28 +1317,28 @@ def test_recovery_fallback_uses_only_budget_left_after_edit_gate(
     )
 
     result = json.loads((run_path / "result.json").read_text(encoding="utf-8"))
-    assert calls == ["implementation", "read", "second_read_rejected", "fallback"]
-    assert runner_options[1]["turns"] == 1
-    assert runner_options[2]["turns"] == 1
-    assert runner_options[3]["turns"] == 5
+    assert calls == ["implementation", "recovery_gate", "fallback", "last_chance"]
+    assert runner_options[1]["turns"] == 4
+    assert runner_options[2]["turns"] == 3
+    assert runner_options[3]["turns"] == 3
     assert runner_options[1]["allow_bash"] is False
     assert runner_options[2]["allow_bash"] is False
     assert runner_options[3]["allow_bash"] is False
-    assert runner_options[1]["available_tools"] == ("Read",)
-    assert runner_options[2]["available_tools"] == ("Edit",)
+    assert runner_options[1]["available_tools"] == ("Read", "Edit")
+    assert "available_tools" not in runner_options[2]
     assert "available_tools" not in runner_options[3]
     assert (
-        result["metrics"]["phases"]["recovery_edit_gate"]["recovery_gate"][
+        result["metrics"]["phases"]["recovery_read_edit_gate"]["recovery_gate"][
             "valid"
         ]
         is False
     )
-    assert result["metrics"]["phases"]["recovery_edit_gate"][
+    assert result["metrics"]["phases"]["recovery_read_edit_gate"][
         "recovery_gate"
     ]["tool_sequence"] == ["Read"]
-    assert "recovery_read_gate" in result["metrics"]["phases"]
-    assert "recovery_edit_gate" in result["metrics"]["phases"]
+    assert "recovery_read_edit_gate" in result["metrics"]["phases"]
     assert "recovery_fallback" in result["metrics"]["phases"]
+    assert "recovery_last_chance" in result["metrics"]["phases"]
     assert result["patch_generated"] is True
 
 
@@ -1380,22 +1384,20 @@ def test_recovery_new_failure_signature_enters_focused_repair_and_retests(
     runner_options: list[dict[str, object]] = []
 
     class FakeAgent:
-        """The Read→Edit gate produces a patch with a regression, and the focused phase completes the narrow fix."""
+        """The multi-file gate produces a regression, and focused repair completes the fix."""
 
         def run(self, worktree, prompt):
             if "Focused repair mode" in prompt:
                 calls.append("repair")
                 source.write_text("value = 3\n", encoding="utf-8")
-            elif "mandatory Read step" in prompt:
-                calls.append("read")
-                return _result(
-                    tool_calls=(("Read", {"file_path": str(source)}),)
-                )
-            elif "mandatory Edit step" in prompt:
-                calls.append("edit")
+            elif "Multi-file Read/Edit Gate" in prompt:
+                calls.append("recovery_gate")
                 source.write_text("value = 2\n", encoding="utf-8")
                 return _result(
-                    tool_calls=(("Edit", {"file_path": str(source)}),)
+                    tool_calls=(
+                        ("Read", {"file_path": str(source)}),
+                        ("Edit", {"file_path": str(source)}),
+                    )
                 )
             else:
                 calls.append("implementation")
@@ -1472,12 +1474,11 @@ def test_recovery_new_failure_signature_enters_focused_repair_and_retests(
 
     result = json.loads((run_path / "result.json").read_text(encoding="utf-8"))
     phases = result["metrics"]["phases"]
-    assert calls == ["implementation", "read", "edit", "repair"]
-    assert runner_options[1]["turns"] == 1
-    assert runner_options[2]["turns"] == 1
-    assert runner_options[3]["turns"] == 3
-    assert runner_options[3]["allow_bash"] is False
-    assert runner_options[3]["available_tools"] == ("Read", "Edit")
+    assert calls == ["implementation", "recovery_gate", "repair"]
+    assert runner_options[1]["turns"] == 4
+    assert runner_options[2]["turns"] == 3
+    assert runner_options[2]["allow_bash"] is False
+    assert runner_options[2]["available_tools"] == ("Read", "Edit")
     assert "scheduled_test_recovery" in phases
     assert "recovery_regression_repair" in phases
     assert "scheduled_test_recovery_final" in phases

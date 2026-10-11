@@ -273,8 +273,8 @@ def test_verification_runner_disables_bash_at_cli_boundary() -> None:
     assert "Bash" in command[command.index("--disallowed-tools") + 1 :]
 
 
-def test_runner_can_expose_only_one_tool_for_each_recovery_gate_step() -> None:
-    """Each CLI call in the Recovery state machine may only expose the tools required for the current step."""
+def test_runner_can_restrict_tools_for_a_recovery_gate() -> None:
+    """A Recovery invocation may expose only the tools selected by the parent policy."""
 
     runner = ClaudeCodeRunner(
         model="qwen3.5:9b",
@@ -293,8 +293,8 @@ def test_runner_can_expose_only_one_tool_for_each_recovery_gate_step() -> None:
     assert "Bash" in command[command.index("--disallowed-tools") + 1 :]
 
 
-def test_runner_uses_explicit_persistent_session_for_read_edit_state_machine() -> None:
-    """The Edit step must resume an explicit UUID, not attach to an arbitrary recent session in the directory."""
+def test_runner_uses_explicit_persistent_session_for_resumed_phases() -> None:
+    """A resumed phase must use an explicit UUID, not an arbitrary recent session in the directory."""
 
     session_id = "12345678-1234-5678-1234-567812345678"
     read_runner = ClaudeCodeRunner(

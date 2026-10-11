@@ -242,13 +242,14 @@ Claude Code sessions, with deterministic parent-owned test planning between them
    of acting as hard gates. When a `new_regression` exists, Verification receives
    only the first proven regression and the candidate patch, and Claude Code's
    tool whitelist is reduced to `Read,Edit`.
-4. If implementation produces no usable patch, the otherwise-unused 10
-   verification turns become Recovery. Its first two turns are a mandatory
-   Read→Edit gate where `Read,Edit` are the only available tools: the first turn
-   reads one handoff-selected source file to satisfy Claude Code's edit prerequisite,
-   and the second immediately edits that file. If no existing-source patch appears,
-   the remaining eight turns run a no-Bash fallback with targeted read tools. This
-   keeps the 40-turn budget fixed while preventing renewed broad exploration.
+4. If implementation produces no usable patch, the otherwise-unused verification
+   turns become Recovery. A multi-file gate exposes only `Read,Edit`, permits the
+   model to repair more than one existing product-source file, and requires every
+   edited file to have been read earlier in the same gate. The parent validates the
+   complete tool trajectory and the resulting source diff. With the default budget,
+   four turns go to the gate, three to a no-Bash fallback if needed, and three remain
+   reserved for a last chance or focused repair after parent-run tests. This keeps the
+   40-turn budget fixed while preventing renewed broad exploration.
 
 Starting a new session prevents implementation history and failed automatic
 compaction from consuming the verification context. The v2 prompt also limits

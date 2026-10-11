@@ -14,8 +14,8 @@ dataset:
   tasks_file: experiments/evaluation_tasks_30_seed43.json
 
 # Keep the total at 40 turns: 30 turns for Implementation plus 10 turns for Verification/Recovery.
-# Recovery of an empty patch first goes through a 2-turn gate that only opens Edit; when the parent process detects
-# a new_regression, Verification opens only Read/Edit for focused fixing.
+# Recovery of an empty patch uses a multi-file Read/Edit gate, retains a no-Bash fallback, and reserves three turns
+# for a last chance or focused repair when the parent process detects a new_regression.
 model:
   runtime: ollama
   name: qwen3.5:9b

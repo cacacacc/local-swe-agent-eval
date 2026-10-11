@@ -14,7 +14,6 @@ from pathlib import Path
 import re
 import time
 from typing import Any, Mapping, MutableMapping, Sequence
-from uuid import uuid4
 
 from agent.claude_runner import (
     ClaudeCodeResult,
@@ -24,9 +23,8 @@ from agent.claude_runner import (
 from agent.prompt_builder import (
     PromptBuilder,
     build_implementation_phase_prompt,
-    build_recovery_edit_gate_prompt,
+    build_recovery_read_edit_gate_prompt,
     build_recovery_implementation_prompt,
-    build_recovery_read_gate_prompt,
     build_verification_phase_prompt,
 )
 from agent.test_plan import (
@@ -225,84 +223,72 @@ def _existing_source_patch_projection(patch: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class _RecoveryGateValidation:
-    """The parent process's audit conclusion for a Recovery Read/Edit single-step tool event."""
+    """The parent process's audit conclusion for a multi-file Recovery gate."""
 
     valid: bool
-    step: str
     tool_sequence: tuple[str, ...]
-    target_file: str | None = None
+    target_files: tuple[str, ...] = ()
     error: str | None = None
 
 
-def _validate_recovery_read_step(
+def _validate_recovery_read_edit_gate(
     result: ClaudeCodeResult,
     repository: Path,
 ) -> _RecoveryGateValidation:
-    """Accept only a single Read targeting an existing product source file inside the repository."""
+    """Accept ordered Reads and Edits of existing product source within the repository.
+
+    Each Edit must target a file read earlier in this gate. This both permits a genuine
+    multi-file repair and prevents the relaxed turn budget from becoming an unrestricted
+    write session.
+    """
 
     calls = _observable_tool_calls(result)
     sequence = tuple(name for name, _ in calls)
-    if len(calls) != 1 or calls[0][0] != "Read":
+    read_files: set[str] = set()
+    edited_files: list[str] = []
+    if not calls:
         return _RecoveryGateValidation(
             valid=False,
-            step="read",
             tool_sequence=sequence,
-            error="read step must contain exactly one Read tool call",
+            error="gate must contain Read and Edit tool calls",
         )
-    relative = _validated_gate_source_path(
-        repository,
-        calls[0][1].get("file_path"),
-    )
-    if relative is None:
+    for name, tool_input in calls:
+        if name not in {"Read", "Edit"}:
+            return _RecoveryGateValidation(
+                valid=False,
+                tool_sequence=sequence,
+                target_files=tuple(dict.fromkeys(edited_files)),
+                error=f"unsupported gate tool: {name}",
+            )
+        relative = _validated_gate_source_path(repository, tool_input.get("file_path"))
+        if relative is None:
+            return _RecoveryGateValidation(
+                valid=False,
+                tool_sequence=sequence,
+                target_files=tuple(dict.fromkeys(edited_files)),
+                error=f"{name} target is not an existing product-source file",
+            )
+        if name == "Read":
+            read_files.add(relative)
+            continue
+        if relative not in read_files:
+            return _RecoveryGateValidation(
+                valid=False,
+                tool_sequence=sequence,
+                target_files=tuple(dict.fromkeys((*edited_files, relative))),
+                error="Edit target was not read earlier in the gate",
+            )
+        edited_files.append(relative)
+    if not edited_files:
         return _RecoveryGateValidation(
             valid=False,
-            step="read",
             tool_sequence=sequence,
-            error="Read target is not an existing product-source file",
-        )
-    return _RecoveryGateValidation(
-        valid=True,
-        step="read",
-        tool_sequence=sequence,
-        target_file=relative,
-    )
-
-
-def _validate_recovery_edit_step(
-    result: ClaudeCodeResult,
-    repository: Path,
-    *,
-    expected_target: str,
-) -> _RecoveryGateValidation:
-    """Accept only a single Edit that modifies the same source file as the first step."""
-
-    calls = _observable_tool_calls(result)
-    sequence = tuple(name for name, _ in calls)
-    if len(calls) != 1 or calls[0][0] != "Edit":
-        return _RecoveryGateValidation(
-            valid=False,
-            step="edit",
-            tool_sequence=sequence,
-            target_file=expected_target,
-            error="edit step must contain exactly one Edit tool call",
-        )
-    relative = _validated_gate_source_path(
-        repository,
-        calls[0][1].get("file_path"),
-    )
-    if relative != expected_target:
-        return _RecoveryGateValidation(
-            valid=False,
-            step="edit",
-            tool_sequence=sequence,
-            target_file=relative,
-            error="Edit target differs from the validated Read target",
+            error="gate must contain at least one Edit tool call",
         )
     return _RecoveryGateValidation(
         valid=True,
-        step="edit",
         tool_sequence=sequence,
-        target_file=relative,
+        target_files=tuple(dict.fromkeys(edited_files)),
     )
 
 
@@ -371,10 +357,9 @@ def _annotate_recovery_gate_result(
     """Add the state-machine decision into phase metrics and events so result analysis can audit it directly."""
 
     details = {
-        "step": validation.step,
         "valid": validation.valid,
         "tool_sequence": list(validation.tool_sequence),
-        "target_file": validation.target_file,
+        "target_files": list(validation.target_files),
         "error": validation.error,
         "raw_exit_code": result.exit_code,
     }
@@ -389,9 +374,9 @@ def _annotate_recovery_gate_result(
             "details": details,
         }
     )
-    # A single-step session often ends with max_turns after its tool call completes; if the parent process has already proved from the structured events
-    # that the sole permitted action was issued successfully, that exit code is a state-machine boundary rather than a delivery failure. The original value is still preserved in
-    # recovery_gate.raw_exit_code and the Claude terminal_reason for auditing.
+    # A bounded gate may end with max_turns immediately after a valid final Edit. Once
+    # the structured trajectory passes validation, treat that boundary as successful;
+    # the raw exit code remains available for auditing.
     exit_code = 0 if validation.valid else result.exit_code
     return replace(
         result,
@@ -1383,10 +1368,9 @@ def run_claude_task(
             consume_test_plan(repository)
             candidate_patch = session.collect_patch(repository)
             if not _should_run_verification(candidate_patch):
-                # An empty patch cannot enter Verification, but its reserved turns must not go to waste.
-                # First use a two-turn Read→Edit gate: the first turn satisfies Claude Code's
-                # pre-edit read requirement and the second turn edits immediately. Only when no product-source patch
-                # has formed is the remaining budget handed to an explorable fallback.
+                # An empty patch cannot enter Verification, but its reserved turns must
+                # not go to waste. A multi-turn Read/Edit gate can repair cross-file
+                # defects while the parent audits the complete tool trajectory.
                 recovery_handoff = _build_recovery_handoff(
                     implementation_result,
                     maximum_chars=min(
@@ -1402,24 +1386,27 @@ def run_claude_task(
                         5000,
                     ),
                 )
-                edit_gate_turns = min(2, config.agent.verification_turns)
-                # Recovery must not spend all remaining turns still exploring, otherwise even if the parent
-                # immediately proves the patch introduces a new regression there is no model budget left to fix it. The default 10 turns
-                # therefore splits stably into 2 (Read→Edit) + 5 (fallback) + 3 (focused repair).
+                # Keep the three-stage Recovery policy within the original budget. Four
+                # gate turns can cover two Read/Edit pairs; three fallback turns remain
+                # available before the final three turns reserved for focused repair.
+                recovery_gate_turns = min(4, config.agent.verification_turns)
                 regression_repair_turns = min(
                     3,
-                    max(0, config.agent.verification_turns - edit_gate_turns),
+                    max(
+                        0,
+                        config.agent.verification_turns - recovery_gate_turns,
+                    ),
                 )
                 fallback_turns = max(
                     0,
                     config.agent.verification_turns
-                    - edit_gate_turns
+                    - recovery_gate_turns
                     - regression_repair_turns,
                 )
-                edit_gate_timeout = max(
+                recovery_gate_timeout = max(
                     1,
                     verification_timeout
-                    * edit_gate_turns
+                    * recovery_gate_turns
                     // config.agent.verification_turns,
                 )
                 fallback_timeout = max(
@@ -1434,82 +1421,39 @@ def run_claude_task(
                     * regression_repair_turns
                     // config.agent.verification_turns,
                 )
-                gate_read_timeout = max(1, edit_gate_timeout // 2)
-                gate_edit_timeout = max(
-                    1,
-                    edit_gate_timeout - gate_read_timeout,
-                )
-                gate_session_id = str(uuid4())
-                read_gate_prompt = build_recovery_read_gate_prompt(
+                recovery_gate_prompt = build_recovery_read_edit_gate_prompt(
                     prompt,
+                    recovery_turns=recovery_gate_turns,
                     implementation_handoff=recovery_handoff,
                     source_context=source_context,
                 )
-                read_gate_result = _runner(
+                recovery_gate_result = _runner(
                     config,
-                    turns=1,
-                    timeout_seconds=task_budget.limit(gate_read_timeout),
+                    turns=recovery_gate_turns,
+                    timeout_seconds=task_budget.limit(recovery_gate_timeout),
                     base_url=base_url,
                     allow_bash=False,
-                    available_tools=("Read",),
-                    session_id=gate_session_id,
-                    persist_session=True,
-                ).run(repository, read_gate_prompt)
-                read_validation = _validate_recovery_read_step(
-                    read_gate_result,
+                    available_tools=("Read", "Edit"),
+                ).run(repository, recovery_gate_prompt)
+                gate_validation = _validate_recovery_read_edit_gate(
+                    recovery_gate_result,
                     repository,
                 )
-                read_gate_result = _annotate_recovery_gate_result(
-                    read_gate_result,
-                    read_validation,
+                recovery_gate_result = _annotate_recovery_gate_result(
+                    recovery_gate_result,
+                    gate_validation,
                 )
-                phases.append(("recovery_read_gate", read_gate_result))
+                phases.append(("recovery_read_edit_gate", recovery_gate_result))
                 task_budget.ensure_remaining()
 
-                recovery_result = read_gate_result
-                gate_valid = False
-                if read_validation.valid and edit_gate_turns >= 2:
-                    assert read_validation.target_file is not None
-                    edit_gate_prompt = build_recovery_edit_gate_prompt(
-                        prompt,
-                        target_file=read_validation.target_file,
-                    )
-                    edit_gate_result = _runner(
-                        config,
-                        turns=1,
-                        timeout_seconds=task_budget.limit(gate_edit_timeout),
-                        base_url=base_url,
-                        allow_bash=False,
-                        available_tools=("Edit",),
-                        session_id=gate_session_id,
-                        resume_session=True,
-                        persist_session=True,
-                    ).run(repository, edit_gate_prompt)
-                    edit_validation = _validate_recovery_edit_step(
-                        edit_gate_result,
-                        repository,
-                        expected_target=read_validation.target_file,
-                    )
-                    edit_gate_result = _annotate_recovery_gate_result(
-                        edit_gate_result,
-                        edit_validation,
-                    )
-                    phases.append(("recovery_edit_gate", edit_gate_result))
-                    task_budget.ensure_remaining()
-                    recovery_result = edit_gate_result
-                    gate_valid = edit_validation.valid
-
+                recovery_result = recovery_gate_result
                 recovered_patch = session.collect_patch(repository)
-                gate_patch = recovered_patch
-                gate_source_patch = _existing_source_patch_projection(gate_patch)
+                gate_source_patch = _existing_source_patch_projection(recovered_patch)
                 recovery_patch_valid = (
-                    gate_valid
+                    gate_validation.valid
                     and bool(gate_source_patch)
                 )
-                if (
-                    not recovery_patch_valid
-                    and fallback_turns > 0
-                ):
+                if not recovery_patch_valid and fallback_turns > 0:
                     fallback_prompt = build_recovery_implementation_prompt(
                         prompt,
                         recovery_turns=fallback_turns,
@@ -1528,8 +1472,8 @@ def run_claude_task(
                     task_budget.ensure_remaining()
                     recovery_result = fallback_result
                     recovered_patch = session.collect_patch(repository)
-                    # An invalid gate may have left a wrong source diff behind; the fallback must actually change the
-                    # working tree, and must not bypass the state-machine verdict by merely inheriting that diff.
+                    # An invalid gate may already have left a source diff. The fallback
+                    # must materially change it rather than inherit an unvalidated patch.
                     fallback_source_patch = _existing_source_patch_projection(
                         recovered_patch
                     )
@@ -1544,8 +1488,8 @@ def run_claude_task(
                     not recovery_patch_valid
                     and repair_budget_available
                 ):
-                    # When the first two segments still yield no product-source patch, there is no test left to repair with the reserved budget; only
-                    # then are the last 3 turns downgraded to a final implementation chance, so the budget is not silently wasted.
+                    # With no validated source patch there is no regression to repair, so
+                    # reuse those turns for one final implementation chance.
                     last_chance_prompt = build_recovery_implementation_prompt(
                         prompt,
                         recovery_turns=regression_repair_turns,

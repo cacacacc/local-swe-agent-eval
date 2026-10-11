@@ -10,9 +10,8 @@ from agent.prompt_builder import (
     PromptBuilder,
     PromptTemplateError,
     build_implementation_phase_prompt,
-    build_recovery_edit_gate_prompt,
+    build_recovery_read_edit_gate_prompt,
     build_recovery_implementation_prompt,
-    build_recovery_read_gate_prompt,
     build_verification_phase_prompt,
 )
 from benchmark.task import SWEbenchTask
@@ -216,14 +215,11 @@ def test_phase_prompts_reanchor_task_and_enforce_delivery_boundaries() -> None:
         scheduled_test_evidence="Exit code: 1\nFAILED expected value",
         focused_new_regression=True,
     )
-    read_gate = build_recovery_read_gate_prompt(
+    recovery_gate = build_recovery_read_edit_gate_prompt(
         base,
+        recovery_turns=4,
         implementation_handoff="Likely defect in src/example.py.",
         source_context="File: src/example.py\n1: old_value = 1",
-    )
-    edit_gate = build_recovery_edit_gate_prompt(
-        base,
-        target_file="src/example.py",
     )
     recovery = build_recovery_implementation_prompt(
         base,
@@ -260,14 +256,11 @@ def test_phase_prompts_reanchor_task_and_enforce_delivery_boundaries() -> None:
     assert "failed sequence validation" in recovery
     assert "Modify existing product source" in recovery
     assert "do not run tests" in recovery
-    assert base.strip() in read_gate
-    assert "mandatory Read step" in read_gate
-    assert "call Read exactly once" in read_gate
-    assert "old_value = 1" in read_gate
-    assert base.strip() in edit_gate
-    assert "mandatory Edit step" in edit_gate
-    assert "call Edit exactly once" in edit_gate
-    assert "src/example.py" in edit_gate
+    assert base.strip() in recovery_gate
+    assert "Multi-file Read/Edit Gate" in recovery_gate
+    assert "at most 4 turns" in recovery_gate
+    assert "Before every Edit, Read that same file" in recovery_gate
+    assert "old_value = 1" in recovery_gate
 
 
 def test_dev_config_cannot_be_used_as_formal_evaluation() -> None:

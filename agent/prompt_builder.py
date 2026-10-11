@@ -173,58 +173,39 @@ def build_verification_phase_prompt(
     )
 
 
-def build_recovery_read_gate_prompt(
+def build_recovery_read_edit_gate_prompt(
     base_prompt: str,
     *,
+    recovery_turns: int,
     implementation_handoff: str,
     source_context: str,
 ) -> str:
-    """Build the first step of the Recovery state machine, requiring and allowing exactly one target-source Read.
+    """Build a multi-file Recovery gate restricted to ordered source Reads and Edits.
 
-    The parent process subsequently validates the actual tool event; only a read of
-    existing in-repository source proceeds to the Edit-only second step in the same
-    session. The Prompt therefore only provides the model context, while the parent
-    process enforces the sequencing.
+    The model may inspect and modify as many existing product-source files as the fix
+    requires. The parent process validates the complete tool trajectory, including the
+    invariant that each edited file was read earlier in the same gate.
     """
 
     handoff = implementation_handoff.strip() or "No visible diagnosis was recorded."
     context = source_context.strip() or "No safe source excerpt was available."
     return (
         f"{base_prompt.rstrip()}\n\n"
-        "Current phase: empty-patch recovery — mandatory Read step\n"
-        "- This invocation has exactly one action: call Read exactly once on the most "
-        "relevant existing product-source file named below.\n"
-        "- Read is the only available tool. Do not answer with text, request another "
-        "tool, or read a test, reproduction, generated, or control file.\n"
-        "- The parent process validates the tool event and will resume this exact session "
-        "with only Edit available if the path is valid.\n"
+        "Current phase: empty-patch recovery — Multi-file Read/Edit Gate\n"
+        f"- You have at most {recovery_turns} turns. Only Read and Edit are available. "
+        "Use them to leave the smallest plausible product-source fix.\n"
+        "- You may read and edit multiple existing product-source files when the issue "
+        "requires it. Before every Edit, Read that same file earlier in this gate.\n"
+        "- Do not read or edit tests, reproductions, generated artifacts, documentation, "
+        "or control files. Do not finish with an explanation instead of a source Edit.\n"
+        "- The parent process validates every tool event and rejects unsupported tools, "
+        "invalid paths, or an Edit without a preceding same-file Read.\n"
         "<implementation_handoff>\n"
         f"{handoff}\n"
         "</implementation_handoff>\n"
         "<source_context>\n"
         f"{context}\n"
         "</source_context>\n"
-        "- Do not create a Git commit, test file, reproduction file, or control file.\n"
-    )
-
-
-def build_recovery_edit_gate_prompt(
-    base_prompt: str,
-    *,
-    target_file: str,
-) -> str:
-    """Build the second step of the Recovery state machine, allowing only an Edit of the same file read in the first step."""
-
-    return (
-        f"{base_prompt.rstrip()}\n\n"
-        "Current phase: empty-patch recovery — mandatory Edit step\n"
-        f"- The validated Read step selected `{target_file}`.\n"
-        "- This invocation has exactly one action: call Edit exactly once on that same "
-        "file and leave the smallest plausible product-source fix.\n"
-        "- Edit is the only available tool. Do not answer with text, request Read, or "
-        "modify a different path.\n"
-        "- Use the issue, handoff, and source content already present in this resumed "
-        "session. If evidence is incomplete, still make the safest minimal Edit.\n"
         "- Do not create a Git commit, test file, reproduction file, or control file.\n"
     )
 
@@ -238,14 +219,12 @@ def build_recovery_implementation_prompt(
     implementation_handoff: str = "",
     last_chance: bool = False,
 ) -> str:
-    """Build a restricted fallback session for the case where the mandatory Edit produced no source patch.
+    """Build a restricted fallback or last-chance Recovery session.
 
     Recovery only reuses the turns originally reserved for Verification but unusable
     because no candidate patch exists, so it does not enlarge the per-task model
     budget. The previous stage hands off only visible findings and a tool-call summary,
-    never thinking or large tool outputs. Because the upstream gate already made a real
-    Edit attempt, this stage only allows minimal supplementary reads with the remaining
-    budget before delivering a source change.
+    never thinking or large tool outputs.
     """
 
     handoff = implementation_handoff.strip() or (
@@ -271,7 +250,7 @@ def build_recovery_implementation_prompt(
         "<implementation_handoff>\n"
         f"{handoff}\n"
         "</implementation_handoff>\n"
-        "- The mandatory Read-Edit state machine did not produce a validated existing-"
+        "- The Multi-file Read/Edit Gate did not produce a validated existing-"
         "source patch. Do not "
         "repeat searches or file reads already summarized in the handoff.\n"
         f"{budget_note}"

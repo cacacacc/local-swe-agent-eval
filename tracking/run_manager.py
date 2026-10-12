@@ -30,6 +30,7 @@ _SAFE_PATH_COMPONENT = re.compile(r"[^A-Za-z0-9_.-]+")
 # artifacts into the official evaluation.
 _PATCH_EXCLUDE_PATHS = (
     ":(exclude,glob)**/.venv/**",
+    ":(exclude,glob)**/.test-venv/**",
     ":(exclude,glob)**/venv/**",
     ":(exclude,glob)**/env/**",
     ":(exclude,glob)**/test_env/**",
@@ -42,10 +43,28 @@ _PATCH_EXCLUDE_PATHS = (
 )
 
 
-def patch_pathspecs() -> tuple[str, ...]:
-    """Return the stable Git pathspec for patch collection, shared by saving and Docker tests."""
+def patch_pathspecs(repository: Path | str | None = None) -> tuple[str, ...]:
+    """Exclude known caches and root-level virtual environments from every patch consumer."""
 
-    return (".", *_PATCH_EXCLUDE_PATHS)
+    excludes = list(_PATCH_EXCLUDE_PATHS)
+    if repository is not None:
+        root = Path(repository)
+        try:
+            children = root.iterdir()
+            for child in children:
+                # A pyvenv.cfg marker is stronger evidence than a directory name, while
+                # refusing symlinks and unusual names keeps Git pathspecs unambiguous.
+                if (
+                    child.is_dir()
+                    and not child.is_symlink()
+                    and _SAFE_PATH_COMPONENT.sub("", child.name) == child.name
+                    and (child / "pyvenv.cfg").is_file()
+                ):
+                    excludes.append(f":(exclude,glob){child.name}/**")
+        except OSError:
+            # Patch collection should still work when optional environment discovery fails.
+            pass
+    return (".", *dict.fromkeys(excludes))
 
 
 def _utc_now() -> str:
@@ -91,7 +110,7 @@ class RunSession:
             "--intent-to-add",
             "--all",
             "--",
-            *patch_pathspecs(),
+            *patch_pathspecs(repository_path),
         )
         return self._run_git(
             repository_path,
@@ -100,7 +119,7 @@ class RunSession:
             "--no-ext-diff",
             self._patch_base_commit,
             "--",
-            *patch_pathspecs(),
+            *patch_pathspecs(repository_path),
         )
 
     def write_handoff(self, snapshot: Mapping[str, Any]) -> None:

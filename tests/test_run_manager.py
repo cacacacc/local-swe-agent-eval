@@ -107,6 +107,55 @@ def test_collect_patch_excludes_generated_environments_but_keeps_source(
     assert "__pycache__" not in patch
 
 
+def test_collect_patch_excludes_marked_virtualenvs_without_hiding_other_files(
+    tmp_path: Path,
+) -> None:
+    """A model-created .test-venv or custom pyvenv must not enter the saved or Docker patch."""
+
+    from agent.test_sandbox import VisibleTestSandbox
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    run_git(repository, "init")
+    run_git(repository, "config", "user.name", "Run Manager Test")
+    run_git(repository, "config", "user.email", "run-manager@example.invalid")
+    source = repository / "module.py"
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    run_git(repository, "add", "module.py")
+    run_git(repository, "commit", "-m", "base")
+    base_commit = run_git(repository, "rev-parse", "HEAD")
+    session = RunManager(tmp_path / "runs").start(
+        SWEbenchTask(
+            instance_id="owner__repo-venv",
+            repo="owner/repo",
+            base_commit=base_commit,
+            problem_statement="Fix it.",
+        ),
+        phase="dev",
+        agent="claude-code",
+        model="qwen3.5:9b",
+        prompt="prompt\n",
+    )
+    source.write_text("VALUE = 2\n", encoding="utf-8")
+    for name in (".test-venv", "custom-python-env"):
+        environment = repository / name
+        environment.mkdir()
+        (environment / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+        (environment / "generated.py").write_text("UNRELATED = True\n", encoding="utf-8")
+    ordinary = repository / "test-venv-data"
+    ordinary.mkdir()
+    (ordinary / "fixture.py").write_text("KEPT = True\n", encoding="utf-8")
+
+    saved_patch = session.collect_patch(repository)
+    docker_patch = VisibleTestSandbox._collect_patch(repository, base_commit)
+
+    assert saved_patch == docker_patch
+    assert "module.py" in saved_patch
+    assert "test-venv-data/fixture.py" in saved_patch
+    assert ".test-venv/" not in saved_patch
+    assert "custom-python-env/" not in saved_patch
+
+
 def test_finalize_classifies_timeout_and_counts_changed_lines(tmp_path: Path) -> None:
     """Exit code 124 must be classified as a timeout, and the patch size must not count the diff header."""
 

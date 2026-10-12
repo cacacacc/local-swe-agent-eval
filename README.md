@@ -230,9 +230,11 @@ Claude Code sessions, with deterministic parent-owned test planning between them
 
 1. The implementation session receives 30 turns to investigate the issue and
    produce a candidate patch.
-2. The parent maps modified source paths to existing repository tests, selecting
-   a target module plus a different adjacent regression module (or a Django test
-   app) without asking another model session.
+2. The parent maps modified product source to repository tests using static import
+   dependencies and changed class/function names, with deterministic path matching
+   as a fallback. Newly added reproduction tests are not eligible as the target.
+   It selects a target module plus a different adjacent regression module (or a
+   Django test app) without asking another model session.
 3. The parent runs every command once on the unmodified instance image and once
    with the candidate patch in cached, network-free Docker containers. Only a
    baseline-pass to patched-fail transition is classified as `new_regression`;
@@ -272,6 +274,9 @@ processes, time, and output, and removes the one-shot container afterward. It
 never applies the SWE-bench hidden `test_patch` or runs the official evaluation
 script during solving. Required images must be pulled during environment
 preparation; the wrapper never pulls implicitly.
+Patch export and Docker test collection share the same exclusions for generated
+environments, including `.test-venv` and root-level directories marked by
+`pyvenv.cfg`; worktree files are not deleted.
 
 New v2 runs also impose a 30-minute wall-clock budget across all model and Docker
 phases. Target tests retain the 900-second command timeout, while the broader

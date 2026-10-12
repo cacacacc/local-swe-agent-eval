@@ -252,3 +252,107 @@ def test_parent_ignores_new_reproduction_when_selecting_tests(tmp_path: Path) ->
 
     assert request.status == "missing"
     assert request.error == "parent planner found no modified existing source path"
+
+
+def test_parent_prefers_direct_import_over_misleading_test_name(tmp_path: Path) -> None:
+    """An exact source import must outrank a lexically similar but unrelated test file."""
+
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_domain_c.py").write_text(
+        "from sphinx.domains.c import CDomain\n", encoding="utf-8"
+    )
+    (tests / "test_domain_py.py").write_text(
+        "from sphinx.domains.python import PythonDomain\n", encoding="utf-8"
+    )
+    request = generate_repository_test_plan(
+        tmp_path,
+        repo="sphinx-doc/sphinx",
+        patch=(
+            "diff --git a/sphinx/domains/python.py b/sphinx/domains/python.py\n"
+            "--- a/sphinx/domains/python.py\n+++ b/sphinx/domains/python.py\n"
+            "@@ -1 +1 @@ def _parse_annotation():\n-old\n+new\n"
+            "diff --git a/tests/test_domain_py.py b/tests/test_domain_py.py\n"
+            "--- a/tests/test_domain_py.py\n+++ b/tests/test_domain_py.py\n"
+            "@@ -1 +1 @@\n-old\n+new\n"
+        ),
+    )
+
+    assert request.target_argv[-1] == "tests/test_domain_py.py"
+
+
+def test_parent_uses_changed_symbol_with_package_level_import(tmp_path: Path) -> None:
+    """A test importing the changed class from a package facade outranks a generic neighbor."""
+
+    tests = tmp_path / "tests" / "forms_tests" / "field_tests"
+    tests.mkdir(parents=True)
+    (tests / "test_fields.py").write_text(
+        "from django.forms import CharField\n", encoding="utf-8"
+    )
+    (tests / "test_multivaluefield.py").write_text(
+        "from django.forms import MultiValueField\n"
+        "def test_field():\n    assert MultiValueField\n",
+        encoding="utf-8",
+    )
+    request = generate_repository_test_plan(
+        tmp_path,
+        repo="django/django",
+        patch=(
+            "diff --git a/django/forms/fields.py b/django/forms/fields.py\n"
+            "--- a/django/forms/fields.py\n+++ b/django/forms/fields.py\n"
+            "@@ -20 +20 @@ class MultiValueField:\n-old\n+new\n"
+        ),
+    )
+
+    assert request.target_argv[2] == "forms_tests.field_tests.test_multivaluefield"
+
+
+def test_parent_includes_django_app_tests_py_with_direct_import(tmp_path: Path) -> None:
+    """Django's conventional tests.py modules must participate in dependency ranking."""
+
+    tests = tmp_path / "tests" / "mail"
+    tests.mkdir(parents=True)
+    (tests / "test_sendtestemail.py").write_text(
+        "def test_command(): pass\n", encoding="utf-8"
+    )
+    (tests / "tests.py").write_text(
+        "from django.core.mail.message import EmailMessage\n"
+        "def test_email():\n    assert EmailMessage\n",
+        encoding="utf-8",
+    )
+    request = generate_repository_test_plan(
+        tmp_path,
+        repo="django/django",
+        patch=(
+            "diff --git a/django/core/mail/message.py b/django/core/mail/message.py\n"
+            "--- a/django/core/mail/message.py\n+++ b/django/core/mail/message.py\n"
+            "@@ -1 +1 @@ class EmailMessage:\n-old\n+new\n"
+        ),
+    )
+
+    assert request.target_argv[2] == "mail.tests"
+
+
+def test_parent_does_not_select_model_added_tests(tmp_path: Path) -> None:
+    """A newly added reproduction cannot become the parent's allegedly independent target test."""
+
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_widget.py").write_text("def test_old(): pass\n", encoding="utf-8")
+    (tests / "test_widget_new.py").write_text(
+        "from package.widget import Widget\n", encoding="utf-8"
+    )
+    request = generate_repository_test_plan(
+        tmp_path,
+        repo="owner/project",
+        patch=(
+            "diff --git a/package/widget.py b/package/widget.py\n"
+            "--- a/package/widget.py\n+++ b/package/widget.py\n"
+            "@@ -1 +1 @@\n-old\n+new\n"
+            "diff --git a/tests/test_widget_new.py b/tests/test_widget_new.py\n"
+            "new file mode 100644\n--- /dev/null\n+++ b/tests/test_widget_new.py\n"
+            "@@ -0,0 +1 @@\n+from package.widget import Widget\n"
+        ),
+    )
+
+    assert request.target_argv[-1] == "tests/test_widget.py"

@@ -11,6 +11,7 @@ being read, so it never pollutes the final patch.
 
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -23,6 +24,7 @@ TEST_PLAN_FILENAME = ".agent-test-plan.json"
 _MAX_PLAN_BYTES = 16_384
 _MAX_ARGUMENTS = 64
 _MAX_ARGUMENT_CHARS = 4_096
+_MAX_DEPENDENCY_SCAN_BYTES = 512_000
 _FORBIDDEN_EXECUTABLES = {
     "bash",
     "curl",
@@ -125,9 +127,9 @@ def generate_repository_test_plan(
 ) -> TestPlanRequest:
     """Deterministically generate two test commands from the repository type, modified paths, and existing test layout.
 
-    The generator only selects test files that already exist in the task repository
-    and never reads the SWE-bench hidden ``test_patch``. The target test takes the
-    existing test module closest to the modified source file name with fail-fast;
+    The generator excludes newly added tests and never reads the SWE-bench hidden
+    ``test_patch``. It ranks existing tests by static imports and changed symbols,
+    using filename proximity only when dependency evidence is unavailable;
     the regression test selects another test module in the same directory or with the
     deepest shared path, avoiding passing off the same command with ``-x`` removed as
     the adjacent regression. Django's regression command runs the target test app.
@@ -139,7 +141,10 @@ def generate_repository_test_plan(
 
     repository_path = Path(repository).resolve()
     changed_paths, new_paths = _patch_paths(patch)
-    source_paths = [path for path in changed_paths if path not in new_paths]
+    source_paths = [
+        path for path in changed_paths
+        if path not in new_paths and _is_product_source_path(path)
+    ]
     if not source_paths:
         return TestPlanRequest(
             status="missing",
@@ -147,8 +152,17 @@ def generate_repository_test_plan(
             origin="parent",
         )
 
-    test_files = _repository_test_files(repository_path, repo)
-    selected = _select_test_files(test_files, source_paths, repo=repo)
+    test_files = [
+        path for path in _repository_test_files(repository_path, repo)
+        if path not in new_paths
+    ]
+    selected = _select_test_files(
+        test_files,
+        source_paths,
+        repo=repo,
+        repository=repository_path,
+        changed_symbols=_changed_symbols(patch, source_paths),
+    )
     if selected is None:
         return TestPlanRequest(
             status="missing",
@@ -194,6 +208,106 @@ def _patch_paths(patch: str) -> tuple[list[Path], set[Path]]:
     return changed, newly_created
 
 
+def _is_product_source_path(path: Path) -> bool:
+    """Keep existing product paths while excluding tests and generated environments."""
+
+    parts = {part.lower() for part in path.parts}
+    name = path.name.lower()
+    return not (
+        parts & {"test", "tests", "testing", ".venv", ".test-venv", "venv", "test_env"}
+        or name.startswith("test_")
+        or name.endswith(("_test.py", ".test.js", ".test.ts"))
+    )
+
+
+def _changed_symbols(patch: str, source_paths: list[Path]) -> set[str]:
+    """Extract changed class/function names from source diff headers without reading hidden tests."""
+
+    names: set[str] = set()
+    sources = set(source_paths)
+    for section in re.split(r"(?=^diff --git )", patch, flags=re.MULTILINE):
+        match = re.match(r"diff --git a/(.+?) b/(.+?)\n", section)
+        if match is None or Path(match.group(2)) not in sources:
+            continue
+        for line in section.splitlines():
+            if not line.startswith(("@@", "+", "-")) or line.startswith(("+++", "---")):
+                continue
+            symbol = re.search(r"\b(?:class|(?:async\s+)?def)\s+([A-Za-z_]\w*)", line)
+            if symbol is not None and len(symbol.group(1)) >= 4:
+                names.add(symbol.group(1))
+    return names
+
+
+def _source_modules(source_paths: list[Path]) -> set[str]:
+    """Translate Python source paths into dotted import names, including src-layout projects."""
+
+    modules: set[str] = set()
+    for source in source_paths:
+        if source.suffix != ".py":
+            continue
+        parts = source.with_suffix("").parts
+        if parts[:1] == ("src",):
+            parts = parts[1:]
+        if parts[-1:] == ("__init__",):
+            parts = parts[:-1]
+        if len(parts) >= 2:
+            modules.add(".".join(parts))
+    return modules
+
+
+def _dependency_score(
+    repository: Path,
+    test_path: Path,
+    modules: set[str],
+    changed_symbols: set[str],
+) -> int:
+    """Score static imports/references only; never execute test code during planning."""
+
+    path = repository / test_path
+    try:
+        if path.is_symlink() or path.stat().st_size > _MAX_DEPENDENCY_SCAN_BYTES:
+            return 0
+        source = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return 0
+    # Parsing every repository test is expensive; skip files that cannot mention a
+    # relevant module or changed symbol. A syntax error falls back to path scoring.
+    if not any(module in source for module in modules) and not any(
+        symbol in source for symbol in changed_symbols
+    ):
+        return 0
+    try:
+        tree = ast.parse(source, filename=test_path.as_posix())
+    except (SyntaxError, RecursionError, ValueError):
+        return 0
+    imported_modules: set[str] = set()
+    imported_names: set[str] = set()
+    referenced_names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported_modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            imported_modules.add(node.module)
+            imported_names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.Name):
+            referenced_names.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            referenced_names.add(node.attr)
+    exact = any(module in imported_modules for module in modules)
+    package = any(
+        module.startswith(imported + ".") and "." in imported
+        for module in modules for imported in imported_modules
+    )
+    symbol_imports = changed_symbols & imported_names
+    symbol_references = changed_symbols & referenced_names
+    return (
+        100 * int(exact)
+        + 15 * int(package)
+        + 60 * bool(symbol_imports)
+        + 20 * bool(symbol_references)
+    )
+
+
 def _repository_test_files(repository: Path, repo: str) -> list[Path]:
     """Enumerate existing Python tests in supported repositories, keeping the order sorted for reproducibility."""
 
@@ -207,6 +321,7 @@ def _repository_test_files(repository: Path, repo: str) -> list[Path]:
             if path.is_file() and (
                 path.name.startswith("test_")
                 or path.name.endswith("_test.py")
+                or (repo == "django/django" and path.name == "tests.py")
                 or root_name == "testing"
             ):
                 candidates.add(path.relative_to(repository))
@@ -223,8 +338,10 @@ def _select_test_files(
     source_paths: list[Path],
     *,
     repo: str,
+    repository: Path | None = None,
+    changed_symbols: set[str] | None = None,
 ) -> tuple[Path, Path | None] | None:
-    """Select a target file and a different adjacent regression file based on the modified paths."""
+    """Prefer direct test dependencies, then retain deterministic path-based fallback."""
 
     ignored = {
         "__init__",
@@ -257,7 +374,7 @@ def _select_test_files(
                     without_version = token.rstrip("0123456789")
                     if len(without_version) >= 3:
                         tokens.add(without_version)
-    if not tokens:
+    if not tokens and not changed_symbols:
         return None
 
     if repo == "django/django":
@@ -270,19 +387,38 @@ def _select_test_files(
         if preferred_files:
             test_files = preferred_files
 
+    modules = _source_modules(source_paths)
+    dependency_scores = (
+        {
+            path: _dependency_score(repository, path, modules, changed_symbols or set())
+            for path in test_files
+        }
+        if repository is not None and (modules or changed_symbols)
+        else {}
+    )
+
     def score(path: Path) -> tuple[int, int]:
         text = path.with_suffix("").as_posix().lower()
         matched = sum(1 for token in tokens if token in text)
         exact_stem = int(any(path.stem == f"test_{token}" for token in tokens))
+        symbol_stem = int(any(
+            symbol.lower() in path.stem.lower() for symbol in changed_symbols or ()
+        ))
         # On ties prefer shorter, more specific paths; finally use string order to
         # eliminate filesystem differences.
-        return (exact_stem * 100 + matched * 10, -len(path.parts))
+        # A named changed class/function is more specific than an exact match for a
+        # generic package segment such as "forms" or "fields".
+        return (symbol_stem * 150 + exact_stem * 100 + matched * 10, -len(path.parts))
 
-    target = max(test_files, key=score, default=None)
-    if target is None or score(target)[0] <= 0:
+    target = max(
+        test_files,
+        key=lambda path: (dependency_scores.get(path, 0), *score(path)),
+        default=None,
+    )
+    if target is None or not (dependency_scores.get(target, 0) or score(target)[0]):
         return None
 
-    def adjacent_score(path: Path) -> tuple[int, int, int, int]:
+    def adjacent_score(path: Path) -> tuple[int, int, int, int, int]:
         common_depth = 0
         for left, right in zip(path.parts, target.parts):
             if left != right:
@@ -290,6 +426,7 @@ def _select_test_files(
             common_depth += 1
         relevance, compactness = score(path)
         return (
+            dependency_scores.get(path, 0),
             int(path.parent == target.parent),
             common_depth,
             relevance,

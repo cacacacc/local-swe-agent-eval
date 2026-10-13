@@ -110,6 +110,8 @@ def build_verification_phase_prompt(
     candidate_patch: str = "",
     scheduled_test_evidence: str = "",
     focused_new_regression: bool = False,
+    focused_syntax_error: bool = False,
+    syntax_preflight_evidence: str = "",
     handoff_text: str = "",
 ) -> str:
     """Inject current patch, test evidence, and cumulative stage state into the repair prompt."""
@@ -134,7 +136,13 @@ def build_verification_phase_prompt(
         else ""
     )
     focus_block = ""
-    if focused_new_regression:
+    if focused_syntax_error:
+        focus_block = (
+            "Focused syntax repair: the parent Docker preflight proved a new Python "
+            "syntax error relative to the baseline. Only Read and Edit are available. "
+            "Read the reported source location, then correct that syntax before other work.\n"
+        )
+    elif focused_new_regression:
         focus_block = (
             "Focused repair mode: the scheduler proved at least one new_regression.\n"
             "- Only Read and Edit are available. Work only from the failing command/"
@@ -147,8 +155,13 @@ def build_verification_phase_prompt(
     api_instruction = (
         "- Do not search for other API usages in focused repair mode; the failing "
         "evidence and changed files are the complete scope.\n"
-        if focused_new_regression
+        if focused_new_regression or focused_syntax_error
         else "- Search for an existing API usage before accepting unfamiliar calling syntax.\n"
+    )
+    syntax_block = (
+        "Docker Python syntax preflight\n<syntax_preflight>\n"
+        f"{syntax_preflight_evidence.rstrip()}\n</syntax_preflight>\n"
+        if syntax_preflight_evidence else ""
     )
     return (
         f"{base_prompt.rstrip()}\n\n"
@@ -156,6 +169,7 @@ def build_verification_phase_prompt(
         f"- You have at most {verification_turns} turns. Do not restart broad exploration.\n"
         f"{patch_block}"
         f"{test_block}"
+        f"{syntax_block}"
         f"{handoff_block}"
         f"{focus_block}"
         "- The patch above is authoritative even if plain `git diff` is empty because an "

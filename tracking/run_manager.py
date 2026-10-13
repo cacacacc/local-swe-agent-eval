@@ -129,6 +129,13 @@ class RunSession:
             raise RunArtifactError(f"run has already been finalized: {self.path}")
         self._write_json("handoff.json", snapshot)
 
+    def write_candidate_checkpoint(self, patch: str) -> None:
+        """Keep the pre-verification source candidate outside the mutable task worktree."""
+
+        if self._finished:
+            raise RunArtifactError(f"run has already been finalized: {self.path}")
+        self._write_text("candidate_patch.diff", patch)
+
     def finalize(
         self,
         *,

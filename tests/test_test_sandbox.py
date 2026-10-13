@@ -7,10 +7,36 @@ import pytest
 
 from agent.test_sandbox import (
     TestSandboxError as SandboxError,
+    VisibleTestResult,
     VisibleTestSandbox,
     image_candidates,
     truncate_output,
 )
+
+
+def test_syntax_preflight_uses_offline_sandbox_command(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Python syntax checks must pass argv through the existing isolated Docker runner."""
+
+    sandbox = VisibleTestSandbox(timeout_seconds=60, max_output_chars=12000)
+    seen = []
+
+    def fake_run(repository, **kwargs):
+        seen.append(kwargs)
+        return VisibleTestResult(
+            exit_code=0, output="", image="swebench/example:latest",
+            timed_out=False, command_started=True,
+        )
+
+    monkeypatch.setattr(sandbox, "run", fake_run)
+    sandbox.syntax_preflight(
+        tmp_path, instance_id="owner__project-1", base_commit="abcdef0",
+        paths=("src/widget.py",), apply_patch=True, timeout_seconds=30,
+    )
+    assert seen[0]["command"] == ("python", "-m", "py_compile", "src/widget.py")
+    assert seen[0]["apply_patch"] is True
+    assert seen[0]["timeout_seconds"] == 30
 
 
 def test_published_image_name_matches_swebench_convention() -> None:

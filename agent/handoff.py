@@ -134,6 +134,20 @@ class HandoffLedger:
 
         return {"schema_version": 1, "history": self.history, "current": self.current}
 
+    def record_selection(self, stage: str, *, patch: str, reason: str) -> None:
+        """Record a parent-selected deliverable without pretending another test ran."""
+
+        self._update_patch(patch)
+        self.current["last_stage"] = stage
+        self.current["next_action"] = "The parent selected the saved source candidate for delivery."
+        self.history.append({
+            "sequence": len(self.history) + 1,
+            "stage": stage,
+            "kind": "parent_selection",
+            "patch_sha256": self.current["patch"]["sha256"],
+            "reason": reason,
+        })
+
     def render_for_prompt(self, *, maximum_chars: int = 5000) -> str:
         """Prioritize current patch and test facts over older stage notes in a bounded prompt."""
 

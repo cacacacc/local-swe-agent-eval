@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 
 from agent.claude_runner import ClaudeCodeResult
+from agent.handoff import HandoffLedger
 from agent.test_plan import TestPlanRequest as StructuredTestPlanRequest
 from agent.test_sandbox import VisibleTestResult
 from benchmark.task import SWEbenchTask
@@ -17,7 +18,9 @@ from scripts.run_claude import (
     _build_recovery_source_context,
     _execute_scheduled_test,
     _scheduled_test_result,
+    _select_source_checkpoint,
     _should_run_verification,
+    _syntax_preflight,
     _validate_recovery_read_edit_gate,
     _verification_policy,
     run_claude_task,
@@ -66,6 +69,186 @@ def _result(
             "token_usage": {},
         },
     )
+
+
+def test_source_checkpoint_restores_erased_verification_patch() -> None:
+    """A later empty or test-only diff must not discard the earlier product-source candidate."""
+
+    source_patch = (
+        "diff --git a/src/widget.py b/src/widget.py\n"
+        "--- a/src/widget.py\n+++ b/src/widget.py\n@@ -1 +1 @@\n-value = 1\n+value = 2\n"
+    )
+    test_patch = (
+        "diff --git a/tests/test_widget.py b/tests/test_widget.py\n"
+        "--- a/tests/test_widget.py\n+++ b/tests/test_widget.py\n@@ -1 +1 @@\n-old\n+new\n"
+    )
+
+    class FakeSession:
+        """Capture the auditable handoff without writing run artifacts."""
+
+        def __init__(self) -> None:
+            self.snapshot = None
+
+        def write_handoff(self, snapshot):
+            self.snapshot = snapshot
+
+    session = FakeSession()
+    handoff = HandoffLedger()
+    selected, result = _select_source_checkpoint(
+        test_patch, source_patch, _result(), handoff, session
+    )
+    assert selected == source_patch
+    assert result.metrics["candidate_restored"] is True
+    assert result.events[-1]["event_type"] == "candidate_restored"
+    assert session.snapshot["history"][-1]["kind"] == "parent_selection"
+    assert _select_source_checkpoint(source_patch, source_patch, _result(), handoff, session)[0] == source_patch
+    broken_source = source_patch.replace("value = 2", "value = (")
+    selected_broken, _ = _select_source_checkpoint(
+        broken_source, source_patch, _result(), handoff, session,
+        restore_broken_syntax=True,
+    )
+    assert selected_broken == source_patch
+
+
+def test_syntax_preflight_requires_new_error_against_baseline(tmp_path: Path) -> None:
+    """Only a candidate-only SyntaxError in a real changed source file triggers focused repair."""
+
+    source = tmp_path / "src" / "widget.py"
+    source.parent.mkdir()
+    source.write_text("def broken(:\n", encoding="utf-8")
+    patch = (
+        "diff --git a/src/widget.py b/src/widget.py\n"
+        "--- a/src/widget.py\n+++ b/src/widget.py\n@@ -1 +1 @@\n-pass\n+def broken(:\n"
+    )
+    calls = []
+
+    class FakeSandbox:
+        """Model candidate and baseline compilation with no actual Docker invocation."""
+
+        timeout_seconds = 120
+
+        def syntax_preflight(self, repository, **kwargs):
+            calls.append(kwargs)
+            return VisibleTestResult(
+                exit_code=1 if kwargs["apply_patch"] else 0,
+                output="SyntaxError: invalid syntax" if kwargs["apply_patch"] else "",
+                image="swebench/example:latest",
+                timed_out=False,
+                command_started=True,
+            )
+
+    task = SWEbenchTask(
+        instance_id="owner__project-1", repo="owner/project", base_commit="abcdef0",
+        problem_statement="Fix widget behavior.",
+    )
+    evidence = _syntax_preflight(
+        tmp_path, task=task, base_commit="abcdef0", patch=patch,
+        sandbox=FakeSandbox(), task_budget=_TaskBudget.start(0),
+    )
+    assert evidence.new_syntax_error
+    assert evidence.paths == ("src/widget.py",)
+    assert [call["apply_patch"] for call in calls] == [True, False]
+
+    class BaselineBroken(FakeSandbox):
+        """A pre-existing syntax failure must remain diagnostic rather than focused."""
+
+        def syntax_preflight(self, repository, **kwargs):
+            return VisibleTestResult(
+                exit_code=1, output="SyntaxError: invalid syntax",
+                image="swebench/example:latest", timed_out=False, command_started=True,
+            )
+
+    inherited = _syntax_preflight(
+        tmp_path, task=task, base_commit="abcdef0", patch=patch,
+        sandbox=BaselineBroken(), task_budget=_TaskBudget.start(0),
+    )
+    assert inherited.status == "unavailable"
+
+
+def test_docker_syntax_error_enters_focused_verification(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """A candidate-only syntax error reaches a Read/Edit verification before delivery."""
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    source = repository / "src" / "widget.py"
+    source.parent.mkdir()
+    source.write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(repository), "add", "src/widget.py"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "-c", "user.name=Test",
+         "-c", "user.email=test@example.invalid", "commit", "-qm", "base"],
+        check=True,
+    )
+    base_commit = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    runner_options = []
+    prompts = []
+
+    class FakeAgent:
+        """Implementation introduces a parse error and focused Verification removes it."""
+
+        def run(self, worktree, prompt):
+            prompts.append(prompt)
+            source.write_text(
+                "value = 2\n" if "Focused syntax repair" in prompt else "value = (\n",
+                encoding="utf-8",
+            )
+            return _result()
+
+    class FakeSandbox:
+        """Return candidate-only compilation failure without a visible test plan."""
+
+        timeout_seconds = 120
+
+        def __init__(self, **kwargs):
+            pass
+
+        def resolve_image(self, instance_id):
+            return "swebench/example:latest"
+
+        def image_digest(self, image):
+            return "sha256:test"
+
+        def syntax_preflight(self, repository, **kwargs):
+            broken = kwargs["apply_patch"] and source.read_text(encoding="utf-8") == "value = (\n"
+            return VisibleTestResult(
+                exit_code=1 if broken else 0,
+                output="SyntaxError: '(' was never closed" if broken else "",
+                image="swebench/example:latest", timed_out=False, command_started=True,
+            )
+
+    def fake_runner(*args, **kwargs):
+        """Remember the CLI tool policy selected for each model phase."""
+
+        runner_options.append(kwargs)
+        return FakeAgent()
+
+    monkeypatch.setattr("scripts.run_claude._runner", fake_runner)
+    monkeypatch.setattr("scripts.run_claude.VisibleTestSandbox", FakeSandbox)
+    monkeypatch.setattr(
+        "scripts.run_claude.RuntimeFingerprintCollector.collect",
+        lambda self: {"schema_version": 1},
+    )
+    task = SWEbenchTask(
+        instance_id="owner__project-syntax", repo="owner/project",
+        base_commit=base_commit, problem_statement="Fix widget behavior.",
+    )
+    run_path = run_claude_task(
+        task, repository,
+        ExperimentConfig.load(PROJECT_ROOT / "configs" / "dev_v2.yaml"),
+        tmp_path / "runs", base_url="http://localhost:11434",
+        workspace_base_commit=base_commit,
+    )
+    result = json.loads((run_path / "result.json").read_text(encoding="utf-8"))
+    assert runner_options[1]["available_tools"] == ("Read", "Edit")
+    assert "Focused syntax repair" in prompts[1]
+    assert result["metrics"]["phases"]["syntax_preflight_initial"]["syntax_preflight_status"] == "new_syntax_error"
+    assert "value = 2" in (run_path / "patch.diff").read_text(encoding="utf-8")
 
 
 def test_patch_gate_rejects_generic_success_with_empty_diff() -> None:
@@ -965,6 +1148,7 @@ def test_nonempty_patch_reaches_verification_when_parent_plan_is_missing(
     assert "verification" in result["metrics"]["phases"]
     assert "test_protocol_gate" not in result["metrics"]["phases"]
     assert result["metrics"]["visible_test_missing"] == 2
+    assert "value = 2" in (run_path / "candidate_patch.diff").read_text(encoding="utf-8")
     handoff = json.loads((run_path / "handoff.json").read_text(encoding="utf-8"))
     assert [entry["stage"] for entry in handoff["history"]] == [
         "implementation", "scheduled_test_initial", "verification", "scheduled_test_final"

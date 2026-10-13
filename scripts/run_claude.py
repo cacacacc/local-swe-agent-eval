@@ -45,7 +45,7 @@ from benchmark.swebench_loader import SWEbenchLoader
 from benchmark.task import SWEbenchTask
 from experiment.config import ExperimentConfig
 from experiment.runtime_fingerprint import RuntimeFingerprintCollector
-from tracking.run_manager import RunManager
+from tracking.run_manager import RunManager, RunSession
 
 
 _SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -198,6 +198,41 @@ def _patch_modifies_existing_source(patch: str) -> bool:
     return bool(_existing_source_patch_projection(patch))
 
 
+def _select_source_checkpoint(
+    final_patch: str,
+    checkpoint_patch: str,
+    result: ClaudeCodeResult,
+    handoff: HandoffLedger,
+    session: RunSession,
+    *,
+    restore_broken_syntax: bool = False,
+) -> tuple[str, ClaudeCodeResult]:
+    """Deliver a saved source candidate if later work erased it or introduced syntax errors."""
+
+    if not checkpoint_patch or (
+        _patch_modifies_existing_source(final_patch) and not restore_broken_syntax
+    ):
+        return final_patch, result
+    # The saved patch was captured before Verification, outside the worktree. Selecting
+    # it does not rewrite the model's files or conceal the final worktree trajectory.
+    reason = (
+        "Verification introduced a Docker-confirmed Python syntax error"
+        if restore_broken_syntax
+        else "Verification left no existing product-source modification"
+    )
+    handoff.record_selection("candidate_restored", patch=checkpoint_patch, reason=reason)
+    session.write_handoff(handoff.snapshot())
+    metrics = dict(result.metrics)
+    metrics["candidate_restored"] = True
+    events = tuple(result.events) + ({
+        "sequence": len(result.events) + 1,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "event_type": "candidate_restored",
+        "details": {"reason": reason},
+    },)
+    return checkpoint_patch, replace(result, metrics=metrics, events=events)
+
+
 def _existing_source_patch_projection(patch: str) -> str:
     """Keep only diffs to existing product source code, for comparing real implementation changes before and after the gate."""
 
@@ -220,6 +255,106 @@ def _existing_source_patch_projection(patch: str) -> str:
         if not is_test and path.suffix.lower() in _SOURCE_SUFFIXES and "@@" in section:
             accepted.append(section)
     return "".join(accepted)
+
+
+@dataclass(frozen=True, slots=True)
+class SyntaxPreflightEvidence:
+    """Report whether Docker proved a newly introduced Python syntax error."""
+
+    status: str
+    paths: tuple[str, ...] = ()
+    output: str = ""
+    duration_seconds: float = 0.0
+
+    @property
+    def new_syntax_error(self) -> bool:
+        """Distinguish an introduced SyntaxError from baseline or runner failures."""
+
+        return self.status == "new_syntax_error"
+
+    def prompt_text(self) -> str:
+        """Give the model only bounded, parent-verified syntax evidence."""
+
+        return (
+            f"Docker syntax preflight: {self.status}; files={', '.join(self.paths)}\n"
+            f"{self.output}"
+        )
+
+
+def _syntax_preflight(
+    repository: Path,
+    *,
+    task: SWEbenchTask,
+    base_commit: str,
+    patch: str,
+    sandbox: VisibleTestSandbox,
+    task_budget: _TaskBudget,
+) -> SyntaxPreflightEvidence:
+    """Compile existing changed Python source in Docker and compare errors with baseline."""
+
+    paths: list[str] = []
+    for section in re.split(
+        r"(?=^diff --git )", _existing_source_patch_projection(patch), flags=re.MULTILINE
+    ):
+        match = re.match(r"diff --git a/(.+?) b/(.+?)\n", section)
+        if match is None:
+            continue
+        name = match.group(2)
+        path = Path(name)
+        if (
+            path.suffix != ".py"
+            or path.is_absolute()
+            or ".." in path.parts
+            or not (repository / path).is_file()
+        ):
+            continue
+        if name not in paths:
+            paths.append(name)
+    if not paths:
+        return SyntaxPreflightEvidence("not_applicable")
+    # A large generated patch should not turn a cheap preflight into an unbounded
+    # Docker invocation. The regular test phase still covers files beyond this cap.
+    paths = paths[:32]
+    checker = getattr(sandbox, "syntax_preflight", None)
+    if checker is None:
+        return SyntaxPreflightEvidence("unavailable", tuple(paths))
+    started = time.monotonic()
+    try:
+        candidate = checker(
+            repository,
+            instance_id=task.instance_id,
+            base_commit=base_commit,
+            paths=tuple(paths),
+            apply_patch=True,
+            timeout_seconds=task_budget.limit(min(60, sandbox.timeout_seconds)),
+        )
+        if not candidate.evidence_valid or candidate.timed_out:
+            status = "unavailable"
+        elif candidate.exit_code == 0:
+            status = "passed"
+        elif re.search(r"(?:SyntaxError|IndentationError|TabError):", candidate.output):
+            baseline = checker(
+                repository,
+                instance_id=task.instance_id,
+                base_commit=base_commit,
+                paths=tuple(paths),
+                apply_patch=False,
+                timeout_seconds=task_budget.limit(min(60, sandbox.timeout_seconds)),
+            )
+            status = (
+                "new_syntax_error"
+                if baseline.evidence_valid and not baseline.timed_out and baseline.exit_code == 0
+                else "unavailable"
+            )
+        else:
+            status = "unavailable"
+        output = truncate_output(candidate.output, 2400)
+    except (TestSandboxError, ValueError) as error:
+        status = "unavailable"
+        output = str(error)[:2400]
+    return SyntaxPreflightEvidence(
+        status, tuple(paths), output, time.monotonic() - started
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1330,6 +1465,9 @@ def run_claude_task(
     test_cache: dict[_TestCacheKey, VisibleTestResult] = {}
     phases: list[tuple[str, ClaudeCodeResult]] = []
     handoff = HandoffLedger()
+    candidate_checkpoint = ""
+    candidate_checkpoint_syntax_valid = False
+    final_syntax_error = False
 
     def append_model_phase(name: str, phase_result: ClaudeCodeResult) -> None:
         """Save model output and the actual worktree patch before another stage can edit it."""
@@ -1366,6 +1504,36 @@ def run_claude_task(
             ],
         )
         session.write_handoff(handoff.snapshot())
+
+    def append_syntax_phase(name: str, patch: str) -> SyntaxPreflightEvidence:
+        """Record Docker syntax evidence without treating it as a model or test turn."""
+
+        evidence = _syntax_preflight(
+            repository,
+            task=task,
+            base_commit=patch_base_commit,
+            patch=patch,
+            sandbox=test_sandbox,
+            task_budget=task_budget,
+        )
+        if evidence.status not in {"not_applicable", "unavailable"}:
+            phases.append((name, ClaudeCodeResult(
+                exit_code=0,
+                agent_log="",
+                test_output=evidence.prompt_text(),
+                events=({
+                    "event_type": "syntax_preflight",
+                    "details": {"status": evidence.status, "paths": list(evidence.paths)},
+                },),
+                timed_out=False,
+                metrics={
+                    "agent_turns": 0,
+                    "tool_calls": 0,
+                    "syntax_preflight_status": evidence.status,
+                    "duration_seconds": evidence.duration_seconds,
+                },
+            )))
+        return evidence
     try:
         if config.agent.verification_turns:
             implementation_turns = (
@@ -1515,6 +1683,9 @@ def run_claude_task(
 
                 consume_test_plan(repository)
                 recovered_patch = session.collect_patch(repository)
+                recovery_syntax = append_syntax_phase(
+                    "syntax_preflight_recovery", recovered_patch
+                )
                 repair_budget_available = regression_repair_turns > 0
                 if (
                     not recovery_patch_valid
@@ -1522,13 +1693,26 @@ def run_claude_task(
                 ):
                     # With no validated source patch there is no regression to repair, so
                     # reuse those turns for one final implementation chance.
-                    last_chance_prompt = build_recovery_implementation_prompt(
-                        prompt,
-                        recovery_turns=regression_repair_turns,
-                        max_file_read_lines=config.agent.max_file_read_lines,
-                        max_tool_output_chars=config.agent.max_tool_output_chars,
-                        implementation_handoff=handoff.render_for_prompt(),
-                        last_chance=True,
+                    last_chance_prompt = (
+                        build_verification_phase_prompt(
+                            prompt,
+                            verification_turns=regression_repair_turns,
+                            max_file_read_lines=config.agent.max_file_read_lines,
+                            max_tool_output_chars=config.agent.max_tool_output_chars,
+                            candidate_patch=truncate_output(recovered_patch, config.agent.max_tool_output_chars),
+                            syntax_preflight_evidence=recovery_syntax.prompt_text(),
+                            focused_syntax_error=True,
+                            handoff_text=handoff.render_for_prompt(),
+                        )
+                        if recovery_syntax.new_syntax_error
+                        else build_recovery_implementation_prompt(
+                            prompt,
+                            recovery_turns=regression_repair_turns,
+                            max_file_read_lines=config.agent.max_file_read_lines,
+                            max_tool_output_chars=config.agent.max_tool_output_chars,
+                            implementation_handoff=handoff.render_for_prompt(),
+                            last_chance=True,
+                        )
                     )
                     last_chance_result = _runner(
                         config,
@@ -1538,6 +1722,10 @@ def run_claude_task(
                         ),
                         base_url=base_url,
                         allow_bash=False,
+                        **(
+                            {"available_tools": ("Read", "Edit")}
+                            if recovery_syntax.new_syntax_error else {}
+                        ),
                     ).run(repository, last_chance_prompt)
                     append_model_phase("recovery_last_chance", last_chance_result)
                     task_budget.ensure_remaining()
@@ -1545,6 +1733,10 @@ def run_claude_task(
                     repair_budget_available = False
                     consume_test_plan(repository)
                     recovered_patch = session.collect_patch(repository)
+
+                recovery_syntax = append_syntax_phase(
+                    "syntax_preflight_recovery_final", recovered_patch
+                )
 
                 recovery_request = generate_repository_test_plan(
                     repository,
@@ -1570,7 +1762,7 @@ def run_claude_task(
                 append_test_phase("scheduled_test_recovery", recovery_evidence, recovered_patch)
                 task_budget.ensure_remaining()
 
-                if recovery_evidence.has_new_regression and repair_budget_available:
+                if (recovery_evidence.has_new_regression or recovery_syntax.new_syntax_error) and repair_budget_available:
                     # After Recovery produces a patch it must also close the "test→repair→retest" loop. Here we
                     # reuse the ordinary Verification focused prompt and, at the CLI layer, allow only
                     # Read/Edit so the limited 3 turns do not fall back into broad search.
@@ -1587,7 +1779,11 @@ def run_claude_task(
                             recovery_evidence.repair_prompt_text(),
                             config.agent.max_tool_output_chars,
                         ),
-                        focused_new_regression=True,
+                        focused_new_regression=recovery_evidence.has_new_regression,
+                        focused_syntax_error=recovery_syntax.new_syntax_error,
+                        syntax_preflight_evidence=(
+                            recovery_syntax.prompt_text() if recovery_syntax.new_syntax_error else ""
+                        ),
                         handoff_text=handoff.render_for_prompt(),
                     )
                     repair_result = _runner(
@@ -1606,6 +1802,7 @@ def run_claude_task(
 
                     consume_test_plan(repository)
                     recovered_patch = session.collect_patch(repository)
+                    append_syntax_phase("syntax_preflight_recovery_post_repair", recovered_patch)
                     final_recovery_request = generate_repository_test_plan(
                         repository,
                         repo=task.repo,
@@ -1637,10 +1834,19 @@ def run_claude_task(
                 # a first-round Implementation failure, however, may be overridden by a successful Recovery.
                 result = replace(result, exit_code=recovery_result.exit_code)
             else:
+                if _patch_modifies_existing_source(candidate_patch):
+                    # Verification can edit freely, but must not erase the last real
+                    # source candidate without leaving another source change.
+                    candidate_checkpoint = candidate_patch
+                    session.write_candidate_checkpoint(candidate_patch)
                 candidate_patch_for_prompt = truncate_output(
                     candidate_patch,
                     config.agent.max_tool_output_chars,
                 )
+                initial_syntax = append_syntax_phase(
+                    "syntax_preflight_initial", candidate_patch
+                )
+                candidate_checkpoint_syntax_valid = initial_syntax.status == "passed"
                 parent_request = generate_repository_test_plan(
                     repository,
                     repo=task.repo,
@@ -1694,11 +1900,18 @@ def run_claude_task(
                         config.agent.max_tool_output_chars,
                     ),
                     focused_new_regression=initial_evidence.has_new_regression,
+                    focused_syntax_error=initial_syntax.new_syntax_error,
+                    syntax_preflight_evidence=(
+                        initial_syntax.prompt_text() if initial_syntax.new_syntax_error else ""
+                    ),
                     handoff_text=handoff.render_for_prompt(),
                 )
                 verification_phase, verification_available_tools = (
                     _verification_policy(initial_evidence)
                 )
+                if initial_syntax.new_syntax_error:
+                    verification_phase = "verification_syntax_repair"
+                    verification_available_tools = ("Read", "Edit")
                 # Start verification whenever the candidate patch is non-empty. Bash is disabled at the CLI layer so the model cannot
                 # fall back to running tests in the host environment when the parent's tests are missing or fail; when a new regression is found,
                 # Grep/Glob are disabled too, confining the session to the failure evidence and the modified files.
@@ -1719,6 +1932,8 @@ def run_claude_task(
                 # keeping commands consistent with the actual modified paths and independent of model-controlled files.
                 consume_test_plan(repository)
                 final_patch = session.collect_patch(repository)
+                final_syntax = append_syntax_phase("syntax_preflight_final", final_patch)
+                final_syntax_error = final_syntax.new_syntax_error
                 final_request = generate_repository_test_plan(
                     repository,
                     repo=task.repo,
@@ -1744,7 +1959,7 @@ def run_claude_task(
                 task_budget.ensure_remaining()
 
                 final_model_result = verification_result
-                if final_evidence.has_new_regression and post_test_repair_turns > 0:
+                if (final_evidence.has_new_regression or final_syntax.new_syntax_error) and post_test_repair_turns > 0:
                     # Only a new regression after the main Verification may use this budget; a missing plan,
                     # inherent baseline failures, and incomparable output still only record evidence and do not trigger blind repair.
                     post_repair_prompt = build_verification_phase_prompt(
@@ -1760,7 +1975,11 @@ def run_claude_task(
                             final_evidence.repair_prompt_text(),
                             config.agent.max_tool_output_chars,
                         ),
-                        focused_new_regression=True,
+                        focused_new_regression=final_evidence.has_new_regression,
+                        focused_syntax_error=final_syntax.new_syntax_error,
+                        syntax_preflight_evidence=(
+                            final_syntax.prompt_text() if final_syntax.new_syntax_error else ""
+                        ),
                         handoff_text=handoff.render_for_prompt(),
                     )
                     post_repair_result = _runner(
@@ -1779,6 +1998,8 @@ def run_claude_task(
 
                     consume_test_plan(repository)
                     post_repair_patch = session.collect_patch(repository)
+                    post_repair_syntax = append_syntax_phase("syntax_preflight_post_repair", post_repair_patch)
+                    final_syntax_error = post_repair_syntax.new_syntax_error
                     post_repair_request = generate_repository_test_plan(
                         repository,
                         repo=task.repo,
@@ -1821,12 +2042,19 @@ def run_claude_task(
             append_model_phase("implementation", result)
             task_budget.ensure_remaining()
         patch = session.collect_patch(repository)
+        patch, result = _select_source_checkpoint(
+            patch, candidate_checkpoint, result, handoff, session,
+            restore_broken_syntax=(candidate_checkpoint_syntax_valid and final_syntax_error),
+        )
         result = _apply_patch_gate(result, patch)
     except TaskBudgetExhausted:
         # Total-budget exhaustion is an expected resource boundary and must not take the infrastructure-error branch; keeping the existing patch
         # lets the official harness still evaluate the candidate fix completed before the deadline.
         patch = session.collect_patch(repository)
-        result = _apply_patch_gate(_task_budget_result(phases), patch)
+        patch, result = _select_source_checkpoint(
+            patch, candidate_checkpoint, _task_budget_result(phases), handoff, session
+        )
+        result = _apply_patch_gate(result, patch)
     except Exception as error:
         # Whether the Agent or the patch collection fails, the metadata's running state must be finalized,
         # otherwise later analysis cannot distinguish "still running" from "exited on an infrastructure error".

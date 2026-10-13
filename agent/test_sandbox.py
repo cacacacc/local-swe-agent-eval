@@ -201,6 +201,29 @@ class VisibleTestSandbox:
             raise TestSandboxError(f"cannot inspect cached image {image}: {detail}")
         return digest
 
+    def syntax_preflight(
+        self,
+        repository: Path | str,
+        *,
+        instance_id: str,
+        base_commit: str,
+        paths: Sequence[str],
+        apply_patch: bool,
+        timeout_seconds: float,
+    ) -> VisibleTestResult:
+        """Compile changed Python source inside the same offline image used for tests."""
+
+        if not paths:
+            raise ValueError("syntax preflight requires at least one Python source path")
+        return self.run(
+            repository,
+            instance_id=instance_id,
+            base_commit=base_commit,
+            command=("python", "-m", "py_compile", *paths),
+            apply_patch=apply_patch,
+            timeout_seconds=timeout_seconds,
+        )
+
     def run(
         self,
         repository: Path | str,

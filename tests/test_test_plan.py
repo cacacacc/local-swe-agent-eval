@@ -164,6 +164,53 @@ def test_parent_uses_django_runner_and_dotted_labels(tmp_path: Path) -> None:
     )
 
 
+def test_django_specific_source_maps_to_correct_test_app(tmp_path: Path) -> None:
+    """Checks, server handling, and index references must not be trapped in adjacent Django apps."""
+
+    cases = (
+        ("django/contrib/admin/checks.py", "admin_checks", "admin_views"),
+        ("django/core/servers/basehttp.py", "servers", "builtin_server"),
+        ("django/db/backends/ddl_references.py", "indexes", "backends"),
+    )
+    for source, expected_app, wrong_app in cases:
+        for app in (expected_app, wrong_app):
+            test = tmp_path / "tests" / app / "tests.py"
+            test.parent.mkdir(parents=True, exist_ok=True)
+            test.write_text("def test_case(): pass\n", encoding="utf-8")
+        patch = (
+            f"diff --git a/{source} b/{source}\n"
+            f"--- a/{source}\n+++ b/{source}\n@@ -1 +1 @@\n-old\n+new\n"
+        )
+        request = generate_repository_test_plan(
+            tmp_path, repo="django/django", patch=patch,
+        )
+        assert request.target_argv[2].startswith(f"{expected_app}.")
+        assert request.regression_argv[2] == expected_app
+
+
+def test_issue_keyword_selects_relevant_existing_test_module(tmp_path: Path) -> None:
+    """A pickle edge case should select the existing pickle test without accepting a test command from the model."""
+
+    tests = tmp_path / "lib" / "matplotlib" / "tests"
+    tests.mkdir(parents=True)
+    (tests / "test_figure.py").write_text(
+        "from matplotlib.figure import Figure\n", encoding="utf-8"
+    )
+    (tests / "test_pickle.py").write_text(
+        "from matplotlib.figure import Figure\n", encoding="utf-8"
+    )
+    patch = (
+        "diff --git a/lib/matplotlib/figure.py b/lib/matplotlib/figure.py\n"
+        "--- a/lib/matplotlib/figure.py\n+++ b/lib/matplotlib/figure.py\n"
+        "@@ -1 +1 @@\n-old\n+new\n"
+    )
+    request = generate_repository_test_plan(
+        tmp_path, repo="matplotlib/matplotlib", patch=patch,
+        problem_statement="Figure fails to pickle after label alignment.",
+    )
+    assert request.target_argv[-1] == "lib/matplotlib/tests/test_pickle.py"
+
+
 def test_parent_uses_sympy_native_runner_without_pytest(tmp_path: Path) -> None:
     """The official SymPy image may not have pytest installed, so the parent must call the repository's own ``bin/test``."""
 

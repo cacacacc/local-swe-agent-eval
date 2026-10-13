@@ -231,8 +231,10 @@ Claude Code sessions, with deterministic parent-owned test planning between them
 1. The implementation session receives 30 turns to investigate the issue and
    produce a candidate patch.
 2. The parent maps modified product source to repository tests using static import
-   dependencies and changed class/function names, with deterministic path matching
-   as a fallback. Newly added reproduction tests are not eligible as the target.
+   dependencies, changed class/function names, and bounded words from the issue,
+   with deterministic path matching as a fallback. Specific Django paths such as
+   admin checks, server handling, and index references take precedence over broad
+   subsystem mappings. Newly added reproduction tests are not eligible as the target.
    It selects a target module plus a different adjacent regression module (or a
    Django test app) without asking another model session.
 3. The parent runs every command once on the unmodified instance image and once
@@ -265,6 +267,14 @@ earlier stage summaries; the next model stage receives a bounded summary. Test
 evidence is tied to the patch digest, so editing the patch marks earlier results
 pending until parent-owned tests run again. Model-reported findings are labeled
 unverified and never substitute for Docker test evidence.
+
+Implementation may submit one issue-derived assertion in `.agent-issue-repro.py`
+(at most 30 lines and 4 KiB) after making a source fix. The parent removes that
+control file before collecting any patch, saves it as `issue_reproduction.py` in
+the run artifact, and executes the same script on the baseline and candidate in
+the offline Docker image using parent-owned `python -c` argv. Its comparison is
+diagnostic, not a correctness gate; a still-failing assertion can use the reserved
+focused repair turns. The script never becomes part of the SWE-bench prediction.
 
 Project tests run through the cached official instance image rather than the
 orchestration repository's Python environment. Parent-scheduled calls apply the

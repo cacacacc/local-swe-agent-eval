@@ -29,6 +29,9 @@ _SAFE_PATH_COMPONENT = re.compile(r"[^A-Za-z0-9_.-]+")
 # changes. Excluding them via Git pathspec rather than deleting files preserves the failure scene and avoids feeding run
 # artifacts into the official evaluation.
 _PATCH_EXCLUDE_PATHS = (
+    # The model's bounded issue reproduction is executed separately by the parent
+    # and must never become part of the SWE-bench prediction, even if model cleanup fails.
+    ":(exclude).agent-issue-repro.py",
     ":(exclude,glob)**/.venv/**",
     ":(exclude,glob)**/.test-venv/**",
     ":(exclude,glob)**/venv/**",
@@ -135,6 +138,13 @@ class RunSession:
         if self._finished:
             raise RunArtifactError(f"run has already been finalized: {self.path}")
         self._write_text("candidate_patch.diff", patch)
+
+    def write_issue_reproduction(self, code: str) -> None:
+        """Preserve the accepted issue reproduction outside the candidate worktree."""
+
+        if self._finished:
+            raise RunArtifactError(f"run has already been finalized: {self.path}")
+        self._write_text("issue_reproduction.py", code)
 
     def finalize(
         self,

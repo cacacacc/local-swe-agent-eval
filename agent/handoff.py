@@ -17,6 +17,7 @@ class HandoffLedger:
         self.current: dict[str, Any] = {
             "patch": {"sha256": None, "status": "absent", "files": []},
             "test": {"status": "not_run", "patch_sha256": None, "comparisons": []},
+            "reproduction": {"status": "not_run", "patch_sha256": None},
             "last_stage": None,
             "next_action": "Implement a source change.",
         }
@@ -47,6 +48,10 @@ class HandoffLedger:
                 "status": "pending" if digest else "not_run",
                 "patch_sha256": digest,
                 "comparisons": [],
+            }
+            self.current["reproduction"] = {
+                "status": "pending" if digest else "not_run",
+                "patch_sha256": digest,
             }
 
     def record_model(
@@ -148,6 +153,23 @@ class HandoffLedger:
             "reason": reason,
         })
 
+    def record_reproduction(self, stage: str, *, patch: str, status: str) -> None:
+        """Bind a Docker reproduction comparison to exactly the patch it exercised."""
+
+        self._update_patch(patch)
+        self.current["reproduction"] = {
+            "status": status,
+            "patch_sha256": self.current["patch"]["sha256"],
+        }
+        self.current["last_stage"] = stage
+        self.history.append({
+            "sequence": len(self.history) + 1,
+            "stage": stage,
+            "kind": "parent_reproduction",
+            "patch_sha256": self.current["patch"]["sha256"],
+            "status": status,
+        })
+
     def render_for_prompt(self, *, maximum_chars: int = 5000) -> str:
         """Prioritize current patch and test facts over older stage notes in a bounded prompt."""
 
@@ -159,6 +181,7 @@ class HandoffLedger:
             "Parent-maintained cumulative handoff (model notes are unverified):",
             f"Current patch: {patch['status']}; sha256={patch['sha256'] or 'none'}; files={', '.join(patch['files']) or 'none'}",
             f"Current patch test: {test['status']}; plan={test.get('plan_status', 'not_run')}",
+            f"Current issue reproduction: {self.current['reproduction']['status']}",
         ]
         for item in test["comparisons"]:
             lines.append(
@@ -169,7 +192,7 @@ class HandoffLedger:
         rendered = "\n".join(lines)
         if len(rendered) > maximum_chars:
             # Drop individual comparisons before core patch identity and test classification.
-            lines = lines[:3] + [lines[-1]]
+            lines = lines[:4] + [lines[-1]]
             rendered = "\n".join(lines)
         for event in reversed(self.history[-3:]):
             addition = f"\nPrior stage {event['sequence']}: {event['stage']} ({event['kind']})"

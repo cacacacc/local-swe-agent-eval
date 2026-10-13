@@ -6,6 +6,7 @@ import subprocess
 
 from agent.claude_runner import ClaudeCodeResult
 from agent.handoff import HandoffLedger
+from agent.issue_reproduction import REPRODUCTION_FILENAME
 from agent.test_plan import TestPlanRequest as StructuredTestPlanRequest
 from agent.test_sandbox import VisibleTestResult
 from benchmark.task import SWEbenchTask
@@ -249,6 +250,107 @@ def test_docker_syntax_error_enters_focused_verification(
     assert "Focused syntax repair" in prompts[1]
     assert result["metrics"]["phases"]["syntax_preflight_initial"]["syntax_preflight_status"] == "new_syntax_error"
     assert "value = 2" in (run_path / "patch.diff").read_text(encoding="utf-8")
+
+
+def test_implementation_reproduction_is_run_and_excluded_from_patch(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """A model-written boundary assertion reaches Docker and Verification but not the prediction."""
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    source = repository / "src" / "widget.py"
+    source.parent.mkdir()
+    source.write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(repository), "add", "src/widget.py"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "-c", "user.name=Test",
+         "-c", "user.email=test@example.invalid", "commit", "-qm", "base"],
+        check=True,
+    )
+    base_commit = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    verification_prompts = []
+    docker_calls = []
+    runner_options = []
+
+    class FakeAgent:
+        """Submit a source fix and a small assertion, then inspect parent evidence."""
+
+        def run(self, worktree, prompt):
+            if "Current phase: implementation" in prompt:
+                source.write_text("value = 2\n", encoding="utf-8")
+                (repository / REPRODUCTION_FILENAME).write_text(
+                    "from src.widget import value\nassert value == 3\n",
+                    encoding="utf-8",
+                )
+            else:
+                verification_prompts.append(prompt)
+                if "Focused issue reproduction repair" in prompt:
+                    source.write_text("value = 3\n", encoding="utf-8")
+            return _result()
+
+    class FakeSandbox:
+        """Only the bounded issue script is available when no repository test maps."""
+
+        timeout_seconds = 120
+
+        def __init__(self, **kwargs):
+            pass
+
+        def resolve_image(self, instance_id):
+            return "swebench/example:latest"
+
+        def image_digest(self, image):
+            return "sha256:test"
+
+        def run(self, repository, **kwargs):
+            docker_calls.append(kwargs)
+            assert kwargs["command"][:2] == ("python", "-c")
+            fixed = kwargs["apply_patch"] and source.read_text(encoding="utf-8") == "value = 3\n"
+            return VisibleTestResult(
+                exit_code=0 if fixed else 1,
+                output="" if fixed else "AssertionError",
+                image="swebench/example:latest", timed_out=False,
+                command_started=True,
+            )
+
+    def fake_runner(*args, **kwargs):
+        """Record that a still-failing assertion receives the reserved Read/Edit turns."""
+
+        runner_options.append(kwargs)
+        return FakeAgent()
+
+    monkeypatch.setattr("scripts.run_claude._runner", fake_runner)
+    monkeypatch.setattr("scripts.run_claude.VisibleTestSandbox", FakeSandbox)
+    monkeypatch.setattr(
+        "scripts.run_claude.RuntimeFingerprintCollector.collect",
+        lambda self: {"schema_version": 1},
+    )
+    task = SWEbenchTask(
+        instance_id="owner__project-reproduction", repo="owner/project",
+        base_commit=base_commit, problem_statement="Value should equal two.",
+    )
+    run_path = run_claude_task(
+        task, repository,
+        ExperimentConfig.load(PROJECT_ROOT / "configs" / "dev_v2.yaml"),
+        tmp_path / "runs", base_url="http://localhost:11434",
+        workspace_base_commit=base_commit,
+    )
+    result = json.loads((run_path / "result.json").read_text(encoding="utf-8"))
+    assert len(docker_calls) == 6
+    assert "still_failing" in verification_prompts[0]
+    assert "assert value == 3" in verification_prompts[0]
+    assert "Focused issue reproduction repair" in verification_prompts[1]
+    assert runner_options[2]["available_tools"] == ("Read", "Edit")
+    assert result["metrics"]["phases"]["issue_reproduction_initial"]["issue_reproduction_status"] == "still_failing"
+    assert result["metrics"]["phases"]["issue_reproduction_post_repair"]["issue_reproduction_status"] == "reproduced_fix"
+    assert (run_path / "issue_reproduction.py").exists()
+    assert REPRODUCTION_FILENAME not in (run_path / "patch.diff").read_text(encoding="utf-8")
+    assert not (repository / REPRODUCTION_FILENAME).exists()
 
 
 def test_patch_gate_rejects_generic_success_with_empty_diff() -> None:

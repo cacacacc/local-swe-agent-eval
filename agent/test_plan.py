@@ -124,12 +124,14 @@ def generate_repository_test_plan(
     *,
     repo: str,
     patch: str,
+    problem_statement: str = "",
 ) -> TestPlanRequest:
     """Deterministically generate two test commands from the repository type, modified paths, and existing test layout.
 
     The generator excludes newly added tests and never reads the SWE-bench hidden
-    ``test_patch``. It ranks existing tests by static imports and changed symbols,
-    using filename proximity only when dependency evidence is unavailable;
+    ``test_patch``. It ranks existing tests by static imports, changed symbols, and
+    bounded issue keywords, using filename proximity only when stronger evidence is
+    unavailable;
     the regression test selects another test module in the same directory or with the
     deepest shared path, avoiding passing off the same command with ``-x`` removed as
     the adjacent regression. Django's regression command runs the target test app.
@@ -162,6 +164,7 @@ def generate_repository_test_plan(
         repo=repo,
         repository=repository_path,
         changed_symbols=_changed_symbols(patch, source_paths),
+        issue_keywords=_issue_keywords(problem_statement),
     )
     if selected is None:
         return TestPlanRequest(
@@ -239,20 +242,35 @@ def _changed_symbols(patch: str, source_paths: list[Path]) -> set[str]:
 
 
 def _source_modules(source_paths: list[Path]) -> set[str]:
-    """Translate Python source paths into dotted import names, including src-layout projects."""
+    """Translate Python source paths into dotted import names for src/lib layouts."""
 
     modules: set[str] = set()
     for source in source_paths:
         if source.suffix != ".py":
             continue
         parts = source.with_suffix("").parts
-        if parts[:1] == ("src",):
+        if parts[:1] in {("src",), ("lib",)}:
             parts = parts[1:]
         if parts[-1:] == ("__init__",):
             parts = parts[:-1]
         if len(parts) >= 2:
             modules.add(".".join(parts))
     return modules
+
+
+def _issue_keywords(problem_statement: str) -> set[str]:
+    """Keep only distinctive issue words that can bias existing-test ranking."""
+
+    ignored = {
+        "about", "after", "before", "could", "error", "fails", "field",
+        "files", "given", "issue", "method", "should", "tests", "there",
+        "these", "their", "using", "value", "which", "while", "would",
+    }
+    return {
+        token
+        for token in re.findall(r"[a-z][a-z0-9_]{4,}", problem_statement[:4000].lower())
+        if token not in ignored
+    }
 
 
 def _dependency_score(
@@ -340,6 +358,7 @@ def _select_test_files(
     repo: str,
     repository: Path | None = None,
     changed_symbols: set[str] | None = None,
+    issue_keywords: set[str] | None = None,
 ) -> tuple[Path, Path | None] | None:
     """Prefer direct test dependencies, then retain deterministic path-based fallback."""
 
@@ -374,9 +393,10 @@ def _select_test_files(
                     without_version = token.rstrip("0123456789")
                     if len(without_version) >= 3:
                         tokens.add(without_version)
-    if not tokens and not changed_symbols:
+    if not tokens and not changed_symbols and not issue_keywords:
         return None
 
+    explicit_django_mapping = False
     if repo == "django/django":
         preferred = _django_test_prefixes(source_paths)
         preferred_files = [
@@ -386,6 +406,7 @@ def _select_test_files(
         ]
         if preferred_files:
             test_files = preferred_files
+            explicit_django_mapping = True
 
     modules = _source_modules(source_paths)
     dependency_scores = (
@@ -410,15 +431,29 @@ def _select_test_files(
         # generic package segment such as "forms" or "fields".
         return (symbol_stem * 150 + exact_stem * 100 + matched * 10, -len(path.parts))
 
+    def issue_score(path: Path) -> int:
+        """Use exact filename words without accepting model-supplied commands."""
+
+        stem_words = set(re.findall(r"[a-z0-9]+", path.stem.lower().replace("_", " ")))
+        stem_words -= {"test", "tests"}
+        # The changed source filename is already represented by path/dependency
+        # scoring. Discounting it lets a distinctive issue edge (e.g. pickle)
+        # select its own existing test instead of always selecting test_figure.
+        stem_words -= {source.stem.lower() for source in source_paths}
+        return 120 * len(stem_words & (issue_keywords or set()))
+
     target = max(
         test_files,
-        key=lambda path: (dependency_scores.get(path, 0), *score(path)),
+        key=lambda path: (issue_score(path) + dependency_scores.get(path, 0), *score(path)),
         default=None,
     )
-    if target is None or not (dependency_scores.get(target, 0) or score(target)[0]):
+    if target is None or not (
+        explicit_django_mapping or issue_score(target)
+        or dependency_scores.get(target, 0) or score(target)[0]
+    ):
         return None
 
-    def adjacent_score(path: Path) -> tuple[int, int, int, int, int]:
+    def adjacent_score(path: Path) -> tuple[int, int, int, int, int, int]:
         common_depth = 0
         for left, right in zip(path.parts, target.parts):
             if left != right:
@@ -426,9 +461,10 @@ def _select_test_files(
             common_depth += 1
         relevance, compactness = score(path)
         return (
-            dependency_scores.get(path, 0),
             int(path.parent == target.parent),
             common_depth,
+            dependency_scores.get(path, 0),
+            issue_score(path),
             relevance,
             compactness,
         )
@@ -447,6 +483,9 @@ def _django_test_prefixes(source_paths: list[Path]) -> set[str]:
     """Map Django source subsystems to test apps, avoiding module misselection based only on a generic file name."""
 
     mappings = {
+        ("django", "contrib", "admin", "checks.py"): "admin_checks",
+        ("django", "core", "servers"): "servers",
+        ("django", "db", "backends", "ddl_references.py"): "indexes",
         ("django", "forms"): "forms_tests",
         ("django", "template"): "template_tests",
         ("django", "db", "migrations"): "migrations",
@@ -457,9 +496,16 @@ def _django_test_prefixes(source_paths: list[Path]) -> set[str]:
     prefixes: set[str] = set()
     for source in source_paths:
         parts = source.parts
-        for prefix, test_app in mappings.items():
-            if parts[: len(prefix)] == prefix:
-                prefixes.add(test_app)
+        matches = [
+            (len(prefix), test_app)
+            for prefix, test_app in mappings.items()
+            if parts[: len(prefix)] == prefix
+        ]
+        if matches:
+            # A concrete file mapping beats the broad admin/views fallback; retaining
+            # both would filter out the exact checks test in the observed Django case.
+            longest = max(length for length, _ in matches)
+            prefixes.update(app for length, app in matches if length == longest)
     return prefixes
 
 

@@ -95,6 +95,12 @@ def build_implementation_phase_prompt(
         "on the host. The parent scheduler owns test execution after this phase.\n"
         "- Do not create `.agent-test-plan.json`; the parent scheduler selects visible "
         "test commands deterministically from the repository and candidate patch.\n"
+        "- After making the source fix, if the issue describes a concrete edge case, "
+        "use Write to submit `.agent-issue-repro.py`: at most 30 lines of Python, "
+        "with one assert of the expected public behavior. The parent removes this "
+        "file from the patch and compares it on baseline and candidate in offline "
+        "Docker. Do not run it on the host or use hidden tests. Do not delay the source "
+        "fix solely to write a reproduction.\n"
         f"- A fresh verification session owns the final {verification_turns} turns, so "
         "leave the working tree with your best concrete patch even if local dependencies "
         "prevent tests from running.\n"
@@ -111,7 +117,9 @@ def build_verification_phase_prompt(
     scheduled_test_evidence: str = "",
     focused_new_regression: bool = False,
     focused_syntax_error: bool = False,
+    focused_issue_reproduction: bool = False,
     syntax_preflight_evidence: str = "",
+    issue_reproduction_evidence: str = "",
     handoff_text: str = "",
 ) -> str:
     """Inject current patch, test evidence, and cumulative stage state into the repair prompt."""
@@ -152,16 +160,28 @@ def build_verification_phase_prompt(
             "- Do not redesign the solution or investigate unrelated APIs. Prefer "
             "reverting the offending hunk if a narrow repair is uncertain.\n"
         )
+    elif focused_issue_reproduction:
+        focus_block = (
+            "Focused issue reproduction repair: the parent-run boundary assertion "
+            "still fails on the current candidate. Only Read and Edit are available. "
+            "Inspect the asserted input/output and the changed source, then make the "
+            "smallest correction; do not treat this one assertion as full proof.\n"
+        )
     api_instruction = (
         "- Do not search for other API usages in focused repair mode; the failing "
         "evidence and changed files are the complete scope.\n"
-        if focused_new_regression or focused_syntax_error
+        if focused_new_regression or focused_syntax_error or focused_issue_reproduction
         else "- Search for an existing API usage before accepting unfamiliar calling syntax.\n"
     )
     syntax_block = (
         "Docker Python syntax preflight\n<syntax_preflight>\n"
         f"{syntax_preflight_evidence.rstrip()}\n</syntax_preflight>\n"
         if syntax_preflight_evidence else ""
+    )
+    reproduction_block = (
+        "Parent-run issue boundary reproduction\n<issue_reproduction>\n"
+        f"{issue_reproduction_evidence.rstrip()}\n</issue_reproduction>\n"
+        if issue_reproduction_evidence else ""
     )
     return (
         f"{base_prompt.rstrip()}\n\n"
@@ -170,6 +190,7 @@ def build_verification_phase_prompt(
         f"{patch_block}"
         f"{test_block}"
         f"{syntax_block}"
+        f"{reproduction_block}"
         f"{handoff_block}"
         f"{focus_block}"
         "- The patch above is authoritative even if plain `git diff` is empty because an "

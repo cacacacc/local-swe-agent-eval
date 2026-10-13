@@ -21,6 +21,10 @@ from agent.claude_runner import (
     combine_phase_results,
 )
 from agent.handoff import HandoffLedger
+from agent.issue_reproduction import (
+    IssueReproductionRequest,
+    consume_issue_reproduction,
+)
 from agent.prompt_builder import (
     PromptBuilder,
     build_implementation_phase_prompt,
@@ -279,6 +283,93 @@ class SyntaxPreflightEvidence:
             f"Docker syntax preflight: {self.status}; files={', '.join(self.paths)}\n"
             f"{self.output}"
         )
+
+
+@dataclass(frozen=True, slots=True)
+class IssueReproductionEvidence:
+    """Keep baseline/candidate results for a bounded issue-derived script."""
+
+    status: str
+    baseline: VisibleTestResult | None = None
+    candidate: VisibleTestResult | None = None
+    error: str | None = None
+    code: str = ""
+
+    def prompt_text(self) -> str:
+        """Give Verification concise evidence without pretending an assertion proves full correctness."""
+
+        lines = [f"Issue boundary reproduction: {self.status}"]
+        if self.code:
+            lines.append(
+                "Model-authored assertion (not independent proof):\n"
+                f"{truncate_output(self.code, 2200)}"
+            )
+        if self.error:
+            lines.append(f"Runner error: {self.error}")
+        for label, result in (("Baseline", self.baseline), ("Candidate", self.candidate)):
+            if result is not None:
+                lines.append(
+                    f"{label}: exit={result.exit_code}; started={result.command_started}; "
+                    f"timed_out={result.timed_out}\n{truncate_output(result.output, 900)}"
+                )
+        return "\n".join(lines)
+
+
+def _execute_issue_reproduction(
+    repository: Path,
+    *,
+    task: SWEbenchTask,
+    base_commit: str,
+    request: IssueReproductionRequest,
+    sandbox: VisibleTestSandbox,
+    task_budget: _TaskBudget,
+) -> IssueReproductionEvidence:
+    """Compare the model's short assertion on baseline and candidate in offline Docker."""
+
+    if not request.accepted:
+        return IssueReproductionEvidence(request.status, error=request.error)
+    results: list[VisibleTestResult] = []
+    try:
+        for apply_patch in (False, True):
+            results.append(sandbox.run(
+                repository,
+                instance_id=task.instance_id,
+                base_commit=base_commit,
+                command=("python", "-c", request.code),
+                apply_patch=apply_patch,
+                timeout_seconds=task_budget.limit(min(45, sandbox.timeout_seconds)),
+            ))
+    except (TestSandboxError, ValueError) as error:
+        return IssueReproductionEvidence(
+            "unavailable",
+            baseline=results[0] if results else None,
+            error=str(error)[:800],
+            code=request.code,
+        )
+    baseline, candidate = results
+    issue_exceptions = set(re.findall(
+        r"\b[A-Z][A-Za-z0-9_]*(?:Error|Exception)\b",
+        task.problem_statement,
+    ))
+    baseline_issue_failure = "AssertionError" in baseline.output or any(
+        error_type in baseline.output for error_type in issue_exceptions
+    )
+    if not all(result.evidence_valid and not result.timed_out for result in results):
+        status = "unavailable"
+    elif baseline.exit_code != 0 and not baseline_issue_failure:
+        # An import/setup crash is not evidence that the issue was reproduced. A
+        # documented exception (e.g. TypeError from pickle.dumps) is allowed even
+        # when it prevents the later assertion from being reached.
+        status = "baseline_error"
+    elif baseline.exit_code != 0 and candidate.exit_code == 0:
+        status = "reproduced_fix"
+    elif baseline.exit_code == 0 and candidate.exit_code != 0:
+        status = "new_regression"
+    elif baseline.exit_code == 0:
+        status = "not_reproduced"
+    else:
+        status = "still_failing"
+    return IssueReproductionEvidence(status, baseline, candidate, code=request.code)
 
 
 def _syntax_preflight(
@@ -1468,13 +1559,17 @@ def run_claude_task(
     candidate_checkpoint = ""
     candidate_checkpoint_syntax_valid = False
     final_syntax_error = False
+    implementation_reproduction = IssueReproductionRequest("missing")
 
-    def append_model_phase(name: str, phase_result: ClaudeCodeResult) -> None:
-        """Save model output and the actual worktree patch before another stage can edit it."""
+    def append_model_phase(name: str, phase_result: ClaudeCodeResult) -> IssueReproductionRequest:
+        """Remove control artifacts and save the actual patch before another stage edits it."""
 
         phases.append((name, phase_result))
         # A model-written control file is never part of the candidate handed to the next stage.
         consume_test_plan(repository)
+        reproduction = consume_issue_reproduction(repository)
+        if name == "implementation" and reproduction.accepted:
+            session.write_issue_reproduction(reproduction.code)
         handoff.record_model(
             name,
             patch=session.collect_patch(repository),
@@ -1485,6 +1580,7 @@ def run_claude_task(
             ),
         )
         session.write_handoff(handoff.snapshot())
+        return reproduction
 
     def append_test_phase(name: str, evidence: ScheduledTestEvidence, patch: str) -> None:
         """Attach parent-owned comparisons to the patch revision they actually exercised."""
@@ -1534,6 +1630,55 @@ def run_claude_task(
                 },
             )))
         return evidence
+
+    def append_reproduction_phase(
+        name: str, patch: str, request: IssueReproductionRequest,
+    ) -> IssueReproductionEvidence:
+        """Persist bounded baseline/candidate reproduction evidence for this patch."""
+
+        evidence = _execute_issue_reproduction(
+            repository,
+            task=task,
+            base_commit=patch_base_commit,
+            request=request,
+            sandbox=test_sandbox,
+            task_budget=task_budget,
+        )
+        if evidence.status != "missing":
+            phases.append((name, ClaudeCodeResult(
+                exit_code=0,
+                agent_log="",
+                test_output=evidence.prompt_text(),
+                events=({
+                    "event_type": "issue_reproduction",
+                    "details": {"status": evidence.status},
+                },),
+                timed_out=False,
+                metrics={
+                    "agent_turns": 0,
+                    "tool_calls": 0,
+                    "issue_reproduction_status": evidence.status,
+                    "baseline_exit_code": (
+                        evidence.baseline.exit_code if evidence.baseline is not None else None
+                    ),
+                    "candidate_exit_code": (
+                        evidence.candidate.exit_code if evidence.candidate is not None else None
+                    ),
+                    "baseline_timed_out": (
+                        evidence.baseline.timed_out if evidence.baseline is not None else False
+                    ),
+                    "candidate_timed_out": (
+                        evidence.candidate.timed_out if evidence.candidate is not None else False
+                    ),
+                    "duration_seconds": sum(
+                        result.duration_seconds for result in
+                        (evidence.baseline, evidence.candidate) if result is not None
+                    ),
+                },
+            )))
+            handoff.record_reproduction(name, patch=patch, status=evidence.status)
+            session.write_handoff(handoff.snapshot())
+        return evidence
     try:
         if config.agent.verification_turns:
             implementation_turns = (
@@ -1566,7 +1711,7 @@ def run_claude_task(
                 timeout_seconds=task_budget.limit(implementation_timeout),
                 base_url=base_url,
             ).run(repository, implementation_prompt)
-            append_model_phase("implementation", implementation_result)
+            implementation_reproduction = append_model_phase("implementation", implementation_result)
             task_budget.ensure_remaining()
 
             # Clean up control files an older model may have left behind, but never adopt their commands. The real test plan is
@@ -1737,11 +1882,16 @@ def run_claude_task(
                 recovery_syntax = append_syntax_phase(
                     "syntax_preflight_recovery_final", recovered_patch
                 )
+                recovery_reproduction = append_reproduction_phase(
+                    "issue_reproduction_recovery", recovered_patch,
+                    implementation_reproduction,
+                )
 
                 recovery_request = generate_repository_test_plan(
                     repository,
                     repo=task.repo,
                     patch=recovered_patch,
+                    problem_statement=task.problem_statement,
                 )
                 recovery_evidence = _execute_scheduled_test(
                     repository,
@@ -1762,7 +1912,11 @@ def run_claude_task(
                 append_test_phase("scheduled_test_recovery", recovery_evidence, recovered_patch)
                 task_budget.ensure_remaining()
 
-                if (recovery_evidence.has_new_regression or recovery_syntax.new_syntax_error) and repair_budget_available:
+                if (
+                    recovery_evidence.has_new_regression
+                    or recovery_syntax.new_syntax_error
+                    or recovery_reproduction.status in {"new_regression", "still_failing"}
+                ) and repair_budget_available:
                     # After Recovery produces a patch it must also close the "test→repair→retest" loop. Here we
                     # reuse the ordinary Verification focused prompt and, at the CLI layer, allow only
                     # Read/Edit so the limited 3 turns do not fall back into broad search.
@@ -1781,8 +1935,15 @@ def run_claude_task(
                         ),
                         focused_new_regression=recovery_evidence.has_new_regression,
                         focused_syntax_error=recovery_syntax.new_syntax_error,
+                        focused_issue_reproduction=(
+                            recovery_reproduction.status in {"new_regression", "still_failing"}
+                        ),
                         syntax_preflight_evidence=(
                             recovery_syntax.prompt_text() if recovery_syntax.new_syntax_error else ""
+                        ),
+                        issue_reproduction_evidence=(
+                            recovery_reproduction.prompt_text()
+                            if recovery_reproduction.status != "missing" else ""
                         ),
                         handoff_text=handoff.render_for_prompt(),
                     )
@@ -1803,10 +1964,16 @@ def run_claude_task(
                     consume_test_plan(repository)
                     recovered_patch = session.collect_patch(repository)
                     append_syntax_phase("syntax_preflight_recovery_post_repair", recovered_patch)
+                    append_reproduction_phase(
+                        "issue_reproduction_recovery_post_repair",
+                        recovered_patch,
+                        implementation_reproduction,
+                    )
                     final_recovery_request = generate_repository_test_plan(
                         repository,
                         repo=task.repo,
                         patch=recovered_patch,
+                        problem_statement=task.problem_statement,
                     )
                     final_recovery_evidence = _execute_scheduled_test(
                         repository,
@@ -1843,6 +2010,10 @@ def run_claude_task(
                     candidate_patch,
                     config.agent.max_tool_output_chars,
                 )
+                initial_reproduction = append_reproduction_phase(
+                    "issue_reproduction_initial", candidate_patch,
+                    implementation_reproduction,
+                )
                 initial_syntax = append_syntax_phase(
                     "syntax_preflight_initial", candidate_patch
                 )
@@ -1851,6 +2022,7 @@ def run_claude_task(
                     repository,
                     repo=task.repo,
                     patch=candidate_patch,
+                    problem_statement=task.problem_statement,
                 )
                 initial_evidence = _execute_scheduled_test(
                     repository,
@@ -1904,6 +2076,10 @@ def run_claude_task(
                     syntax_preflight_evidence=(
                         initial_syntax.prompt_text() if initial_syntax.new_syntax_error else ""
                     ),
+                    issue_reproduction_evidence=(
+                        initial_reproduction.prompt_text()
+                        if initial_reproduction.status != "missing" else ""
+                    ),
                     handoff_text=handoff.render_for_prompt(),
                 )
                 verification_phase, verification_available_tools = (
@@ -1932,12 +2108,17 @@ def run_claude_task(
                 # keeping commands consistent with the actual modified paths and independent of model-controlled files.
                 consume_test_plan(repository)
                 final_patch = session.collect_patch(repository)
+                final_reproduction = append_reproduction_phase(
+                    "issue_reproduction_final", final_patch,
+                    implementation_reproduction,
+                )
                 final_syntax = append_syntax_phase("syntax_preflight_final", final_patch)
                 final_syntax_error = final_syntax.new_syntax_error
                 final_request = generate_repository_test_plan(
                     repository,
                     repo=task.repo,
                     patch=final_patch,
+                    problem_statement=task.problem_statement,
                 )
                 final_evidence = _execute_scheduled_test(
                     repository,
@@ -1959,9 +2140,14 @@ def run_claude_task(
                 task_budget.ensure_remaining()
 
                 final_model_result = verification_result
-                if (final_evidence.has_new_regression or final_syntax.new_syntax_error) and post_test_repair_turns > 0:
-                    # Only a new regression after the main Verification may use this budget; a missing plan,
-                    # inherent baseline failures, and incomparable output still only record evidence and do not trigger blind repair.
+                if (
+                    final_evidence.has_new_regression
+                    or final_syntax.new_syntax_error
+                    or final_reproduction.status in {"new_regression", "still_failing"}
+                ) and post_test_repair_turns > 0:
+                    # Reserve these turns for a proven test regression, syntax error,
+                    # or a bounded issue assertion that still fails on the candidate;
+                    # missing/incomparable evidence alone never triggers blind repair.
                     post_repair_prompt = build_verification_phase_prompt(
                         prompt,
                         verification_turns=post_test_repair_turns,
@@ -1977,8 +2163,15 @@ def run_claude_task(
                         ),
                         focused_new_regression=final_evidence.has_new_regression,
                         focused_syntax_error=final_syntax.new_syntax_error,
+                        focused_issue_reproduction=(
+                            final_reproduction.status in {"new_regression", "still_failing"}
+                        ),
                         syntax_preflight_evidence=(
                             final_syntax.prompt_text() if final_syntax.new_syntax_error else ""
+                        ),
+                        issue_reproduction_evidence=(
+                            final_reproduction.prompt_text()
+                            if final_reproduction.status != "missing" else ""
                         ),
                         handoff_text=handoff.render_for_prompt(),
                     )
@@ -1998,12 +2191,17 @@ def run_claude_task(
 
                     consume_test_plan(repository)
                     post_repair_patch = session.collect_patch(repository)
+                    append_reproduction_phase(
+                        "issue_reproduction_post_repair", post_repair_patch,
+                        implementation_reproduction,
+                    )
                     post_repair_syntax = append_syntax_phase("syntax_preflight_post_repair", post_repair_patch)
                     final_syntax_error = post_repair_syntax.new_syntax_error
                     post_repair_request = generate_repository_test_plan(
                         repository,
                         repo=task.repo,
                         patch=post_repair_patch,
+                        problem_statement=task.problem_statement,
                     )
                     post_repair_evidence = _execute_scheduled_test(
                         repository,

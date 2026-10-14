@@ -7,6 +7,8 @@ sandbox. ``consume_test_plan`` exists only for compatibility and to clean up a
 ``.agent-test-plan.json`` that an old session may have left behind; commands in that
 file no longer control execution, and the control file is deleted immediately after
 being read, so it never pollutes the final patch.
+An optional model-suggested test-file path is separately consumed as a hint, then
+checked against the parent's inventory of existing test modules before use.
 """
 
 from __future__ import annotations
@@ -21,6 +23,9 @@ from typing import Any
 
 
 TEST_PLAN_FILENAME = ".agent-test-plan.json"
+TEST_FILE_SUGGESTION_FILENAME = ".agent-test-file.txt"
+TEST_FILE_SUGGESTION_PLACEHOLDER = "REPLACE_WITH_EXISTING_TEST_PATH\n"
+_MAX_SUGGESTION_BYTES = 512
 _MAX_PLAN_BYTES = 16_384
 _MAX_ARGUMENTS = 64
 _MAX_ARGUMENT_CHARS = 4_096
@@ -48,6 +53,7 @@ class TestPlanRequest:
     regression_argv: tuple[str, ...] = ()
     error: str | None = None
     origin: str = "agent"
+    suggested_test_file_used: bool = False
 
     @property
     def accepted(self) -> bool:
@@ -71,6 +77,33 @@ class TestPlanRequest:
             ("target", self.target_argv),
             ("regression", self.regression_argv),
         )
+
+
+def consume_test_file_suggestion(repository: Path | str) -> str | None:
+    """Consume a model path hint without granting it command or filesystem authority."""
+
+    path = Path(repository).resolve() / TEST_FILE_SUGGESTION_FILENAME
+    if not path.exists() and not path.is_symlink():
+        return None
+    try:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > _MAX_SUGGESTION_BYTES:
+            return None
+        try:
+            value = path.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError):
+            return None
+        return (
+            value
+            if value and value != TEST_FILE_SUGGESTION_PLACEHOLDER.strip()
+            and "\n" not in value and "\r" not in value
+            else None
+        )
+    finally:
+        # Remove even malformed hints before patch collection; never follow a link.
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink(missing_ok=True)
 
 
 def consume_test_plan(repository: Path | str) -> TestPlanRequest:
@@ -125,6 +158,7 @@ def generate_repository_test_plan(
     repo: str,
     patch: str,
     problem_statement: str = "",
+    suggested_test_file: str | None = None,
 ) -> TestPlanRequest:
     """Deterministically generate two test commands from the repository type, modified paths, and existing test layout.
 
@@ -166,14 +200,32 @@ def generate_repository_test_plan(
         changed_symbols=_changed_symbols(patch, source_paths),
         issue_keywords=_issue_keywords(problem_statement),
     )
-    if selected is None:
+    suggestion_used = False
+    validated_suggestion: Path | None = None
+    if suggested_test_file is not None:
+        suggestion = Path(suggested_test_file)
+        # An exact match to the parent's inventory is the trust boundary: never
+        # turn model text into argv, and never adopt new or symlinked test files.
+        if (
+            not suggestion.is_absolute()
+            and ".." not in suggestion.parts
+            and suggestion in test_files
+            and not (repository_path / suggestion).is_symlink()
+            and (repository_path / suggestion).resolve().is_relative_to(repository_path)
+        ):
+            validated_suggestion = suggestion
+            suggestion_used = True
+    if validated_suggestion is not None:
+        target = validated_suggestion
+        regression = _select_adjacent_test_file(test_files, target)
+    elif selected is not None:
+        target, regression = selected
+    else:
         return TestPlanRequest(
             status="missing",
             error=f"parent planner found no repository-visible test for {repo}",
             origin="parent",
         )
-
-    target, regression = selected
     if repo == "django/django":
         commands = _django_commands(target, regression)
     elif repo == "sympy/sympy":
@@ -192,6 +244,7 @@ def generate_repository_test_plan(
         target_argv=target_argv,
         regression_argv=regression_argv,
         origin="parent",
+        suggested_test_file_used=suggestion_used,
     )
 
 
@@ -477,6 +530,20 @@ def _select_test_files(
         default=None,
     )
     return target, regression
+
+
+def _select_adjacent_test_file(test_files: list[Path], target: Path) -> Path | None:
+    """Choose a separate nearby regression module for a validated model hint."""
+
+    def proximity(path: Path) -> tuple[int, int, int]:
+        shared = 0
+        for left, right in zip(path.parts, target.parts):
+            if left != right:
+                break
+            shared += 1
+        return (int(path.parent == target.parent), shared, -len(path.parts))
+
+    return max((path for path in test_files if path != target), key=proximity, default=None)
 
 
 def _django_test_prefixes(source_paths: list[Path]) -> set[str]:

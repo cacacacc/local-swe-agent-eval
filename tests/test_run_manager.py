@@ -52,12 +52,14 @@ def test_collect_patch_includes_agent_commits_and_untracked_files(tmp_path: Path
     run_git(repository, "add", "module.py")
     run_git(repository, "commit", "-m", "agent fix")
     (repository / "new_test.py").write_text("assert True\n", encoding="utf-8")
+    (repository / ".agent-test-file.txt").write_text("tests/test_widget.py\n", encoding="utf-8")
 
     patch = session.collect_patch(repository)
 
     assert "-VALUE = 1" in patch
     assert "+VALUE = 2" in patch
     assert "new_test.py" not in patch
+    assert ".agent-test-file.txt" not in patch
     assert "+assert True" not in patch
 
 

@@ -342,6 +342,7 @@ class ClaudeCodeRunner:
         base_url: str = "http://localhost:11434",
         executable: str = "claude",
         allow_bash: bool = True,
+        guard_bash_commands: bool = False,
         available_tools: Sequence[str] | None = None,
         session_id: str | None = None,
         resume_session: bool = False,
@@ -362,6 +363,8 @@ class ClaudeCodeRunner:
             raise ValueError("max_output_tokens must be smaller than context_length")
         if resume_session and session_id is None:
             raise ValueError("resume_session requires session_id")
+        if guard_bash_commands and not allow_bash:
+            raise ValueError("guard_bash_commands requires allow_bash")
         if (session_id is not None or resume_session) and not persist_session:
             raise ValueError("session continuation requires persist_session")
         if session_id is not None:
@@ -387,6 +390,7 @@ class ClaudeCodeRunner:
         self.base_url = base_url.rstrip("/")
         self.executable = executable
         self.allow_bash = allow_bash
+        self.guard_bash_commands = guard_bash_commands
         # The allowlist is passed in only from the parent's fixed policy; preserving
         # first-occurrence order makes the CLI command easier to audit.
         self.available_tools = (
@@ -458,6 +462,16 @@ class ClaudeCodeRunner:
         """Build a subprocess environment that strips cloud credentials and limits common outbound paths."""
 
         environment = dict(os.environ if source is None else source)
+        # Never inherit a caller's shell prefix: the Implementation policy must
+        # use the parent-owned guard, and other phases must not inherit a wrapper.
+        environment.pop("CLAUDE_CODE_SHELL_PREFIX", None)
+        if self.guard_bash_commands:
+            guard_path = Path(__file__).with_name("host_command_guard.py").resolve()
+            # Claude Code treats this value as one executable pathname rather than
+            # splitting a command line; a "python script.py" value fails with 127.
+            if not guard_path.is_file() or not os.access(guard_path, os.X_OK):
+                raise ClaudeCodeError(f"host Bash guard is not executable: {guard_path}")
+            environment["CLAUDE_CODE_SHELL_PREFIX"] = str(guard_path)
         # Never pass a possibly-present Anthropic cloud key to the Agent; Ollama only
         # requires the token to be non-empty.
         for name in (

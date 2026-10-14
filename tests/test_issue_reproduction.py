@@ -4,6 +4,7 @@ from pathlib import Path
 
 from agent.issue_reproduction import (
     REPRODUCTION_FILENAME,
+    REPRODUCTION_PLACEHOLDER,
     IssueReproductionRequest,
     consume_issue_reproduction,
 )
@@ -22,6 +23,15 @@ def test_consume_accepts_short_assertion_and_removes_control_file(tmp_path: Path
     assert "assert value() == 2" in request.code
     assert not path.exists()
     assert consume_issue_reproduction(tmp_path).status == "missing"
+
+
+def test_unedited_parent_placeholder_counts_as_missing(tmp_path: Path) -> None:
+    """An untouched Edit target must not be counted as a rejected model submission."""
+
+    path = tmp_path / REPRODUCTION_FILENAME
+    path.write_text(REPRODUCTION_PLACEHOLDER, encoding="utf-8")
+    assert consume_issue_reproduction(tmp_path).status == "missing"
+    assert not path.exists()
 
 
 def test_consume_rejects_invalid_or_symlinked_reproduction(tmp_path: Path) -> None:
@@ -43,10 +53,20 @@ def test_consume_rejects_oversized_reproduction(tmp_path: Path) -> None:
     """A large model-generated script cannot expand Docker argv or prompt context without bound."""
 
     path = tmp_path / REPRODUCTION_FILENAME
-    path.write_text("assert True\n" + "#" * 4096, encoding="utf-8")
+    path.write_text("assert True\n" + "#" * 8192, encoding="utf-8")
     request = consume_issue_reproduction(tmp_path)
     assert request.status == "rejected"
-    assert request.error == "reproduction exceeds 4096 bytes"
+    assert request.error == "reproduction exceeds 8192 bytes"
+    assert not path.exists()
+
+
+def test_consume_accepts_a_realistic_boundary_reproduction(tmp_path: Path) -> None:
+    """A 45-line focused script must not be rejected by the earlier 30-line limit."""
+
+    path = tmp_path / REPRODUCTION_FILENAME
+    path.write_text("# setup\n" * 44 + "assert True\n", encoding="utf-8")
+    request = consume_issue_reproduction(tmp_path)
+    assert request.accepted
     assert not path.exists()
 
 

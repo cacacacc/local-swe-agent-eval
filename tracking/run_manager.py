@@ -32,6 +32,9 @@ _PATCH_EXCLUDE_PATHS = (
     # The model's bounded issue reproduction is executed separately by the parent
     # and must never become part of the SWE-bench prediction, even if model cleanup fails.
     ":(exclude).agent-issue-repro.py",
+    # The optional model path hint is also a parent-only control artifact, not
+    # a repository test or product change, including on interrupted runs.
+    ":(exclude).agent-test-file.txt",
     ":(exclude,glob)**/.venv/**",
     ":(exclude,glob)**/.test-venv/**",
     ":(exclude,glob)**/venv/**",

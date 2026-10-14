@@ -229,7 +229,11 @@ Dev v2 gives the same local model a 40-turn hard limit split across two fresh
 Claude Code sessions, with deterministic parent-owned test planning between them:
 
 1. The implementation session receives 30 turns to investigate the issue and
-   produce a candidate patch.
+   produce a candidate patch. In bare CLI mode it has `Bash`, `Edit`, and `Read`.
+   A parent-owned shell-prefix guard executes only audited read-only searches,
+   file views, and Git status/diff directly without a shell. Python, test runners,
+   executable search preprocessors, pipelines, and redirects are denied before
+   execution, so tests remain parent-owned Docker operations.
 2. The parent maps modified product source to repository tests using static import
    dependencies, changed class/function names, and bounded words from the issue,
    with deterministic path matching as a fallback. Specific Django paths such as
@@ -269,7 +273,9 @@ pending until parent-owned tests run again. Model-reported findings are labeled
 unverified and never substitute for Docker test evidence.
 
 Implementation may submit one issue-derived assertion in `.agent-issue-repro.py`
-(at most 30 lines and 4 KiB) after making a source fix. The parent removes that
+(at most 60 lines and 8 KiB) after making a source fix. The parent creates a
+control file with a replaceable placeholder so the model can submit with the CLI's real
+`Edit` tool rather than a nonexistent bare-mode `Write` tool. The parent removes that
 control file before collecting any patch, saves it as `issue_reproduction.py` in
 the run artifact, and executes the same script on the baseline and candidate in
 the offline Docker image using parent-owned `python -c` argv. Its comparison is
@@ -278,6 +284,11 @@ focused repair turns. The script never becomes part of the SWE-bench prediction.
 Each task now records whether the assertion was accepted, rejected, or missing,
 including the rejection reason. The batch summary counts all three outcomes;
 older runs without this metric are counted separately as `not_recorded`.
+The model may also replace the placeholder in `.agent-test-file.txt` with one existing
+repository-relative test-module path. The parent removes that hint before patch collection and
+uses it only if it matches an existing, non-symlink test file that was not added
+by the candidate patch. The parent still chooses the exact Docker command and
+a separate adjacent regression test; invalid hints fall back to static mapping.
 Newly added root-level scratch Python tests and reproductions are also excluded
 from both visible-test and final patches, while existing root tests and nested
 repository tests remain eligible. The workspace files are not deleted.

@@ -1,6 +1,8 @@
 """Verify Claude Code command boundaries, outbound network restrictions, trajectory cleaning, and test output extraction."""
 
 import json
+import os
+from pathlib import Path
 
 import pytest
 
@@ -271,6 +273,36 @@ def test_verification_runner_disables_bash_at_cli_boundary() -> None:
     command = runner.command("Verify")
 
     assert "Bash" in command[command.index("--disallowed-tools") + 1 :]
+
+
+def test_implementation_tool_policy_guards_bash_and_uses_actual_bare_tools() -> None:
+    """Bare mode exposes Bash/Read/Edit and routes Bash through the parent guard."""
+
+    runner = ClaudeCodeRunner(
+        model="qwen3.5:9b", timeout_seconds=60, max_turns=10,
+        context_length=32768, max_output_tokens=8192,
+        guard_bash_commands=True,
+        available_tools=("Bash", "Edit", "Read"),
+    )
+    command = runner.command("Fix and propose a reproduction")
+    assert command[command.index("--tools") + 1] == "Bash,Edit,Read"
+    assert "Bash" not in command[command.index("--disallowed-tools") + 1 :]
+    environment = runner.environment({"CLAUDE_CODE_SHELL_PREFIX": "unsafe inherited wrapper"})
+    prefix = environment["CLAUDE_CODE_SHELL_PREFIX"]
+    assert Path(prefix).name == "host_command_guard.py"
+    assert Path(prefix).is_file()
+    assert os.access(prefix, os.X_OK)
+
+
+def test_guard_requires_an_enabled_bash_tool() -> None:
+    """A contradictory policy must fail before starting a Claude Code session."""
+
+    with pytest.raises(ValueError, match="requires allow_bash"):
+        ClaudeCodeRunner(
+            model="qwen3.5:9b", timeout_seconds=60, max_turns=10,
+            context_length=32768, max_output_tokens=8192,
+            allow_bash=False, guard_bash_commands=True,
+        )
 
 
 def test_runner_can_restrict_tools_for_a_recovery_gate() -> None:

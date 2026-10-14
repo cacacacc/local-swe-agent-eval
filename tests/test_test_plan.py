@@ -4,10 +4,72 @@ import json
 from pathlib import Path
 
 from agent.test_plan import (
+    TEST_FILE_SUGGESTION_FILENAME,
+    TEST_FILE_SUGGESTION_PLACEHOLDER,
     TEST_PLAN_FILENAME,
+    consume_test_file_suggestion,
     consume_test_plan,
     generate_repository_test_plan,
 )
+
+
+def test_parent_accepts_only_an_existing_model_suggested_test_module(tmp_path: Path) -> None:
+    """A path hint may select an existing target, but cannot supply commands or a new test."""
+
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_widget.py").write_text("def test_widget(): pass\n", encoding="utf-8")
+    (tests / "test_edge.py").write_text("def test_edge(): pass\n", encoding="utf-8")
+    patch = "diff --git a/src/widget.py b/src/widget.py\n--- a/src/widget.py\n+++ b/src/widget.py\n"
+    hint = tmp_path / TEST_FILE_SUGGESTION_FILENAME
+    hint.write_text("tests/test_edge.py\n", encoding="utf-8")
+    suggestion = consume_test_file_suggestion(tmp_path)
+    assert suggestion == "tests/test_edge.py"
+    assert not hint.exists()
+
+    chosen = generate_repository_test_plan(
+        tmp_path, repo="owner/project", patch=patch,
+        suggested_test_file=suggestion,
+    )
+    assert chosen.suggested_test_file_used
+    assert chosen.target_argv[-1] == "tests/test_edge.py"
+    assert chosen.regression_argv[-1] == "tests/test_widget.py"
+
+    for bad_path in ("../outside.py", "tests/missing.py", "tests/test_edge.py; echo bad"):
+        rejected = generate_repository_test_plan(
+            tmp_path, repo="owner/project", patch=patch,
+            suggested_test_file=bad_path,
+        )
+        assert not rejected.suggested_test_file_used
+        assert rejected.target_argv[-1] == "tests/test_widget.py"
+
+    (tests / "test_link.py").symlink_to(tests / "test_edge.py")
+    linked = generate_repository_test_plan(
+        tmp_path, repo="owner/project", patch=patch,
+        suggested_test_file="tests/test_link.py",
+    )
+    assert not linked.suggested_test_file_used
+
+
+def test_suggestion_consumer_rejects_symlink_without_following_it(tmp_path: Path) -> None:
+    """An untrusted control-path symlink must be removed without reading its target."""
+
+    outside = tmp_path / "outside.txt"
+    outside.write_text("tests/test_edge.py\n", encoding="utf-8")
+    hint = tmp_path / TEST_FILE_SUGGESTION_FILENAME
+    hint.symlink_to(outside)
+    assert consume_test_file_suggestion(tmp_path) is None
+    assert outside.exists()
+    assert not hint.exists()
+
+
+def test_unedited_suggestion_placeholder_is_missing(tmp_path: Path) -> None:
+    """An optional path hint left untouched must not affect parent test planning."""
+
+    hint = tmp_path / TEST_FILE_SUGGESTION_FILENAME
+    hint.write_text(TEST_FILE_SUGGESTION_PLACEHOLDER, encoding="utf-8")
+    assert consume_test_file_suggestion(tmp_path) is None
+    assert not hint.exists()
 
 
 def write_plan(repository: Path, value: object) -> Path:

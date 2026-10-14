@@ -8,8 +8,12 @@ import pytest
 
 from agent.claude_runner import ClaudeCodeResult
 from agent.handoff import HandoffLedger
-from agent.issue_reproduction import REPRODUCTION_FILENAME
-from agent.test_plan import TestPlanRequest as StructuredTestPlanRequest
+from agent.issue_reproduction import REPRODUCTION_FILENAME, REPRODUCTION_PLACEHOLDER
+from agent.test_plan import (
+    TEST_FILE_SUGGESTION_FILENAME,
+    TEST_FILE_SUGGESTION_PLACEHOLDER,
+    TestPlanRequest as StructuredTestPlanRequest,
+)
 from agent.test_sandbox import VisibleTestResult
 from benchmark.task import SWEbenchTask
 from experiment.config import ExperimentConfig
@@ -284,6 +288,8 @@ def test_implementation_reproduction_is_run_and_excluded_from_patch(
 
         def run(self, worktree, prompt):
             if "Current phase: implementation" in prompt:
+                assert (repository / REPRODUCTION_FILENAME).read_text(encoding="utf-8") == REPRODUCTION_PLACEHOLDER
+                assert (repository / TEST_FILE_SUGGESTION_FILENAME).read_text(encoding="utf-8") == TEST_FILE_SUGGESTION_PLACEHOLDER
                 source.write_text("value = 2\n", encoding="utf-8")
                 (repository / REPRODUCTION_FILENAME).write_text(
                     "from src.widget import value\nassert value == 3\n",
@@ -1496,6 +1502,8 @@ def test_verification_reserves_three_turns_to_repair_final_new_regression(
     phases = result["metrics"]["phases"]
     assert calls == ["implementation", "verification", "post_repair"]
     assert runner_options[0]["turns"] == 30
+    assert runner_options[0]["guard_bash_commands"] is True
+    assert runner_options[0]["available_tools"] == ("Bash", "Edit", "Read")
     assert runner_options[1]["turns"] == 7
     assert runner_options[2]["turns"] == 3
     assert runner_options[2]["allow_bash"] is False
@@ -1608,7 +1616,8 @@ def test_empty_patch_reuses_verification_budget_for_recovery(
 
     result = json.loads((run_path / "result.json").read_text(encoding="utf-8"))
     assert calls == ["implementation", "recovery_gate"]
-    assert "allow_bash" not in runner_options[0]
+    assert runner_options[0]["guard_bash_commands"] is True
+    assert runner_options[0]["available_tools"] == ("Bash", "Edit", "Read")
     assert runner_options[1]["allow_bash"] is False
     assert runner_options[1]["available_tools"] == ("Read", "Edit")
     assert runner_options[1]["turns"] == 4

@@ -22,6 +22,8 @@ from agent.claude_runner import (
 )
 from agent.handoff import HandoffLedger
 from agent.issue_reproduction import (
+    REPRODUCTION_FILENAME,
+    REPRODUCTION_PLACEHOLDER,
     IssueReproductionRequest,
     consume_issue_reproduction,
 )
@@ -33,7 +35,10 @@ from agent.prompt_builder import (
     build_verification_phase_prompt,
 )
 from agent.test_plan import (
+    TEST_FILE_SUGGESTION_FILENAME,
+    TEST_FILE_SUGGESTION_PLACEHOLDER,
     TestPlanRequest,
+    consume_test_file_suggestion,
     consume_test_plan,
     generate_repository_test_plan,
 )
@@ -133,6 +138,7 @@ def _runner(
     timeout_seconds: float,
     base_url: str,
     allow_bash: bool = True,
+    guard_bash_commands: bool = False,
     available_tools: Sequence[str] | None = None,
     session_id: str | None = None,
     resume_session: bool = False,
@@ -148,6 +154,7 @@ def _runner(
         max_output_tokens=config.model.max_output_tokens,
         base_url=base_url,
         allow_bash=allow_bash,
+        guard_bash_commands=guard_bash_commands,
         available_tools=available_tools,
         session_id=session_id,
         resume_session=resume_session,
@@ -973,6 +980,7 @@ class ScheduledTestEvidence:
             "visible_test_parent_generated": int(
                 self.request.origin == "parent" and self.request.accepted
             ),
+            "suggested_test_file_used": self.request.suggested_test_file_used,
             "visible_test_executions": patched_executed,
             # executions keeps the historical semantics of "a container command was actually started"; valid_executions
             # further excludes environment errors such as a missing runner, so new experiments can judge whether the evidence is trustworthy.
@@ -1290,6 +1298,7 @@ def _scheduled_test_result(evidence: ScheduledTestEvidence) -> ClaudeCodeResult:
     details: dict[str, Any] = {
         "request_status": evidence.request.status,
         "request_origin": evidence.request.origin,
+        "suggested_test_file_used": evidence.request.suggested_test_file_used,
         "commands": [
             {
                 "label": execution.label,
@@ -1563,13 +1572,18 @@ def run_claude_task(
         "missing" if config.agent.issue_reproduction_enabled else "disabled"
     )
     latest_reproduction: IssueReproductionEvidence | None = None
+    suggested_test_file: str | None = None
 
     def append_model_phase(name: str, phase_result: ClaudeCodeResult) -> IssueReproductionRequest:
         """Remove control artifacts and save the actual patch before another stage edits it."""
 
+        nonlocal suggested_test_file
         phases.append((name, phase_result))
         # A model-written control file is never part of the candidate handed to the next stage.
         consume_test_plan(repository)
+        new_suggestion = consume_test_file_suggestion(repository)
+        if new_suggestion is not None:
+            suggested_test_file = new_suggestion
         reproduction = consume_issue_reproduction(repository)
         if not config.agent.issue_reproduction_enabled:
             # The ablation removes both the instruction and execution while still
@@ -1716,11 +1730,24 @@ def run_claude_task(
                 max_tool_output_chars=config.agent.max_tool_output_chars,
                 issue_reproduction_enabled=config.agent.issue_reproduction_enabled,
             )
+            # Bare Claude Code exposes Bash/Read/Edit, not Write. Parent-owned
+            # placeholders let the model submit bounded hints with Edit, then the
+            # parent consumes them before collecting any candidate patch.
+            control_files = [(TEST_FILE_SUGGESTION_FILENAME, TEST_FILE_SUGGESTION_PLACEHOLDER)]
+            if config.agent.issue_reproduction_enabled:
+                control_files.append((REPRODUCTION_FILENAME, REPRODUCTION_PLACEHOLDER))
+            for control_name, placeholder in control_files:
+                control_path = repository / control_name
+                if control_path.exists() or control_path.is_symlink():
+                    raise ValueError(f"reserved control path already exists: {control_path}")
+                control_path.write_text(placeholder, encoding="utf-8")
             implementation_result = _runner(
                 config,
                 turns=implementation_turns,
                 timeout_seconds=task_budget.limit(implementation_timeout),
                 base_url=base_url,
+                guard_bash_commands=True,
+                available_tools=("Bash", "Edit", "Read"),
             ).run(repository, implementation_prompt)
             implementation_reproduction = append_model_phase("implementation", implementation_result)
             task_budget.ensure_remaining()
@@ -1903,6 +1930,7 @@ def run_claude_task(
                     repo=task.repo,
                     patch=recovered_patch,
                     problem_statement=task.problem_statement,
+                    suggested_test_file=suggested_test_file,
                 )
                 recovery_evidence = _execute_scheduled_test(
                     repository,
@@ -1985,6 +2013,7 @@ def run_claude_task(
                         repo=task.repo,
                         patch=recovered_patch,
                         problem_statement=task.problem_statement,
+                        suggested_test_file=suggested_test_file,
                     )
                     final_recovery_evidence = _execute_scheduled_test(
                         repository,
@@ -2034,6 +2063,7 @@ def run_claude_task(
                     repo=task.repo,
                     patch=candidate_patch,
                     problem_statement=task.problem_statement,
+                    suggested_test_file=suggested_test_file,
                 )
                 initial_evidence = _execute_scheduled_test(
                     repository,
@@ -2130,6 +2160,7 @@ def run_claude_task(
                     repo=task.repo,
                     patch=final_patch,
                     problem_statement=task.problem_statement,
+                    suggested_test_file=suggested_test_file,
                 )
                 final_evidence = _execute_scheduled_test(
                     repository,
@@ -2213,6 +2244,7 @@ def run_claude_task(
                         repo=task.repo,
                         patch=post_repair_patch,
                         problem_statement=task.problem_statement,
+                        suggested_test_file=suggested_test_file,
                     )
                     post_repair_evidence = _execute_scheduled_test(
                         repository,

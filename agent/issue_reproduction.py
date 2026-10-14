@@ -9,8 +9,9 @@ import shutil
 
 
 REPRODUCTION_FILENAME = ".agent-issue-repro.py"
-_MAX_REPRODUCTION_BYTES = 4096
-_MAX_REPRODUCTION_LINES = 30
+REPRODUCTION_PLACEHOLDER = "# Replace this line with a short issue assertion.\n"
+_MAX_REPRODUCTION_BYTES = 8192
+_MAX_REPRODUCTION_LINES = 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,13 +44,17 @@ def consume_issue_reproduction(repository: Path | str) -> IssueReproductionReque
         if path.is_symlink() or not path.is_file():
             return IssueReproductionRequest("rejected", error="reproduction must be a regular file")
         if path.stat().st_size > _MAX_REPRODUCTION_BYTES:
-            return IssueReproductionRequest("rejected", error="reproduction exceeds 4096 bytes")
+            return IssueReproductionRequest("rejected", error="reproduction exceeds 8192 bytes")
         try:
             code = path.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as error:
             return IssueReproductionRequest("rejected", error=f"cannot read reproduction: {error}")
+        if not code.strip() or code == REPRODUCTION_PLACEHOLDER:
+            # Implementation receives a parent-owned Edit target; leaving the
+            # placeholder untouched is missing, not an invalid submission.
+            return IssueReproductionRequest("missing")
         if len(code.splitlines()) > _MAX_REPRODUCTION_LINES:
-            return IssueReproductionRequest("rejected", error="reproduction exceeds 30 lines")
+            return IssueReproductionRequest("rejected", error="reproduction exceeds 60 lines")
         try:
             tree = ast.parse(code, filename=REPRODUCTION_FILENAME)
         except SyntaxError as error:

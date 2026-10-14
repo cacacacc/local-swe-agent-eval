@@ -191,6 +191,9 @@ def test_reproduction_ablation_removes_only_the_implementation_instruction() -> 
     assert "`.agent-issue-repro.py`" in enabled
     assert "`.agent-issue-repro.py`" not in disabled
     assert "parent scheduler owns test execution" in disabled
+    assert "guarded Bash tool rejects test execution" in enabled
+    assert "use Edit to replace the placeholder" in enabled
+    assert "`.agent-test-file.txt`" in enabled
 
 
 @pytest.mark.parametrize("task_count", [15, 20, 30])

@@ -21,7 +21,7 @@ def run_git(path: Path, *arguments: str) -> str:
 
 
 def test_collect_patch_includes_agent_commits_and_untracked_files(tmp_path: Path) -> None:
-    """After the Agent commits on its own, the full patch relative to base_commit must still be exported so valid fixes are not lost."""
+    """Committed source fixes remain visible while a newly added root scratch test is excluded."""
 
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -57,8 +57,50 @@ def test_collect_patch_includes_agent_commits_and_untracked_files(tmp_path: Path
 
     assert "-VALUE = 1" in patch
     assert "+VALUE = 2" in patch
-    assert "new_test.py" in patch
-    assert "+assert True" in patch
+    assert "new_test.py" not in patch
+    assert "+assert True" not in patch
+
+
+def test_collect_patch_excludes_only_new_root_scratch_tests(tmp_path: Path) -> None:
+    """Root scratch reproductions cannot enter saved or Docker patches, but existing and nested tests remain."""
+
+    from agent.test_sandbox import VisibleTestSandbox
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    run_git(repository, "init")
+    run_git(repository, "config", "user.name", "Run Manager Test")
+    run_git(repository, "config", "user.email", "run-manager@example.invalid")
+    (repository / "source.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (repository / "test_existing.py").write_text("assert True\n", encoding="utf-8")
+    run_git(repository, "add", "source.py", "test_existing.py")
+    run_git(repository, "commit", "-m", "base")
+    base_commit = run_git(repository, "rev-parse", "HEAD")
+    session = RunManager(tmp_path / "runs").start(
+        SWEbenchTask(
+            instance_id="owner__repo-scratch", repo="owner/repo",
+            base_commit=base_commit, problem_statement="Fix it.",
+        ),
+        phase="dev", agent="claude-code", model="qwen3.5:9b", prompt="prompt\n",
+    )
+    (repository / "source.py").write_text("VALUE = 2\n", encoding="utf-8")
+    (repository / "test_existing.py").write_text("assert VALUE == 2\n", encoding="utf-8")
+    (repository / "test_repro.py").write_text("assert True\n", encoding="utf-8")
+    (repository / "simple_ordered_test.py").write_text("assert True\n", encoding="utf-8")
+    nested = repository / "tests" / "test_feature.py"
+    nested.parent.mkdir()
+    nested.write_text("assert True\n", encoding="utf-8")
+
+    saved_patch = session.collect_patch(repository)
+    docker_patch = VisibleTestSandbox._collect_patch(repository, base_commit)
+
+    assert saved_patch == docker_patch
+    assert "source.py" in saved_patch
+    assert "test_existing.py" in saved_patch
+    assert "tests/test_feature.py" in saved_patch
+    assert "test_repro.py" not in saved_patch
+    assert "simple_ordered_test.py" not in saved_patch
+    assert (repository / "test_repro.py").exists()
 
 
 def test_collect_patch_excludes_generated_environments_but_keeps_source(

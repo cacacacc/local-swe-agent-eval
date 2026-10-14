@@ -46,7 +46,32 @@ def test_consume_rejects_oversized_reproduction(tmp_path: Path) -> None:
     path.write_text("assert True\n" + "#" * 4096, encoding="utf-8")
     request = consume_issue_reproduction(tmp_path)
     assert request.status == "rejected"
+    assert request.error == "reproduction exceeds 4096 bytes"
     assert not path.exists()
+
+
+def test_rejected_submission_keeps_reason_without_running_docker(tmp_path: Path) -> None:
+    """A rejected script carries its precise validation reason into parent evidence."""
+
+    class NoDockerSandbox:
+        """Any execution of a rejected model script would cross the trust boundary."""
+
+        def run(self, *args, **kwargs):
+            raise AssertionError("rejected reproduction must not run")
+
+    task = SWEbenchTask(
+        instance_id="owner__project-rejected", repo="owner/project",
+        base_commit="abcdef0", problem_statement="Fix it.",
+    )
+    evidence = _execute_issue_reproduction(
+        tmp_path, task=task, base_commit="abcdef0",
+        request=IssueReproductionRequest(
+            "rejected", error="reproduction exceeds 30 lines",
+        ),
+        sandbox=NoDockerSandbox(), task_budget=_TaskBudget.start(0),
+    )
+    assert evidence.status == "rejected"
+    assert evidence.error == "reproduction exceeds 30 lines"
 
 
 def test_parent_compares_issue_assertion_in_docker_not_on_host(tmp_path: Path) -> None:

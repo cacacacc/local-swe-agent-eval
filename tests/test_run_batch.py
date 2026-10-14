@@ -9,12 +9,32 @@ from benchmark.swebench_loader import SWEbenchLoader
 from benchmark.task import SWEbenchTask
 from scripts.run_and_evaluate import AutomatedRunError
 from scripts.run_batch import (
+    _issue_reproduction_summary,
     _load_resume_manifest,
     _next_attempt_run_id,
     _official_result_is_imported,
     select_fixed_tasks,
     write_batch_predictions,
 )
+
+
+def test_issue_reproduction_summary_distinguishes_missing_and_historical_data() -> None:
+    """The batch must count absent submissions and preserve explicit rejection reasons."""
+
+    rows = [
+        {"metrics": {"issue_reproduction": {"submission_status": "missing", "outcome": None}}},
+        {"metrics": {"issue_reproduction": {"submission_status": "accepted", "outcome": "reproduced_fix"}}},
+        {"metrics": {"issue_reproduction": {"submission_status": "rejected", "rejection_reason": "reproduction exceeds 30 lines", "outcome": "rejected"}}},
+        {"metrics": {}},
+    ]
+
+    summary = _issue_reproduction_summary(rows)
+
+    assert summary["submission_counts"] == {
+        "accepted": 1, "missing": 1, "not_recorded": 1, "rejected": 1,
+    }
+    assert summary["outcome_counts"] == {"reproduced_fix": 1, "rejected": 1}
+    assert summary["rejection_reasons"] == {"reproduction exceeds 30 lines": 1}
 
 
 def make_snapshot(count: int) -> SWEbenchLoader:

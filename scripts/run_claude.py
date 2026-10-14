@@ -1559,7 +1559,10 @@ def run_claude_task(
     candidate_checkpoint = ""
     candidate_checkpoint_syntax_valid = False
     final_syntax_error = False
-    implementation_reproduction = IssueReproductionRequest("missing")
+    implementation_reproduction = IssueReproductionRequest(
+        "missing" if config.agent.issue_reproduction_enabled else "disabled"
+    )
+    latest_reproduction: IssueReproductionEvidence | None = None
 
     def append_model_phase(name: str, phase_result: ClaudeCodeResult) -> IssueReproductionRequest:
         """Remove control artifacts and save the actual patch before another stage edits it."""
@@ -1568,6 +1571,10 @@ def run_claude_task(
         # A model-written control file is never part of the candidate handed to the next stage.
         consume_test_plan(repository)
         reproduction = consume_issue_reproduction(repository)
+        if not config.agent.issue_reproduction_enabled:
+            # The ablation removes both the instruction and execution while still
+            # consuming a stray control file before patch collection.
+            reproduction = IssueReproductionRequest("disabled")
         if name == "implementation" and reproduction.accepted:
             session.write_issue_reproduction(reproduction.code)
         handoff.record_model(
@@ -1636,6 +1643,7 @@ def run_claude_task(
     ) -> IssueReproductionEvidence:
         """Persist bounded baseline/candidate reproduction evidence for this patch."""
 
+        nonlocal latest_reproduction
         evidence = _execute_issue_reproduction(
             repository,
             task=task,
@@ -1644,20 +1652,22 @@ def run_claude_task(
             sandbox=test_sandbox,
             task_budget=task_budget,
         )
-        if evidence.status != "missing":
+        latest_reproduction = evidence
+        if evidence.status not in {"missing", "disabled"}:
             phases.append((name, ClaudeCodeResult(
                 exit_code=0,
                 agent_log="",
                 test_output=evidence.prompt_text(),
                 events=({
                     "event_type": "issue_reproduction",
-                    "details": {"status": evidence.status},
+                    "details": {"status": evidence.status, "error": evidence.error},
                 },),
                 timed_out=False,
                 metrics={
                     "agent_turns": 0,
                     "tool_calls": 0,
                     "issue_reproduction_status": evidence.status,
+                    "issue_reproduction_error": evidence.error,
                     "baseline_exit_code": (
                         evidence.baseline.exit_code if evidence.baseline is not None else None
                     ),
@@ -1704,6 +1714,7 @@ def run_claude_task(
                 verification_turns=config.agent.verification_turns,
                 max_file_read_lines=config.agent.max_file_read_lines,
                 max_tool_output_chars=config.agent.max_tool_output_chars,
+                issue_reproduction_enabled=config.agent.issue_reproduction_enabled,
             )
             implementation_result = _runner(
                 config,
@@ -1943,7 +1954,7 @@ def run_claude_task(
                         ),
                         issue_reproduction_evidence=(
                             recovery_reproduction.prompt_text()
-                            if recovery_reproduction.status != "missing" else ""
+                            if recovery_reproduction.status not in {"missing", "disabled"} else ""
                         ),
                         handoff_text=handoff.render_for_prompt(),
                     )
@@ -2078,7 +2089,7 @@ def run_claude_task(
                     ),
                     issue_reproduction_evidence=(
                         initial_reproduction.prompt_text()
-                        if initial_reproduction.status != "missing" else ""
+                        if initial_reproduction.status not in {"missing", "disabled"} else ""
                     ),
                     handoff_text=handoff.render_for_prompt(),
                 )
@@ -2171,7 +2182,7 @@ def run_claude_task(
                         ),
                         issue_reproduction_evidence=(
                             final_reproduction.prompt_text()
-                            if final_reproduction.status != "missing" else ""
+                            if final_reproduction.status not in {"missing", "disabled"} else ""
                         ),
                         handoff_text=handoff.render_for_prompt(),
                     )
@@ -2237,7 +2248,7 @@ def run_claude_task(
                 timeout_seconds=task_budget.limit(config.agent.timeout_seconds),
                 base_url=base_url,
             ).run(repository, prompt)
-            append_model_phase("implementation", result)
+            implementation_reproduction = append_model_phase("implementation", result)
             task_budget.ensure_remaining()
         patch = session.collect_patch(repository)
         patch, result = _select_source_checkpoint(
@@ -2282,13 +2293,21 @@ def run_claude_task(
         )
         raise
 
+    # A missing submission is still a measured outcome. Phase-only metrics omit
+    # missing requests entirely, which previously made uptake impossible to audit.
+    final_metrics = dict(result.metrics)
+    final_metrics["issue_reproduction"] = {
+        "submission_status": implementation_reproduction.status,
+        "rejection_reason": implementation_reproduction.error,
+        "outcome": latest_reproduction.status if latest_reproduction is not None else None,
+    }
     session.finalize(
         exit_code=result.exit_code,
         agent_log=result.agent_log,
         test_output=result.test_output,
         events=result.events,
         patch=patch,
-        metrics=result.metrics,
+        metrics=final_metrics,
     )
     return session.path
 

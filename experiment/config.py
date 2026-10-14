@@ -156,6 +156,7 @@ class AgentSettings:
     visible_test_timeout_seconds: int
     visible_regression_test_timeout_seconds: int
     task_timeout_seconds: int
+    issue_reproduction_enabled: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,6 +315,7 @@ class ExperimentConfig:
                 "visible_test_timeout_seconds",
                 "visible_regression_test_timeout_seconds",
                 "task_timeout_seconds",
+                "issue_reproduction_enabled",
             },
         )
         framework = _string(agent_raw["framework"], "agent.framework")
@@ -383,6 +385,10 @@ class ExperimentConfig:
                 agent_raw.get("task_timeout_seconds", 0),
                 "agent.task_timeout_seconds",
                 minimum=0,
+            ),
+            issue_reproduction_enabled=_boolean(
+                agent_raw.get("issue_reproduction_enabled", True),
+                "agent.issue_reproduction_enabled",
             ),
         )
         reserved_turns = agent.verification_turns
@@ -557,6 +563,7 @@ class ExperimentConfig:
                 self.agent.visible_regression_test_timeout_seconds
             ),
             "task_timeout_seconds": self.agent.task_timeout_seconds,
+            "issue_reproduction_enabled": self.agent.issue_reproduction_enabled,
             "network_during_solving": self.network.formal_solving,
             "evaluation_max_workers": self.evaluation.max_workers,
             "evaluation_cache_level": self.evaluation.cache_level,

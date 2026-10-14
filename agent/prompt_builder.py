@@ -71,6 +71,7 @@ def build_implementation_phase_prompt(
     verification_turns: int,
     max_file_read_lines: int,
     max_tool_output_chars: int,
+    issue_reproduction_enabled: bool = True,
 ) -> str:
     """Append the patch delivery point and context budget guardrails for the implementation phase.
 
@@ -81,6 +82,15 @@ def build_implementation_phase_prompt(
     host environment.
     """
 
+    reproduction_instruction = (
+        "- After making the source fix, if the issue describes a concrete edge case, "
+        "use Write to submit `.agent-issue-repro.py`: at most 30 lines of Python, "
+        "with one assert of the expected public behavior. The parent removes this "
+        "file from the patch and compares it on baseline and candidate in offline "
+        "Docker. Do not run it on the host or use hidden tests. Do not delay the source "
+        "fix solely to write a reproduction.\n"
+        if issue_reproduction_enabled else ""
+    )
     return (
         f"{base_prompt.rstrip()}\n\n"
         "Current phase: implementation\n"
@@ -95,12 +105,7 @@ def build_implementation_phase_prompt(
         "on the host. The parent scheduler owns test execution after this phase.\n"
         "- Do not create `.agent-test-plan.json`; the parent scheduler selects visible "
         "test commands deterministically from the repository and candidate patch.\n"
-        "- After making the source fix, if the issue describes a concrete edge case, "
-        "use Write to submit `.agent-issue-repro.py`: at most 30 lines of Python, "
-        "with one assert of the expected public behavior. The parent removes this "
-        "file from the patch and compares it on baseline and candidate in offline "
-        "Docker. Do not run it on the host or use hidden tests. Do not delay the source "
-        "fix solely to write a reproduction.\n"
+        f"{reproduction_instruction}"
         f"- A fresh verification session owns the final {verification_turns} turns, so "
         "leave the working tree with your best concrete patch even if local dependencies "
         "prevent tests from running.\n"

@@ -275,6 +275,26 @@ the run artifact, and executes the same script on the baseline and candidate in
 the offline Docker image using parent-owned `python -c` argv. Its comparison is
 diagnostic, not a correctness gate; a still-failing assertion can use the reserved
 focused repair turns. The script never becomes part of the SWE-bench prediction.
+Each task now records whether the assertion was accepted, rejected, or missing,
+including the rejection reason. The batch summary counts all three outcomes;
+older runs without this metric are counted separately as `not_recorded`.
+Newly added root-level scratch Python tests and reproductions are also excluded
+from both visible-test and final patches, while existing root tests and nested
+repository tests remain eligible. The workspace files are not deleted.
+
+To isolate the incremental issue-reproduction instruction and its Docker execution,
+two frozen configs select the same five seed-43 tasks that regressed in the latest
+30-task comparison. They differ only in `agent.issue_reproduction_enabled`, so
+their fingerprints differ without changing test selection, model, or turn budgets.
+The launcher still prepares the virtual environment, Docker, and Ollama; use
+distinct batch IDs for the two arms:
+
+```bash
+TASK_SEED=43 ISSUE_REPRO_ABLATION=on ./scripts/run_evaluation_v2_seed42.sh 5
+TASK_SEED=43 ISSUE_REPRO_ABLATION=off ./scripts/run_evaluation_v2_seed42.sh 5
+```
+
+These are new experiments, not a continuation of a completed 30-task batch.
 
 Project tests run through the cached official instance image rather than the
 orchestration repository's Python environment. Parent-scheduled calls apply the

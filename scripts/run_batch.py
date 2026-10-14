@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -223,6 +224,36 @@ def _result_row(run_path: Path, task: SWEbenchTask) -> dict[str, Any]:
     }
 
 
+def _issue_reproduction_summary(rows: Sequence[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    """Count every task's submission state and keep rejected reasons visible.
+
+    Historical runs lack the metric entirely, so ``not_recorded`` must remain
+    distinct from a measured ``missing`` submission when resuming or comparing
+    batches across versions.
+    """
+
+    submissions: Counter[str] = Counter()
+    outcomes: Counter[str] = Counter()
+    rejected_reasons: Counter[str] = Counter()
+    for row in rows:
+        metrics = row.get("metrics", {})
+        reproduction = metrics.get("issue_reproduction", {}) if isinstance(metrics, dict) else {}
+        if not isinstance(reproduction, dict):
+            reproduction = {}
+        status = reproduction.get("submission_status") or "not_recorded"
+        submissions[status] += 1
+        outcome = reproduction.get("outcome")
+        if outcome:
+            outcomes[outcome] += 1
+        if status == "rejected":
+            rejected_reasons[reproduction.get("rejection_reason") or "unspecified"] += 1
+    return {
+        "submission_counts": dict(sorted(submissions.items())),
+        "outcome_counts": dict(sorted(outcomes.items())),
+        "rejection_reasons": dict(sorted(rejected_reasons.items())),
+    }
+
+
 def _official_result_is_imported(run_path: Path, harness_run_id: str) -> bool:
     """Check whether the same harness's official result has been imported, supporting continuation at the summary stage."""
 
@@ -435,6 +466,7 @@ def run_batch(arguments: argparse.Namespace) -> Path:
             "task_count": len(rows),
             "resolved_count": resolved_count,
             "resolved_rate": resolved_count / len(rows),
+            "issue_reproduction": _issue_reproduction_summary(rows),
             "tasks": rows,
         }
         summary_path = batch_path / "summary.json"

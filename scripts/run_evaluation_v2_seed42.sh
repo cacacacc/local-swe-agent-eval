@@ -6,6 +6,7 @@
 #   ./scripts/run_evaluation_v2_seed42.sh 15
 #   ./scripts/run_evaluation_v2_seed42.sh 20
 #   ./scripts/run_evaluation_v2_seed42.sh 30
+#   TASK_SEED=43 ISSUE_REPRO_ABLATION=off ./scripts/run_evaluation_v2_seed42.sh 5
 #
 # The entry point puts the project's .venv at the front of PATH, so callers need not activate the virtualenv first.
 # Before the official run it starts Docker Desktop and Ollama on demand and waits until they are truly usable; the script
@@ -23,16 +24,16 @@ set -Eeuo pipefail
 # Accept only task-set sizes already frozen and verified in the repo, so a typo cannot point to a nonexistent config.
 TASK_COUNT="${1:-20}"
 case "${TASK_COUNT}" in
-    15|20|30) ;;
+    5|15|20|30) ;;
     *)
-        printf 'Usage: %s {15|20|30}\n' "$0" >&2
+        printf 'Usage: %s {5|15|20|30}\n' "$0" >&2
         exit 2
         ;;
 esac
 
 TASK_SEED="${TASK_SEED:-42}"
 case "${TASK_SEED}:${TASK_COUNT}" in
-    42:15|42:20|42:30|43:30) ;;
+    42:15|42:20|42:30|43:30|43:5) ;;
     *)
         printf 'Unsupported task-set combination: seed=%s tasks=%s\n' "${TASK_SEED}" "${TASK_COUNT}" >&2
         exit 2
@@ -45,10 +46,28 @@ PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 PYTHON_BIN="${PROJECT_ROOT}/.venv/bin/python"
 CONFIG_PATH="${PROJECT_ROOT}/configs/evaluation_v2_${TASK_COUNT}_seed${TASK_SEED}.yaml"
 TASKS_PATH="${PROJECT_ROOT}/prepared/evaluation_tasks_${TASK_COUNT}_seed${TASK_SEED}.jsonl"
+if [[ "${TASK_SEED}:${TASK_COUNT}" == "43:5" ]]; then
+    # Both arms use exactly the same frozen five IDs and the existing 30-task
+    # snapshot; only the issue-reproduction switch differs in their configs.
+    ISSUE_REPRO_ABLATION="${ISSUE_REPRO_ABLATION:-}"
+    case "${ISSUE_REPRO_ABLATION}" in
+        on|off) ;;
+        *)
+            printf 'For seed 43 and five tasks, set ISSUE_REPRO_ABLATION=on or off.\n' >&2
+            exit 2
+            ;;
+    esac
+    CONFIG_PATH="${PROJECT_ROOT}/configs/evaluation_v2_5_seed43_repro_${ISSUE_REPRO_ABLATION}.yaml"
+    TASKS_PATH="${PROJECT_ROOT}/prepared/evaluation_tasks_30_seed43.jsonl"
+fi
 SWEBENCH_ROOT="${SWEBENCH_ROOT:-${HOME}/src/SWE-bench}"
 # The new cache/total-budget protocol changes the config fingerprint, so the default batch name must stay isolated from old results;
 # when BATCH_ID is set explicitly, the caller's experiment naming is still respected.
-BATCH_ID="${BATCH_ID:-evaluation-v2-qwen35-${TASK_COUNT}-seed${TASK_SEED}-budget-cache-v1}"
+DEFAULT_BATCH_ID="evaluation-v2-qwen35-${TASK_COUNT}-seed${TASK_SEED}-budget-cache-v1"
+if [[ "${TASK_SEED}:${TASK_COUNT}" == "43:5" ]]; then
+    DEFAULT_BATCH_ID="evaluation-v2-qwen35-5-seed43-repro-${ISSUE_REPRO_ABLATION}-v1"
+fi
+BATCH_ID="${BATCH_ID:-${DEFAULT_BATCH_ID}}"
 LOCAL_MODEL_BASE_URL="${LOCAL_MODEL_BASE_URL:-http://localhost:11434}"
 RESUME_BATCH="${RESUME_BATCH:-0}"
 

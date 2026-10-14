@@ -70,6 +70,32 @@ def patch_pathspecs(repository: Path | str | None = None) -> tuple[str, ...]:
     return (".", *dict.fromkeys(excludes))
 
 
+def exclude_new_root_reproductions(patch: str) -> str:
+    """Drop newly added root-level scratch tests while retaining tracked and nested tests.
+
+    SWE-bench repositories keep their real tests in package-specific directories.
+    A model-created root ``test_*.py`` or ``*_test.py`` is normally a scratch
+    reproduction; including it in the prediction can make a test-only patch look
+    substantive. Restricting this rule to ``new file mode`` preserves edits to
+    pre-existing root tests and avoids deleting anything from the worktree.
+    """
+
+    sections = re.split(r"(?=^diff --git )", patch, flags=re.MULTILINE)
+    kept: list[str] = []
+    for section in sections:
+        match = re.match(r"diff --git a/(.+?) b/(.+?)\n", section)
+        if match is not None and re.search(r"^new file mode [0-7]+$", section, re.MULTILINE):
+            path = Path(match.group(2))
+            name = path.name.lower()
+            if len(path.parts) == 1 and path.suffix.lower() == ".py" and (
+                name.startswith(("test_", "repro"))
+                or name.endswith(("_test.py", "_repro.py", "_reproduction.py"))
+            ):
+                continue
+        kept.append(section)
+    return "".join(kept)
+
+
 def _utc_now() -> str:
     """Produce a timezone-aware UTC timestamp so different machines' local timezones cause no ambiguity."""
 
@@ -115,7 +141,7 @@ class RunSession:
             "--",
             *patch_pathspecs(repository_path),
         )
-        return self._run_git(
+        patch = self._run_git(
             repository_path,
             "diff",
             "--binary",
@@ -124,6 +150,7 @@ class RunSession:
             "--",
             *patch_pathspecs(repository_path),
         )
+        return exclude_new_root_reproductions(patch)
 
     def write_handoff(self, snapshot: Mapping[str, Any]) -> None:
         """Persist each stage's latest handoff atomically before the next stage starts."""

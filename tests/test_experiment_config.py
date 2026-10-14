@@ -156,6 +156,43 @@ def test_evaluation_v2_is_frozen_as_a_separate_ablation() -> None:
     assert ablation.agent.task_timeout_seconds == 1800
 
 
+def test_reproduction_ablation_configs_have_only_one_semantic_difference() -> None:
+    """The paired five-task experiment must isolate the reproduction switch and change its fingerprint."""
+
+    on_path = PROJECT_ROOT / "configs" / "evaluation_v2_5_seed43_repro_on.yaml"
+    off_path = PROJECT_ROOT / "configs" / "evaluation_v2_5_seed43_repro_off.yaml"
+    on = ExperimentConfig.load(on_path)
+    off = ExperimentConfig.load(off_path)
+    on.require_frozen()
+    off.require_frozen()
+    on_raw = yaml.safe_load(on_path.read_text(encoding="utf-8"))
+    off_raw = yaml.safe_load(off_path.read_text(encoding="utf-8"))
+    assert on_raw["agent"].pop("issue_reproduction_enabled") is True
+    assert off_raw["agent"].pop("issue_reproduction_enabled") is False
+    assert on_raw == off_raw
+    assert on.fingerprint != off.fingerprint
+    ids = json.loads(on.tasks_path.read_text(encoding="utf-8"))
+    assert len(ids) == len(set(ids)) == 5
+
+
+def test_reproduction_ablation_removes_only_the_implementation_instruction() -> None:
+    """Turning off issue reproduction leaves the rest of the implementation protocol intact."""
+
+    options = {
+        "implementation_turns": 30,
+        "verification_turns": 10,
+        "max_file_read_lines": 200,
+        "max_tool_output_chars": 12000,
+    }
+    enabled = build_implementation_phase_prompt("issue", **options)
+    disabled = build_implementation_phase_prompt(
+        "issue", **options, issue_reproduction_enabled=False,
+    )
+    assert "`.agent-issue-repro.py`" in enabled
+    assert "`.agent-issue-repro.py`" not in disabled
+    assert "parent scheduler owns test execution" in disabled
+
+
 @pytest.mark.parametrize("task_count", [15, 20, 30])
 def test_extended_evaluation_v2_configs_are_frozen_and_sized(task_count: int) -> None:
     """Extended evaluations must be frozen, and the config name, task list, and declared size must stay consistent."""
@@ -182,7 +219,8 @@ def test_seed43_tasks_are_frozen_and_disjoint_from_every_existing_set() -> None:
     task_ids = json.loads(config.tasks_path.read_text(encoding="utf-8"))
     previous_ids: set[str] = set()
     for path in sorted((PROJECT_ROOT / "experiments").glob("*tasks*.json")):
-        if path == config.tasks_path:
+        # The five-task ablation intentionally reuses this frozen seed-43 set.
+        if path == config.tasks_path or path.name == "evaluation_tasks_5_seed43_regressions.json":
             continue
         previous_ids.update(json.loads(path.read_text(encoding="utf-8")))
 

@@ -18,7 +18,7 @@ import time
 import uuid
 from typing import Sequence
 
-from tracking.run_manager import patch_pathspecs
+from tracking.run_manager import exclude_new_root_reproductions, patch_pathspecs
 
 
 class TestSandboxError(RuntimeError):
@@ -404,7 +404,7 @@ class VisibleTestSandbox:
         )
         if diff.returncode != 0:
             raise TestSandboxError(diff.stderr.strip() or "git diff failed")
-        return diff.stdout
+        return exclude_new_root_reproductions(diff.stdout)
 
     @staticmethod
     def _container_name(instance_id: str) -> str:

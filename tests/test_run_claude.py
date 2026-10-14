@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 import subprocess
 
+import pytest
+
 from agent.claude_runner import ClaudeCodeResult
 from agent.handoff import HandoffLedger
 from agent.issue_reproduction import REPRODUCTION_FILENAME
@@ -348,7 +350,107 @@ def test_implementation_reproduction_is_run_and_excluded_from_patch(
     assert runner_options[2]["available_tools"] == ("Read", "Edit")
     assert result["metrics"]["phases"]["issue_reproduction_initial"]["issue_reproduction_status"] == "still_failing"
     assert result["metrics"]["phases"]["issue_reproduction_post_repair"]["issue_reproduction_status"] == "reproduced_fix"
+    assert result["metrics"]["issue_reproduction"] == {
+        "submission_status": "accepted",
+        "rejection_reason": None,
+        "outcome": "reproduced_fix",
+    }
     assert (run_path / "issue_reproduction.py").exists()
+    assert REPRODUCTION_FILENAME not in (run_path / "patch.diff").read_text(encoding="utf-8")
+    assert not (repository / REPRODUCTION_FILENAME).exists()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_unusable_issue_reproduction_does_not_reach_docker(
+    tmp_path: Path, monkeypatch, enabled: bool,
+) -> None:
+    """Disabled and rejected scripts never run in Docker; each status remains auditable."""
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    source = repository / "src" / "widget.py"
+    source.parent.mkdir()
+    source.write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(repository), "add", "src/widget.py"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "-c", "user.name=Test",
+         "-c", "user.email=test@example.invalid", "commit", "-qm", "base"],
+        check=True,
+    )
+    base_commit = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    prompts: list[str] = []
+
+    class FakeAgent:
+        """Write a malformed control file in either experimental arm."""
+
+        def run(self, worktree, prompt):
+            prompts.append(prompt)
+            if "Current phase: implementation" in prompt:
+                source.write_text("value = 2\n", encoding="utf-8")
+                (repository / REPRODUCTION_FILENAME).write_text(
+                    "print('no assertion')\n", encoding="utf-8",
+                )
+            return _result()
+
+    class FakeSandbox:
+        """Allow only syntax preflight; any reproduction command is a regression."""
+
+        timeout_seconds = 120
+
+        def __init__(self, **kwargs):
+            pass
+
+        def resolve_image(self, instance_id):
+            return "swebench/example:latest"
+
+        def image_digest(self, image):
+            return "sha256:test"
+
+        def syntax_preflight(self, repository, **kwargs):
+            return VisibleTestResult(
+                exit_code=0, output="", image="swebench/example:latest",
+                timed_out=False, command_started=True,
+            )
+
+        def run(self, *args, **kwargs):
+            raise AssertionError("disabled or rejected reproduction must not start Docker")
+
+    monkeypatch.setattr("scripts.run_claude._runner", lambda *args, **kwargs: FakeAgent())
+    monkeypatch.setattr("scripts.run_claude.VisibleTestSandbox", FakeSandbox)
+    monkeypatch.setattr(
+        "scripts.run_claude.RuntimeFingerprintCollector.collect",
+        lambda self: {"schema_version": 1},
+    )
+    task = SWEbenchTask(
+        instance_id="owner__project-repro-control", repo="owner/project",
+        base_commit=base_commit, problem_statement="Value should equal two.",
+    )
+    run_path = run_claude_task(
+        task, repository,
+        ExperimentConfig.load(
+            PROJECT_ROOT / "configs" / f"evaluation_v2_5_seed43_repro_{'on' if enabled else 'off'}.yaml"
+        ),
+        tmp_path / "runs", base_url="http://localhost:11434",
+        workspace_base_commit=base_commit,
+    )
+    result = json.loads((run_path / "result.json").read_text(encoding="utf-8"))
+    assert ("`.agent-issue-repro.py`" in prompts[0]) is enabled
+    expected_status = "rejected" if enabled else "disabled"
+    expected_reason = "reproduction requires an assert" if enabled else None
+    assert result["metrics"]["issue_reproduction"] == {
+        "submission_status": expected_status,
+        "rejection_reason": expected_reason,
+        "outcome": expected_status,
+    }
+    phases = result["metrics"]["phases"]
+    if enabled:
+        assert phases["issue_reproduction_initial"]["issue_reproduction_error"] == expected_reason
+    else:
+        assert not any(name.startswith("issue_reproduction_") for name in phases)
     assert REPRODUCTION_FILENAME not in (run_path / "patch.diff").read_text(encoding="utf-8")
     assert not (repository / REPRODUCTION_FILENAME).exists()
 
@@ -1250,6 +1352,11 @@ def test_nonempty_patch_reaches_verification_when_parent_plan_is_missing(
     assert "verification" in result["metrics"]["phases"]
     assert "test_protocol_gate" not in result["metrics"]["phases"]
     assert result["metrics"]["visible_test_missing"] == 2
+    assert result["metrics"]["issue_reproduction"] == {
+        "submission_status": "missing",
+        "rejection_reason": None,
+        "outcome": "missing",
+    }
     assert "value = 2" in (run_path / "candidate_patch.diff").read_text(encoding="utf-8")
     handoff = json.loads((run_path / "handoff.json").read_text(encoding="utf-8"))
     assert [entry["stage"] for entry in handoff["history"]] == [
